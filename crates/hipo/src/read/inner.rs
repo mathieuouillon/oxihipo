@@ -96,6 +96,21 @@ impl FileInner {
     pub fn advise_parallel(&self) {
         let _ = self.mmap.advise(Advice::Normal);
     }
+
+    /// Hint the kernel to start asynchronously reading the byte range
+    /// `[offset, offset + len)` into the page cache (`MADV_WILLNEED`).
+    /// On a network filesystem (Lustre at JLab `/volatile` and `/cache`)
+    /// the parallel runners issue this per selected record before the
+    /// worker pool starts, so I/O pipelines with decompression; on local
+    /// disk the call is effectively a no-op.
+    pub fn prefetch_range(&self, offset: usize, len: usize) {
+        let _ = self.mmap.advise_range(Advice::WillNeed, offset, len);
+    }
+
+    /// Like [`Self::prefetch_range`], but over the entire file.
+    pub fn prefetch_all(&self) {
+        let _ = self.mmap.advise(Advice::WillNeed);
+    }
 }
 
 /// Read every dictionary event in the file's user-header record and add the

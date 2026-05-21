@@ -33,6 +33,9 @@ fn main() -> Result<()> {
 
     // `Chain::open` dispatches on file / directory / glob pattern.
     let chain = Chain::open(&path)?;
+    // Async-prefetch the whole file's pages so the sequential pass below
+    // gets the same I/O priming the parallel pass receives automatically.
+    chain.prefetch();
     let events = chain.event_count();
     eprintln!(
         "bench_par: {} file(s), {events} events, {} records",

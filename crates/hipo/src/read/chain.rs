@@ -295,6 +295,20 @@ impl Chain {
         ))
     }
 
+    /// Hint the kernel to start reading every file in the chain into the
+    /// page cache asynchronously (`MADV_WILLNEED`). Best on shared
+    /// filesystems (JLab `/cache` / `/volatile` Lustre, NFS) before a
+    /// sequential [`Self::events`] loop; harmless elsewhere.
+    ///
+    /// The parallel runners ([`Self::par_for_each`], [`Self::par_reduce`])
+    /// already prefetch the records they'll touch, so calling this before
+    /// a parallel run is unnecessary.
+    pub fn prefetch(&self) {
+        for inner in &self.files {
+            inner.prefetch_all();
+        }
+    }
+
     // ---- Parallel analysis ----------------------------------------------
 
     /// Run `f` on every event across every file in parallel. Order is
@@ -322,6 +336,14 @@ impl Chain {
         let files = &self.files;
         for inner in files {
             inner.advise_parallel();
+        }
+        // Kick the kernel to start reading every selected record's pages
+        // now, in parallel with the worker pool's decompression — the
+        // headline win on shared filesystems (Lustre etc.).
+        for &(fi, ri) in &tasks {
+            let inner = &files[fi];
+            let span = &inner.index.records()[ri];
+            inner.prefetch_range(span.file_offset as usize, span.record_length as usize);
         }
 
         pool.install(|| -> Result<()> {
@@ -399,6 +421,14 @@ impl Chain {
         let files = &self.files;
         for inner in files {
             inner.advise_parallel();
+        }
+        // Kick the kernel to start reading every selected record's pages
+        // now, in parallel with the worker pool's decompression — the
+        // headline win on shared filesystems (Lustre etc.).
+        for &(fi, ri) in &tasks {
+            let inner = &files[fi];
+            let span = &inner.index.records()[ri];
+            inner.prefetch_range(span.file_offset as usize, span.record_length as usize);
         }
 
         pool.install(|| -> Result<H> {

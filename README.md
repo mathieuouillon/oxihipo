@@ -157,6 +157,35 @@ cargo run -p hipo --release --example bench_par -- /path/to/file.hipo 0
   default), for allocation-heavy workloads where the system allocator
   underperforms on macOS.
 
+## Performance on shared filesystems
+
+When the input lives on a network filesystem — JLab ifarm's `/volatile` and
+`/cache` (Lustre), NFS, etc. — `mmap` page-faults become many small RPCs
+and dominate wall time. `hipo` mitigates this in two places:
+
+- **Parallel runs** (`Chain::par_for_each` / `Chain::par_reduce`) auto-issue
+  `MADV_WILLNEED` over each selected record before the worker pool starts,
+  so the kernel reads pages in parallel with worker decompression. Nothing
+  to call — it's automatic.
+- **Sequential runs** can opt in by calling `chain.prefetch()` once after
+  open and before the loop:
+
+  ```rust
+  let chain = Chain::open(file)?;
+  chain.prefetch();
+  for ev in chain.events() { /* … */ }
+  ```
+
+If you are still I/O-bound after that, the levers are user-side:
+
+- **File striping.** A Lustre file on a single OST is bandwidth-capped no
+  matter the thread count. New outputs: `lfs setstripe -c 4 outfile.hipo`;
+  existing files: `lfs migrate -c 4 file.hipo`.
+- **Thread oversubscription.** Pass `threads = 2 × num_cpus` to
+  `par_reduce` to hide network page-fault stalls.
+- **Stage to local scratch.** `cp /volatile/.../file.hipo /scratch/$USER/`
+  before analysing — local disk easily beats Lustre per single client.
+
 ## Known gaps
 
 - `SortedWriter` and `StreamWriter` (per-tag bin writers, auto-flush) —
