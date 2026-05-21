@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hipo",
+    "crates/hipo-analysis",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "Apache-2.0"
+repository = "https://github.com/gavalian/hipo"
+authors = ["hipo-rs contributors"]
+
+[workspace.dependencies]
+thiserror = "2"
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-decode"] }
+flate2 = { version = "1", features = ["zlib-rs"] }
+memmap2 = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1"
+glob = "0.3"
+ndhistogram = { version = "0.12", features = ["serde"] }
+dyn-clone = "1"
+clap = { version = "4", features = ["derive"] }
+criterion = { version = "0.7", features = ["html_reports"] }
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
+strip = "none"
+
+[profile.bench]
+inherits = "release"
+debug = true
+strip = "none"
+
+[profile.dev]
+opt-level = 1   # readers chew through MB; pure -O0 is too painful

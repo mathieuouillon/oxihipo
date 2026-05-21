@@ -1,0 +1,31 @@
+# Build artifacts
+/target
+**/*.rs.bk
+
+# Profiling
+*.profraw
+*.profdata
+perf.data*
+flamegraph.svg
+
+# Editor backups & swap files
+*~
+*.swp
+*.swo
+
+# IDE state
+.idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Local fixtures (large data files kept outside the repo)
+fixtures/large/
+
+# Local env / secrets
+.env
+.env.local
+
+# Local tooling
+.claude/
