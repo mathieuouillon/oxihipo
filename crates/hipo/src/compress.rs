@@ -86,7 +86,14 @@ pub fn decompress(
             dst.extend_from_slice(&src[..expected]);
             Ok(())
         }
-        CompressionType::Lz4 | CompressionType::Lz4Best => {
+        CompressionType::Lz4
+        | CompressionType::Lz4Best
+        | CompressionType::Lz4Chunked
+        | CompressionType::Lz4ByBank => {
+            // `Lz4Chunked` / `Lz4ByBank` reach this point only when their
+            // record decoders hand us a single inner LZ4 block; their
+            // record-level wrappers always pass `Lz4` explicitly. Routing
+            // the tags through here keeps the match exhaustive.
             // Apple's `compression_decode_buffer` returns 0 for both
             // "empty output" and "failure", so we can't distinguish them.
             // Short-circuit the empty case so the proptest with `data
@@ -203,6 +210,102 @@ pub fn decompress(
     }
 }
 
+/// Decompress `src` into a caller-provided slice `dst`. Writes exactly
+/// `dst.len()` bytes and returns the count produced (which must equal
+/// `dst.len()` for LZ4 streams produced from inputs of that size).
+///
+/// This is the slice-only variant used by the chunked-record decoder:
+/// the destination is a `split_at_mut` view into a single record-wide
+/// buffer, so per-chunk inflate can run in parallel without owning a
+/// separate `Vec` per chunk.
+pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) -> Result<usize> {
+    let expected = dst.len();
+    match kind {
+        CompressionType::None => {
+            if src.len() < expected {
+                return Err(HipoError::DecompressUnderflow {
+                    produced: src.len(),
+                    expected,
+                });
+            }
+            dst.copy_from_slice(&src[..expected]);
+            Ok(expected)
+        }
+        CompressionType::Lz4
+        | CompressionType::Lz4Best
+        | CompressionType::Lz4Chunked
+        | CompressionType::Lz4ByBank => {
+            if expected == 0 {
+                return Ok(0);
+            }
+            #[cfg(all(feature = "lz4-apple", target_os = "macos"))]
+            let produced = {
+                // SAFETY: src/dst are valid; the function never reads
+                // `dst` and writes ≤ `dst.len()` bytes.
+                let n = unsafe {
+                    apple_compression::compression_decode_buffer(
+                        dst.as_mut_ptr(),
+                        dst.len(),
+                        src.as_ptr(),
+                        src.len(),
+                        std::ptr::null_mut(),
+                        apple_compression::COMPRESSION_LZ4_RAW,
+                    )
+                };
+                if n == 0 {
+                    return Err(HipoError::Compression(
+                        "lz4 decompress failed (apple libcompression)",
+                    ));
+                }
+                n
+            };
+            #[cfg(all(
+                feature = "lz4-c",
+                not(all(feature = "lz4-apple", target_os = "macos"))
+            ))]
+            let produced = {
+                // SAFETY: src/dst are `&[u8]` / `&mut [u8]`; C signature
+                // takes raw pointers + sizes.
+                let n = unsafe {
+                    lz4_sys::LZ4_decompress_safe(
+                        src.as_ptr() as *const i8,
+                        dst.as_mut_ptr() as *mut i8,
+                        src.len() as i32,
+                        dst.len() as i32,
+                    )
+                };
+                if n < 0 {
+                    return Err(HipoError::Compression("lz4 decompress failed (C)"));
+                }
+                n as usize
+            };
+            #[cfg(not(any(all(feature = "lz4-apple", target_os = "macos"), feature = "lz4-c")))]
+            let produced = lz4_flex::block::decompress_into(src, dst)
+                .map_err(|_| HipoError::Compression("lz4 decompress failed"))?;
+
+            if produced < expected {
+                return Err(HipoError::DecompressUnderflow { produced, expected });
+            }
+            Ok(produced)
+        }
+        CompressionType::Gzip => {
+            let mut decoder = flate2::read::GzDecoder::new(src);
+            let mut filled = 0;
+            while filled < expected {
+                let n = decoder.read(&mut dst[filled..]).map_err(HipoError::Io)?;
+                if n == 0 {
+                    return Err(HipoError::DecompressUnderflow {
+                        produced: filled,
+                        expected,
+                    });
+                }
+                filled += n;
+            }
+            Ok(filled)
+        }
+    }
+}
+
 /// Compress `src` into `dst`. Appends to `dst`; returns bytes written.
 pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
     let start = dst.len();
@@ -210,7 +313,15 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
         CompressionType::None => {
             dst.extend_from_slice(src);
         }
-        CompressionType::Lz4 | CompressionType::Lz4Best => {
+        CompressionType::Lz4
+        | CompressionType::Lz4Best
+        | CompressionType::Lz4Chunked
+        | CompressionType::Lz4ByBank => {
+            // `Lz4Chunked` / `Lz4ByBank` are record-level format extensions;
+            // their inner compression units still flow through this same
+            // code path with `Lz4`. The tags route here to keep the match
+            // exhaustive.
+            //
             // Pure-Rust `lz4_flex` doesn't expose an HC (high-compression)
             // mode, so both Lz4 and Lz4Best produce the same output there.
             // With `lz4-c` enabled, `Lz4Best` routes to `LZ4_compress_HC`
@@ -381,6 +492,36 @@ mod tests {
         assert!(s.capacity() >= 4096);
     }
 
+    #[test]
+    fn slice_decompress_lz4_round_trip() {
+        let src_data = b"hello, world. hello, world. hello, world.".to_vec();
+        let mut compressed = Vec::new();
+        compress(CompressionType::Lz4, &src_data, &mut compressed).unwrap();
+
+        let mut out = vec![0u8; src_data.len()];
+        let produced = decompress_into_slice(CompressionType::Lz4, &compressed, &mut out).unwrap();
+        assert_eq!(produced, src_data.len());
+        assert_eq!(out, src_data);
+    }
+
+    #[test]
+    fn slice_decompress_none_round_trip() {
+        let src_data = b"abc".to_vec();
+        let mut out = vec![0u8; 3];
+        let produced = decompress_into_slice(CompressionType::None, &src_data, &mut out).unwrap();
+        assert_eq!(produced, 3);
+        assert_eq!(out, src_data);
+    }
+
+    #[test]
+    fn slice_decompress_lz4_empty() {
+        // The chunked path should accept zero-byte chunks gracefully.
+        let out: [u8; 0] = [];
+        let mut buf: [u8; 0] = [];
+        let produced = decompress_into_slice(CompressionType::Lz4, &out, &mut buf).unwrap();
+        assert_eq!(produced, 0);
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -392,6 +533,38 @@ mod tests {
         #[test]
         fn proptest_gzip_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..16384)) {
             round_trip(CompressionType::Gzip, &data);
+        }
+
+        // Chunked-record round-trip: build a chunked record, parse it
+        // back through the high-level Record API, and assert every
+        // event's bytes match.
+        #[test]
+        fn proptest_lz4_chunked_roundtrip(
+            events in proptest::collection::vec(
+                proptest::collection::vec(any::<u8>(), 0..512),
+                1..32,
+            ),
+            events_per_chunk in 1u32..16,
+        ) {
+            let refs: Vec<&[u8]> = events.iter().map(|e| e.as_slice()).collect();
+            let mut payload_buf = Vec::new();
+            let mut compress_buf = Vec::new();
+            let raw = crate::write::build_record_bytes(
+                &refs,
+                0,
+                0,
+                crate::write::Compression::Lz4Chunked { events_per_chunk },
+                1,
+                &mut payload_buf,
+                &mut compress_buf,
+            ).unwrap();
+
+            let mut rec = crate::wire::record::Record::new();
+            rec.load(&raw).unwrap();
+            prop_assert_eq!(rec.event_count() as usize, events.len());
+            for (i, expected) in events.iter().enumerate() {
+                prop_assert_eq!(rec.event(i as u32).unwrap(), expected.as_slice());
+            }
         }
     }
 }

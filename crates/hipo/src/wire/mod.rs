@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+pub mod by_bank;
 pub mod bytes;
 pub mod constants;
 pub mod event_index;

@@ -186,11 +186,129 @@ If you are still I/O-bound after that, the levers are user-side:
 - **Stage to local scratch.** `cp /volatile/.../file.hipo /scratch/$USER/`
   before analysing — local disk easily beats Lustre per single client.
 
+## When LZ4 itself is the bottleneck: `Lz4Chunked` and `Lz4ByBank`
+
+After page-fault stalls are masked, LZ4 inflate dominates wall time on
+ifarm. The HIPO format stores **one LZ4 block per record**, so a record's
+decompress is one sequential pass on one worker — idle cores on the same
+record don't help, and you can't decompress part of a record without
+inflating all of it.
+
+`Compression::Lz4Chunked { events_per_chunk }` is an opt-in format
+extension that splits each record's events into independently-compressed
+LZ4 chunks with an offset table:
+
+```rust
+use hipo::{Compression, Writer};
+
+# fn run(dict: &hipo::Dict) -> hipo::Result<()> {
+let mut w = Writer::create("out.hipo")
+    .schemas(dict)
+    .compression(Compression::Lz4Chunked { events_per_chunk: 32 })
+    .build()?;
+// ... w.event(|ev| { ... })? ...
+w.finish()?;
+# Ok(()) }
+```
+
+What that unlocks today:
+
+- **Intra-record parallel decompression.** The reader inflates chunks in
+  parallel via `rayon::scope`. Sequential `chain.events()` loops use idle
+  cores; `par_reduce` workers get finer-grained units.
+- **Lays groundwork for partial decompression** — the inline
+  `event_sizes[]` table sits outside any LZ4 stream, so a future
+  filter-pushdown API can decompress only chunks containing wanted
+  events.
+
+Trade-offs:
+
+- **Compression ratio.** Per-chunk LZ4 has less back-reference context
+  than per-record. At `events_per_chunk = 32` the output is typically
+  5–15 % larger; the sweet spot is 32–64.
+- **C++ `hipo4` compatibility.** Files written with `Lz4Chunked` use a
+  new compression tag (4) the C++ reader doesn't know about. Use it for
+  Rust-only consumers, or alongside (not replacing) the standard `Lz4`
+  output. The other variants (`None` / `Lz4` / `Lz4Best` / `Gzip`) stay
+  byte-compatible with `hipo4`.
+
+A `recook` example re-emits an existing `Lz4` file as `Lz4Chunked` for
+A/B benchmarking:
+
+```sh
+cargo run -p hipo --release --example recook -- \
+    /volatile/.../in.hipo /scratch/$USER/out_chunked.hipo 32
+cargo run -p hipo --release --example bench_par -- /scratch/$USER/out_chunked.hipo 0
+```
+
+### `Lz4ByBank` — decompress only the banks you read
+
+`Lz4Chunked` parallelises decompression of *every* bank for *every* event.
+Real analyses typically touch 2–5 banks out of ~30; the other ~85 % is
+wasted LZ4 work.
+
+`Compression::Lz4ByBank` stores each bank type as its own LZ4 stream
+within the record. The reader parses a small directory eagerly, but
+inflates a bank's stream only when `ev.bank(name)` actually asks for it.
+Banks the user never touches stay compressed for the record's lifetime.
+
+```rust
+use hipo::{Compression, Writer};
+
+# fn run(dict: &hipo::Dict) -> hipo::Result<()> {
+let mut w = Writer::create("out.hipo")
+    .schemas(dict)
+    .compression(Compression::Lz4ByBank)
+    .build()?;
+// ... w.event(|ev| { ... })? ...
+w.finish()?;
+# Ok(()) }
+```
+
+No reader-side API change — `for ev in chain.events() { ev.bank("X") }`
+"just works". A scan that only ever calls `ev.bank("REC::Event")` will
+**never** inflate `REC::Particle`'s stream; the partial-decompression
+contract is asserted in tests (`wire::by_bank::tests::touching_one_bank_does_not_inflate_others`).
+
+Measured on a 1.1 GB CLAS12 file (`rec0.hipo`, 289 k events, 195 records,
+local SSD, `bench_par` reads `REC::Particle.rows()` only):
+
+| Format | Sequential | Parallel | Size |
+|---|---:|---:|---:|
+| `Lz4` baseline | 980 kev/s | 5,073 kev/s | 1,135 MB |
+| `Lz4Chunked` E=32 | 2,628 kev/s (2.7×) | 5,881 kev/s (1.2×) | 1,253 MB (+10 %) |
+| **`Lz4ByBank`** | **4,025 kev/s (4.1×)** | **15,675 kev/s (3.1×)** | **1,225 MB (+8 %)** |
+
+Trade-offs:
+
+- **Compression ratio.** Per-bank streams see better cross-event
+  back-reference locality (`REC::Particle` from consecutive events has
+  near-identical layout) — file size is typically *smaller* than
+  `Lz4Chunked` and within 5–10 % of `Lz4`.
+- **No C++ `hipo4` compatibility.** New compression tag (5); same caveat
+  as `Lz4Chunked`. Use for Rust-only consumers.
+- **Memory.** Once a bank is touched anywhere in a record, its
+  decompressed bytes stay alive until the record drops out of the
+  iterator's window. Touching every bank ⇒ same memory profile as `Lz4`.
+
+A `recook_by_bank` example re-emits an existing file as `Lz4ByBank`:
+
+```sh
+cargo run -p hipo --release --example recook_by_bank -- \
+    /volatile/.../in.hipo /scratch/$USER/out_by_bank.hipo
+cargo run -p hipo --release --example bench_par -- /scratch/$USER/out_by_bank.hipo 0
+```
+
 ## Known gaps
 
 - `SortedWriter` and `StreamWriter` (per-tag bin writers, auto-flush) —
   deferred.
 - Bench-vs-`hipo4` comparator — deferred.
+- **Sub-chunked `Lz4ByBank`**: combining `Lz4Chunked`-style intra-stream
+  parallelism with per-bank streams, for very large records where one
+  bank's stream is multi-MB. Per-bank streams already parallelise *across
+  banks* in `par_reduce`; this is the next step if profiles say a single
+  bank dominates.
 
 ## CI gates
 

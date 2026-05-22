@@ -124,6 +124,18 @@ pub enum CompressionType {
     Lz4 = 1,
     Lz4Best = 2,
     Gzip = 3,
+    /// Records whose payload is split into multiple independently-LZ4-
+    /// compressed chunks. Layout described in `wire/record.rs`. Enables
+    /// intra-record parallel decompression and (future) partial decode.
+    /// **Not readable by the C++ `hipo4` reader** — new files written
+    /// with this tag are a Rust-only format extension.
+    Lz4Chunked = 4,
+    /// Records whose payload is split into one LZ4 stream per bank
+    /// type, plus a directory of which events have which banks. Layout
+    /// described in `wire/by_bank.rs`. Enables true partial
+    /// decompression — `ev.bank("name")` inflates only the requested
+    /// bank's stream. **Not readable by the C++ `hipo4` reader.**
+    Lz4ByBank = 5,
 }
 
 impl CompressionType {
@@ -133,6 +145,8 @@ impl CompressionType {
             1 => Some(Self::Lz4),
             2 => Some(Self::Lz4Best),
             3 => Some(Self::Gzip),
+            4 => Some(Self::Lz4Chunked),
+            5 => Some(Self::Lz4ByBank),
             _ => None,
         }
     }

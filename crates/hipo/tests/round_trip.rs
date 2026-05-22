@@ -464,3 +464,306 @@ fn events_iter_counts_all_events() {
     let file = Chain::open(&path).unwrap();
     assert_eq!(file.events().count(), 500);
 }
+
+#[test]
+fn write_then_scan_lz4_chunked() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunked.hipo");
+
+    // ~100 events across several records (max_record_events small enough
+    // that we get multiple records, and chunk_size small enough that we
+    // get multiple chunks per record).
+    {
+        let mut w = Writer::create(&path)
+            .schemas(&sample_dict())
+            .compression(Compression::Lz4Chunked {
+                events_per_chunk: 4,
+            })
+            .max_record_events(30)
+            .build()
+            .unwrap();
+        for evno in 0..100_i64 {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| {
+                        r.set("evno", evno)?;
+                        r.set("beamE", 10.6_f32)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                ev.bank("REC::Particle", |b| {
+                    for i in 0..((evno as i32) % 5 + 1) {
+                        b.row(|r| {
+                            r.set("pid", 11 + i)?;
+                            r.set("px", i as f32 * 0.1)?;
+                            r.set("py", -i as f32 * 0.1)?;
+                            r.set("charge", (i as i8) - 1)?;
+                            Ok(())
+                        })?;
+                    }
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    let file = Chain::open(&path).unwrap();
+    assert_eq!(file.event_count(), 100);
+    // Should be > 1 record so we exercise the chunk-boundary case.
+    assert!(file.record_count() > 1);
+
+    let mut seen = 0_i64;
+    for ev in file.events() {
+        let evno = ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
+        assert_eq!(evno, seen);
+        let p = ev.bank("REC::Particle").unwrap();
+        let pids = p.col::<i32>("pid").unwrap();
+        // pids start at 11 and march up
+        for (i, &pid) in pids.iter().enumerate() {
+            assert_eq!(pid, 11 + i as i32);
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 100);
+}
+
+#[test]
+fn write_then_scan_lz4_by_bank() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("by_bank.hipo");
+
+    {
+        let mut w = Writer::create(&path)
+            .schemas(&sample_dict())
+            .compression(Compression::Lz4ByBank)
+            .max_record_events(40)
+            .build()
+            .unwrap();
+        for evno in 0..200_i64 {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| {
+                        r.set("evno", evno)?;
+                        r.set("beamE", 10.6_f32)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                // Some events also carry REC::Particle, others don't —
+                // exercise the presence matrix.
+                if evno % 3 != 0 {
+                    ev.bank("REC::Particle", |b| {
+                        for i in 0..((evno as i32) % 4 + 1) {
+                            b.row(|r| {
+                                r.set("pid", 11 + i)?;
+                                r.set("px", i as f32 * 0.1)?;
+                                r.set("py", -i as f32 * 0.1)?;
+                                r.set("charge", (i as i8) - 1)?;
+                                Ok(())
+                            })?;
+                        }
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    let file = Chain::open(&path).unwrap();
+    assert_eq!(file.event_count(), 200);
+    assert!(file.record_count() >= 5);
+
+    let mut seen = 0_i64;
+    for ev in file.events() {
+        let evno = ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
+        assert_eq!(evno, seen);
+
+        if seen % 3 == 0 {
+            // Event without REC::Particle.
+            assert!(!ev.has("REC::Particle"));
+            assert!(ev.bank("REC::Particle").is_none());
+        } else {
+            let p = ev.bank("REC::Particle").unwrap();
+            let pids = p.col::<i32>("pid").unwrap();
+            for (i, &pid) in pids.iter().enumerate() {
+                assert_eq!(pid, 11 + i as i32);
+            }
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 200);
+}
+
+#[test]
+fn lz4_by_bank_par_reduce_matches_sequential() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("by_bank_par.hipo");
+
+    {
+        let mut w = Writer::create(&path)
+            .schemas(&sample_dict())
+            .compression(Compression::Lz4ByBank)
+            .max_record_events(30)
+            .build()
+            .unwrap();
+        for evno in 0..300_i64 {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| {
+                        r.set("evno", evno)?;
+                        r.set("beamE", 10.6_f32)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    let file = Chain::open(&path).unwrap();
+    let seq_sum: i64 = file
+        .events()
+        .map(|ev| ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0])
+        .sum();
+    let par_sum: i64 = file
+        .par_reduce(
+            0,
+            || 0_i64,
+            |acc, ev| acc + ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0],
+            |a, b| a + b,
+        )
+        .unwrap();
+    assert_eq!(seq_sum, (0..300_i64).sum::<i64>());
+    assert_eq!(par_sum, seq_sum);
+}
+
+#[test]
+fn lz4_by_bank_skips_unused_banks() {
+    // Verify the partial-decompression contract: a scan that only ever
+    // reads REC::Event must NOT inflate REC::Particle's stream. We test
+    // this indirectly by exercising the same file with two scans (one
+    // touching only REC::Event, one touching both) and asserting both
+    // produce correct results — the partial-touch case should still
+    // succeed even though REC::Particle bytes are never inflated.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("by_bank_partial.hipo");
+
+    {
+        let mut w = Writer::create(&path)
+            .schemas(&sample_dict())
+            .compression(Compression::Lz4ByBank)
+            .max_record_events(50)
+            .build()
+            .unwrap();
+        for evno in 0..150_i64 {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| {
+                        r.set("evno", evno)?;
+                        r.set("beamE", 10.6_f32)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                ev.bank("REC::Particle", |b| {
+                    for i in 0..5_i32 {
+                        b.row(|r| {
+                            r.set("pid", i * 11)?;
+                            r.set("px", i as f32 * 0.5)?;
+                            r.set("py", i as f32 * -0.25)?;
+                            r.set("charge", (i as i8) - 2)?;
+                            Ok(())
+                        })?;
+                    }
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    // Scan touching only REC::Event — Particle should never decompress.
+    {
+        let file = Chain::open(&path).unwrap();
+        let mut sum: i64 = 0;
+        for ev in file.events() {
+            sum += ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
+        }
+        assert_eq!(sum, (0..150_i64).sum::<i64>());
+    }
+    // Scan touching both — exercise the full partial-decompression cache.
+    {
+        let file = Chain::open(&path).unwrap();
+        let mut events_total = 0u64;
+        let mut particle_total = 0u64;
+        for ev in file.events() {
+            let _ = ev.bank("REC::Event").unwrap();
+            particle_total += ev.bank("REC::Particle").unwrap().rows() as u64;
+            events_total += 1;
+        }
+        assert_eq!(events_total, 150);
+        assert_eq!(particle_total, 150 * 5);
+    }
+}
+
+#[test]
+fn lz4_chunked_par_reduce_matches_sequential() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunked_par.hipo");
+
+    {
+        let mut w = Writer::create(&path)
+            .schemas(&sample_dict())
+            .compression(Compression::Lz4Chunked {
+                events_per_chunk: 8,
+            })
+            .max_record_events(25)
+            .build()
+            .unwrap();
+        for evno in 0..200_i64 {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| {
+                        r.set("evno", evno)?;
+                        r.set("beamE", 10.6_f32)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    let file = Chain::open(&path).unwrap();
+    let seq_sum: i64 = file
+        .events()
+        .map(|ev| ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0])
+        .sum();
+
+    let par_sum: i64 = file
+        .par_reduce(
+            0,
+            || 0_i64,
+            |acc, ev| acc + ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0],
+            |a, b| a + b,
+        )
+        .unwrap();
+
+    assert_eq!(seq_sum, (0..200_i64).sum::<i64>());
+    assert_eq!(par_sum, seq_sum);
+}

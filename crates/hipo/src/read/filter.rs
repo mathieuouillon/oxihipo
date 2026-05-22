@@ -111,6 +111,25 @@ impl Filter {
         }
         true
     }
+
+    /// `check` for `Lz4ByBank` records — peeks the presence matrix
+    /// directly without inflating any bank stream.
+    #[inline]
+    pub(crate) fn check_by_bank(
+        &self,
+        record: &crate::wire::by_bank::ByBankRecord,
+        event_idx: u32,
+    ) -> bool {
+        for &(g, i) in &self.require_ids {
+            let Some(b) = record.bank_index(g, i) else {
+                return false;
+            };
+            if !record.has(event_idx, b) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[cfg(test)]

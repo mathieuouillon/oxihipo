@@ -24,7 +24,8 @@ use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
 use crate::read::iter::EventIter;
 use crate::schema::Dict;
-use crate::wire::constants::RECORD_HEADER_SIZE;
+use crate::wire::by_bank::ByBankRecord;
+use crate::wire::constants::{CompressionType, RECORD_HEADER_SIZE};
 use crate::wire::record::{Record, decode_record_into};
 use crate::wire::record_header::RecordHeader;
 
@@ -278,10 +279,23 @@ impl Chain {
         if hi > inner.mmap.len() {
             return None;
         }
+        let src = &inner.mmap[lo..hi];
+        let header = RecordHeader::parse(src).ok()?;
+        if matches!(header.compression, CompressionType::Lz4ByBank) {
+            let by_bank = ByBankRecord::parse(src).ok()?;
+            if ev_local >= by_bank.event_count() {
+                return None;
+            }
+            return Some(OwnedEvent::by_bank(
+                by_bank,
+                ev_local,
+                Arc::clone(&self.dict),
+            ));
+        }
         let mut buf = Vec::new();
         let mut offsets = Vec::new();
-        let decoded = decode_record_into(&inner.mmap[lo..hi], &mut buf, &mut offsets)
-            .expect("decompress well-formed record");
+        let decoded =
+            decode_record_into(src, &mut buf, &mut offsets).expect("decompress well-formed record");
         if ev_local as usize + 1 >= offsets.len() {
             return None;
         }
@@ -295,10 +309,19 @@ impl Chain {
         ))
     }
 
-    /// Hint the kernel to start reading every file in the chain into the
-    /// page cache asynchronously (`MADV_WILLNEED`). Best on shared
-    /// filesystems (JLab `/cache` / `/volatile` Lustre, NFS) before a
-    /// sequential [`Self::events`] loop; harmless elsewhere.
+    /// Prime the page cache for a sequential [`Self::events`] scan.
+    ///
+    /// Two layers:
+    /// 1. `MADV_WILLNEED` over each file's mmap — tells the kernel to
+    ///    start async-fetching all pages.
+    /// 2. **On Unix**, a detached background thread that opens a side
+    ///    file descriptor per file and actively `pread`s every record's
+    ///    bytes into a discard buffer. This forces the kernel to populate
+    ///    the page cache even past its bounded per-stream readahead
+    ///    window — the headline win for sequential reads of large files
+    ///    on shared filesystems (`/cache` / `/volatile` at JLab; NFS).
+    ///    The thread runs detached and terminates after walking the chain;
+    ///    on Windows only the `MADV_WILLNEED` layer applies.
     ///
     /// The parallel runners ([`Self::par_for_each`], [`Self::par_reduce`])
     /// already prefetch the records they'll touch, so calling this before
@@ -307,6 +330,8 @@ impl Chain {
         for inner in &self.files {
             inner.prefetch_all();
         }
+        #[cfg(unix)]
+        spawn_pread_prefetcher(self.files.clone());
     }
 
     // ---- Parallel analysis ----------------------------------------------
@@ -360,23 +385,43 @@ impl Chain {
                             reason: "record extends past EOF",
                         });
                     }
-                    record.load(&inner.mmap[lo..hi])?;
-
+                    let src = &inner.mmap[lo..hi];
+                    let header = RecordHeader::parse(src)?;
                     let mut local_in = 0u64;
                     let mut local_out = 0u64;
-                    for ev_idx in 0..record.event_count() {
-                        let raw = record.event(ev_idx).expect("event in range");
-                        let event = Event::new(raw);
-                        local_in += 1;
-                        if filter_active
-                            && let Some(filt) = filter
-                            && !filt.check(&event)
-                        {
-                            continue;
+
+                    if matches!(header.compression, CompressionType::Lz4ByBank) {
+                        // Lazy per-bank decompression — the user's
+                        // closure only inflates bank streams it touches.
+                        let by_bank = ByBankRecord::parse(src)?;
+                        for ev_idx in 0..by_bank.event_count() {
+                            local_in += 1;
+                            if filter_active
+                                && let Some(filt) = filter
+                                && !filt.check_by_bank(&by_bank, ev_idx)
+                            {
+                                continue;
+                            }
+                            let ctx = EventCtx::new_by_bank(&by_bank, ev_idx, &inner.dict);
+                            f(&ctx);
+                            local_out += 1;
                         }
-                        let ctx = EventCtx::new(event, &inner.dict);
-                        f(&ctx);
-                        local_out += 1;
+                    } else {
+                        record.load_with_header(src, header)?;
+                        for ev_idx in 0..record.event_count() {
+                            let raw = record.event(ev_idx).expect("event in range");
+                            let event = Event::new(raw);
+                            local_in += 1;
+                            if filter_active
+                                && let Some(filt) = filter
+                                && !filt.check(&event)
+                            {
+                                continue;
+                            }
+                            let ctx = EventCtx::new(event, &inner.dict);
+                            f(&ctx);
+                            local_out += 1;
+                        }
                     }
                     events_in.fetch_add(local_in, Ordering::Relaxed);
                     events_yielded.fetch_add(local_out, Ordering::Relaxed);
@@ -448,18 +493,35 @@ impl Chain {
                                 reason: "record extends past EOF",
                             });
                         }
-                        record.load(&inner.mmap[lo..hi])?;
-                        for ev_idx in 0..record.event_count() {
-                            let raw = record.event(ev_idx).expect("event in range");
-                            let event = Event::new(raw);
-                            if filter_active
-                                && let Some(filt) = filter
-                                && !filt.check(&event)
-                            {
-                                continue;
+                        let src = &inner.mmap[lo..hi];
+                        let header = RecordHeader::parse(src)?;
+
+                        if matches!(header.compression, CompressionType::Lz4ByBank) {
+                            let by_bank = ByBankRecord::parse(src)?;
+                            for ev_idx in 0..by_bank.event_count() {
+                                if filter_active
+                                    && let Some(filt) = filter
+                                    && !filt.check_by_bank(&by_bank, ev_idx)
+                                {
+                                    continue;
+                                }
+                                let ctx = EventCtx::new_by_bank(&by_bank, ev_idx, &inner.dict);
+                                acc = fold(acc, &ctx);
                             }
-                            let ctx = EventCtx::new(event, &inner.dict);
-                            acc = fold(acc, &ctx);
+                        } else {
+                            record.load_with_header(src, header)?;
+                            for ev_idx in 0..record.event_count() {
+                                let raw = record.event(ev_idx).expect("event in range");
+                                let event = Event::new(raw);
+                                if filter_active
+                                    && let Some(filt) = filter
+                                    && !filt.check(&event)
+                                {
+                                    continue;
+                                }
+                                let ctx = EventCtx::new(event, &inner.dict);
+                                acc = fold(acc, &ctx);
+                            }
                         }
                         Ok((acc, record))
                     },
@@ -583,6 +645,46 @@ impl Iterator for ChainEventIter {
             }
         }
     }
+}
+
+/// Spawn a detached background thread that opens a side file descriptor
+/// per chain file and `pread`s every record's bytes into a discard buffer.
+/// Forces the kernel to populate the page cache even past its bounded
+/// per-stream readahead window — the headline win for sequential scans of
+/// large files on shared filesystems. Best-effort: failures (open / read)
+/// are silently dropped; worst case the thread is a no-op.
+#[cfg(unix)]
+fn spawn_pread_prefetcher(files: Vec<Arc<FileInner>>) {
+    use std::os::unix::fs::FileExt;
+
+    // 16 MB chunks — far below typical Lustre stripe size, well above the
+    // page-fault granularity the consumer thread pays without prefetch.
+    const CHUNK: usize = 16 << 20;
+
+    let _ = std::thread::Builder::new()
+        .name("hipo-prefetch".into())
+        .spawn(move || {
+            let mut scratch = vec![0u8; CHUNK];
+            for inner in &files {
+                let Ok(file) = std::fs::File::open(&inner.path) else {
+                    continue;
+                };
+                for span in inner.index.records() {
+                    let mut off = span.file_offset;
+                    let mut remaining = span.record_length as usize;
+                    while remaining > 0 {
+                        let chunk = remaining.min(CHUNK);
+                        match file.read_at(&mut scratch[..chunk], off) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                off += n as u64;
+                                remaining -= n;
+                            }
+                        }
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]

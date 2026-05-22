@@ -23,12 +23,12 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 #   - compression: enables real LZ4 HC (`Lz4Best`), matching the
 #     compression ratio of the original C++ writer (≈ 10–15% smaller
 #     output files).
-# Cost: pulls in a C dependency. Off by default; the pure-Rust path
-# remains the default.
+# Cost: pulls in a C dependency. Enabled by default for speed; opt out
+# with `--no-default-features` if you want a pure-Rust build.
 lz4-sys = { version = "1.10", optional = true }
 
 [features]
-default = []
+default = ["lz4-c"]
 # Override the global allocator with mimalloc. Library users opt in when
 # they need it on macOS, where the system allocator underperforms under
 # heavy allocation churn. Cross-platform — works on macOS and Linux
