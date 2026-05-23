@@ -26,11 +26,15 @@ struct JsonEntry {
 
 impl Schema {
     /// Parse a compact text form.
+    ///
+    /// Column-type tokens are either a single letter (`pid/I`) or a
+    /// letter followed by `#N` for a fixed-length array (`px/F#32`,
+    /// `pid/S#2`). `N` must be a positive integer.
     pub fn parse_text(text: &str) -> Result<Self> {
         let (head, body) = split_text(text)?;
         let (name, group, item) = parse_head(head)?;
         let columns = parse_columns(body)?;
-        Ok(Self::from_columns(name, group, item, columns))
+        Ok(Self::from_columns_ext(name, group, item, columns))
     }
 
     /// Parse the JSON form.
@@ -39,10 +43,10 @@ impl Schema {
             .map_err(|e| HipoError::SchemaParse(format!("invalid schema JSON: {e}")))?;
         let mut cols = Vec::with_capacity(parsed.entries.len());
         for e in parsed.entries {
-            let ty = parse_type(&e.ty)?;
-            cols.push((e.name, ty));
+            let (ty, length) = parse_type(&e.ty)?;
+            cols.push((e.name, ty, length));
         }
-        Ok(Self::from_columns(
+        Ok(Self::from_columns_ext(
             parsed.name,
             parsed.group,
             parsed.item,
@@ -50,7 +54,10 @@ impl Schema {
         ))
     }
 
-    /// Round-trip the schema to its compact text form.
+    /// Round-trip the schema to its compact text form. Array columns
+    /// are emitted as `name/T#N`; scalar columns (length == 1) are
+    /// emitted as `name/T` to preserve byte-identical round-trips with
+    /// historical files and the C++ writer.
     pub fn to_text(&self) -> String {
         let mut s = String::new();
         s.push('{');
@@ -67,6 +74,10 @@ impl Schema {
             s.push_str(&e.name);
             s.push('/');
             s.push(e.ty.letter());
+            if e.length > 1 {
+                s.push('#');
+                s.push_str(&e.length.to_string());
+            }
         }
         s.push('}');
         s
@@ -125,7 +136,7 @@ fn parse_head(head: &str) -> Result<(String, u16, u8)> {
     Ok((name, group, item))
 }
 
-fn parse_columns(body: &str) -> Result<Vec<(String, DataType)>> {
+fn parse_columns(body: &str) -> Result<Vec<(String, DataType, u32)>> {
     body.split(',')
         .filter(|s| !s.trim().is_empty())
         .map(|raw| {
@@ -139,20 +150,46 @@ fn parse_columns(body: &str) -> Result<Vec<(String, DataType)>> {
                 .next()
                 .ok_or_else(|| HipoError::SchemaParse(format!("column {n:?} missing type")))?
                 .trim();
-            Ok((n, parse_type(ty)?))
+            let (dt, length) = parse_type(ty)?;
+            Ok((n, dt, length))
         })
         .collect()
 }
 
-fn parse_type(ty: &str) -> Result<DataType> {
-    let mut chars = ty.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), None) => DataType::from_letter(c)
-            .ok_or_else(|| HipoError::SchemaParse(format!("unknown type {ty:?}"))),
-        _ => Err(HipoError::SchemaParse(format!(
-            "type must be a single letter, got {ty:?}"
-        ))),
-    }
+/// Parse a column-type token like `I`, `F`, or `F#32`. Returns the
+/// underlying `DataType` and the per-row element count (`1` for
+/// scalars; `N` for `T#N` arrays).
+fn parse_type(ty: &str) -> Result<(DataType, u32)> {
+    let (letter_part, length_part) = match ty.split_once('#') {
+        Some((a, b)) => (a.trim(), Some(b.trim())),
+        None => (ty.trim(), None),
+    };
+    let mut chars = letter_part.chars();
+    let dt = match (chars.next(), chars.next()) {
+        (Some(c), None) => DataType::from_letter(c).ok_or_else(|| {
+            HipoError::SchemaParse(format!("unknown type letter {letter_part:?}"))
+        })?,
+        _ => {
+            return Err(HipoError::SchemaParse(format!(
+                "type letter must be a single character, got {letter_part:?}"
+            )));
+        }
+    };
+    let length = match length_part {
+        None => 1u32,
+        Some(s) => {
+            let n: u32 = s
+                .parse()
+                .map_err(|e| HipoError::SchemaParse(format!("bad array length {s:?}: {e}")))?;
+            if n == 0 {
+                return Err(HipoError::SchemaParse(format!(
+                    "array length must be > 0 (got {s:?})"
+                )));
+            }
+            n
+        }
+    };
+    Ok((dt, length))
 }
 
 #[cfg(test)]
@@ -211,5 +248,45 @@ mod tests {
     fn rejects_missing_brace() {
         let err = Schema::parse_text("{X/1/1}").unwrap_err();
         assert!(err.to_string().contains("two"));
+    }
+
+    #[test]
+    fn parse_array_columns() {
+        let s = Schema::parse_text("{REC::Foo/300/1}{pid/S#2,px/F#32,e/F}").unwrap();
+        assert_eq!(s.entries().len(), 3);
+        assert_eq!(s.entries()[0].ty, DataType::Short);
+        assert_eq!(s.entries()[0].length, 2);
+        assert_eq!(s.entries()[1].ty, DataType::Float);
+        assert_eq!(s.entries()[1].length, 32);
+        assert_eq!(s.entries()[2].ty, DataType::Float);
+        assert_eq!(s.entries()[2].length, 1);
+        // Row size = 2*2 + 32*4 + 1*4 = 4 + 128 + 4 = 136 bytes
+        assert_eq!(s.row_size(), 136);
+    }
+
+    #[test]
+    fn array_columns_round_trip() {
+        let original = "{REC::Foo/300/1}{pid/S#2,px/F#32,e/F}";
+        let s = Schema::parse_text(original).unwrap();
+        assert_eq!(s.to_text(), original);
+    }
+
+    #[test]
+    fn rejects_zero_length_array() {
+        let err = Schema::parse_text("{X/1/1}{a/F#0}").unwrap_err();
+        assert!(err.to_string().contains("length"));
+    }
+
+    #[test]
+    fn rejects_negative_length_array() {
+        let err = Schema::parse_text("{X/1/1}{a/F#-3}").unwrap_err();
+        assert!(err.to_string().contains("array length"));
+    }
+
+    #[test]
+    fn array_columns_with_whitespace() {
+        let s = Schema::parse_text("{X/1/1}{ a / F # 16 , b / I }").unwrap();
+        assert_eq!(s.entries()[0].length, 16);
+        assert_eq!(s.entries()[1].length, 1);
     }
 }

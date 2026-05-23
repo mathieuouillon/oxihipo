@@ -3,27 +3,42 @@
 //! Resolved once against a [`Schema`] via [`Schema::handle`]; the handle
 //! checks type compatibility at resolution time so all `read` calls become
 //! a bounds-checked cast with no per-call name lookup.
+//!
+//! Two layers:
+//!
+//! - [`BankScalarType`] — the six primitive element types that can live
+//!   inside a bank cell (`i8` / `i16` / `i32` / `i64` / `f32` / `f64`).
+//!   Encodes the wire-level [`DataType`] for each Rust scalar plus
+//!   little-endian byte serialisation. Sealed.
+//!
+//! - [`BankColumnType`] — what a *column* can hold: either a scalar
+//!   directly (length-1 cells) or a fixed-length `[T; N]` array
+//!   (length-N cells, declared in schema text as `name/T#N`). Blanket
+//!   impls cover both forms automatically.
 
 use std::marker::PhantomData;
 
 use crate::error::{HipoError, Result};
 use crate::schema::types::{DataType, Schema};
 
-/// Sealed trait — types that can occupy a bank column.
-///
-/// Implemented for `i8`, `i16`, `i32`, `i64`, `f32`, `f64`. We seal the
-/// trait so users cannot add fishy implementations that violate the layout
-/// invariants of the bank.
-pub trait BankColumnType: Copy + sealed::Sealed + 'static {
+// ---- BankScalarType --------------------------------------------------
+
+/// Sealed trait — primitive types that can occupy one element of a bank
+/// column. Implemented for `i8`, `i16`, `i32`, `i64`, `f32`, `f64`.
+pub trait BankScalarType: Copy + sealed::Sealed + 'static {
     /// The wire-level [`DataType`] this Rust type corresponds to.
     const DATA_TYPE: DataType;
 
-    /// Write `self` into the row currently being built by `builder`,
-    /// targeting column `name`. Used by the writer's
-    /// [`RowWriter::set`](crate::write::RowWriter::set) so callers don't
-    /// have to remember per-type setter names.
+    /// Little-endian byte serialisation. `dst.len()` must equal
+    /// `DATA_TYPE.size()`; the implementation asserts in debug builds.
     #[doc(hidden)]
-    fn set_in(
+    fn write_le(self, dst: &mut [u8]);
+
+    /// Write `self` into the row currently being built by `builder`,
+    /// targeting scalar column `name`. Used by the array-aware
+    /// [`BankColumnType`] dispatch.
+    #[doc(hidden)]
+    fn set_scalar_in(
         self,
         builder: &mut crate::event::BankBuilder<'_>,
         name: &str,
@@ -38,68 +53,146 @@ mod sealed {
     impl Sealed for i64 {}
     impl Sealed for f32 {}
     impl Sealed for f64 {}
+    impl<T: Sealed, const N: usize> Sealed for [T; N] {}
 }
 
-impl BankColumnType for i8 {
+impl BankScalarType for i8 {
     const DATA_TYPE: DataType = DataType::Byte;
-    fn set_in(
+    fn write_le(self, dst: &mut [u8]) {
+        debug_assert_eq!(dst.len(), 1);
+        dst[0] = self as u8;
+    }
+    fn set_scalar_in(
         self,
-        builder: &mut crate::event::BankBuilder<'_>,
+        b: &mut crate::event::BankBuilder<'_>,
         name: &str,
     ) -> crate::error::Result<()> {
-        builder.set_i8(name, self).map(|_| ())
+        b.set_i8(name, self).map(|_| ())
     }
 }
-impl BankColumnType for i16 {
+impl BankScalarType for i16 {
     const DATA_TYPE: DataType = DataType::Short;
-    fn set_in(
+    fn write_le(self, dst: &mut [u8]) {
+        dst.copy_from_slice(&self.to_le_bytes());
+    }
+    fn set_scalar_in(
         self,
-        builder: &mut crate::event::BankBuilder<'_>,
+        b: &mut crate::event::BankBuilder<'_>,
         name: &str,
     ) -> crate::error::Result<()> {
-        builder.set_i16(name, self).map(|_| ())
+        b.set_i16(name, self).map(|_| ())
     }
 }
-impl BankColumnType for i32 {
+impl BankScalarType for i32 {
     const DATA_TYPE: DataType = DataType::Int;
-    fn set_in(
+    fn write_le(self, dst: &mut [u8]) {
+        dst.copy_from_slice(&self.to_le_bytes());
+    }
+    fn set_scalar_in(
         self,
-        builder: &mut crate::event::BankBuilder<'_>,
+        b: &mut crate::event::BankBuilder<'_>,
         name: &str,
     ) -> crate::error::Result<()> {
-        builder.set_i32(name, self).map(|_| ())
+        b.set_i32(name, self).map(|_| ())
     }
 }
-impl BankColumnType for i64 {
+impl BankScalarType for i64 {
     const DATA_TYPE: DataType = DataType::Long;
-    fn set_in(
+    fn write_le(self, dst: &mut [u8]) {
+        dst.copy_from_slice(&self.to_le_bytes());
+    }
+    fn set_scalar_in(
         self,
-        builder: &mut crate::event::BankBuilder<'_>,
+        b: &mut crate::event::BankBuilder<'_>,
         name: &str,
     ) -> crate::error::Result<()> {
-        builder.set_i64(name, self).map(|_| ())
+        b.set_i64(name, self).map(|_| ())
     }
 }
-impl BankColumnType for f32 {
+impl BankScalarType for f32 {
     const DATA_TYPE: DataType = DataType::Float;
-    fn set_in(
+    fn write_le(self, dst: &mut [u8]) {
+        dst.copy_from_slice(&self.to_le_bytes());
+    }
+    fn set_scalar_in(
         self,
-        builder: &mut crate::event::BankBuilder<'_>,
+        b: &mut crate::event::BankBuilder<'_>,
         name: &str,
     ) -> crate::error::Result<()> {
-        builder.set_f32(name, self).map(|_| ())
+        b.set_f32(name, self).map(|_| ())
     }
 }
-impl BankColumnType for f64 {
+impl BankScalarType for f64 {
     const DATA_TYPE: DataType = DataType::Double;
+    fn write_le(self, dst: &mut [u8]) {
+        dst.copy_from_slice(&self.to_le_bytes());
+    }
+    fn set_scalar_in(
+        self,
+        b: &mut crate::event::BankBuilder<'_>,
+        name: &str,
+    ) -> crate::error::Result<()> {
+        b.set_f64(name, self).map(|_| ())
+    }
+}
+
+// ---- BankColumnType --------------------------------------------------
+
+/// What a bank column can hold: either a scalar (length-1 cell) or a
+/// fixed-length `[T; N]` array (length-N cell).
+///
+/// Blanket impls cover:
+/// - every `T: BankScalarType` (so `bank.col::<f32>(…)` keeps working
+///   for scalar columns), with `LENGTH = 1`.
+/// - every `[T; N] where T: BankScalarType` (so `bank.col::<[f32; 32]>(…)`
+///   works for an array column declared `name/F#32`), with `LENGTH = N`.
+///
+/// Sealed; downstream crates can't add fishy implementations.
+pub trait BankColumnType: Copy + sealed::Sealed + 'static {
+    /// Wire-level element type. For arrays, this is the *element* type,
+    /// not the array type — `[f32; 32]::DATA_TYPE == DataType::Float`.
+    const DATA_TYPE: DataType;
+
+    /// Number of elements per cell. `1` for scalar `T`; `N` for `[T; N]`.
+    const LENGTH: u32;
+
+    /// Write `self` into the row currently being built by `builder`,
+    /// targeting column `name`. Used by the writer's
+    /// [`RowWriter::set`](crate::write::RowWriter::set) so callers don't
+    /// have to remember per-type setter names.
+    #[doc(hidden)]
+    fn set_in(
+        self,
+        builder: &mut crate::event::BankBuilder<'_>,
+        name: &str,
+    ) -> crate::error::Result<()>;
+}
+
+impl<T: BankScalarType> BankColumnType for T {
+    const DATA_TYPE: DataType = <T as BankScalarType>::DATA_TYPE;
+    const LENGTH: u32 = 1;
     fn set_in(
         self,
         builder: &mut crate::event::BankBuilder<'_>,
         name: &str,
     ) -> crate::error::Result<()> {
-        builder.set_f64(name, self).map(|_| ())
+        self.set_scalar_in(builder, name)
     }
 }
+
+impl<T: BankScalarType, const N: usize> BankColumnType for [T; N] {
+    const DATA_TYPE: DataType = <T as BankScalarType>::DATA_TYPE;
+    const LENGTH: u32 = N as u32;
+    fn set_in(
+        self,
+        builder: &mut crate::event::BankBuilder<'_>,
+        name: &str,
+    ) -> crate::error::Result<()> {
+        builder.set_array(name, &self).map(|_| ())
+    }
+}
+
+// ---- ColumnHandle ----------------------------------------------------
 
 /// Pre-resolved, typed column index.
 ///
@@ -112,17 +205,27 @@ pub struct ColumnHandle<T> {
 }
 
 impl<T: BankColumnType> ColumnHandle<T> {
-    /// Resolve against a schema, verifying that the column exists and that
-    /// its on-wire type matches `T`.
+    /// Resolve against a schema, verifying that the column exists, that
+    /// its on-wire type matches `T`'s element type, **and** that its
+    /// per-row length matches `T::LENGTH` (so a scalar handle won't
+    /// resolve against an array column or vice versa).
     pub(crate) fn resolve(schema: &Schema, name: &str) -> Result<Self> {
         let col = schema.require_column(name)?;
-        let actual = schema.entries()[col].ty;
-        if actual != T::DATA_TYPE {
+        let entry = &schema.entries()[col];
+        if entry.ty != T::DATA_TYPE {
             return Err(HipoError::TypeMismatch {
                 schema: schema.name().to_string(),
                 column: name.to_string(),
                 expected: T::DATA_TYPE.name(),
-                actual: actual.name(),
+                actual: entry.ty.name(),
+            });
+        }
+        if entry.length != T::LENGTH {
+            return Err(HipoError::ColumnLengthMismatch {
+                schema: schema.name().to_string(),
+                column: name.to_string(),
+                expected: T::LENGTH,
+                actual: entry.length,
             });
         }
         Ok(Self {
@@ -135,6 +238,12 @@ impl<T: BankColumnType> ColumnHandle<T> {
     #[inline]
     pub fn column_index(&self) -> usize {
         self.col as usize
+    }
+
+    /// Per-row element count of this handle's column.
+    #[inline]
+    pub fn length(&self) -> u32 {
+        T::LENGTH
     }
 }
 

@@ -7,7 +7,7 @@
 //! reach them.
 
 use crate::error::{HipoError, Result};
-use crate::schema::{DataType, Schema};
+use crate::schema::{BankScalarType, DataType, Schema};
 use crate::wire::bytes::write_u32_le;
 use crate::wire::constants::*;
 
@@ -61,7 +61,10 @@ impl<'s> BankBuilder<'s> {
     /// Append a zero-filled row; subsequent `set_*` calls modify it.
     pub fn push_row(&mut self) -> &mut Self {
         for (col, entry) in self.columns.iter_mut().zip(self.schema.entries()) {
-            col.extend(std::iter::repeat_n(0u8, entry.ty.size()));
+            col.extend(std::iter::repeat_n(
+                0u8,
+                entry.ty.size() * entry.length as usize,
+            ));
         }
         self.rows += 1;
         self
@@ -85,13 +88,30 @@ impl<'s> BankBuilder<'s> {
 
     fn check_col(&self, name: &str, expected: DataType) -> Result<usize> {
         let col = self.schema.require_column(name)?;
-        let actual = self.schema.entries()[col].ty;
-        if actual != expected {
+        let entry = &self.schema.entries()[col];
+        if entry.ty != expected {
             return Err(HipoError::TypeMismatch {
                 schema: self.schema.name().to_string(),
                 column: name.to_string(),
                 expected: expected.name(),
-                actual: actual.name(),
+                actual: entry.ty.name(),
+            });
+        }
+        Ok(col)
+    }
+
+    /// Like [`Self::check_col`] but also requires the column to be a
+    /// scalar (length == 1). Scalar setters use this to fail loudly when
+    /// they're aimed at an array column.
+    fn check_col_scalar(&self, name: &str, expected: DataType) -> Result<usize> {
+        let col = self.check_col(name, expected)?;
+        let entry = &self.schema.entries()[col];
+        if entry.length != 1 {
+            return Err(HipoError::ColumnLengthMismatch {
+                schema: self.schema.name().to_string(),
+                column: name.to_string(),
+                expected: 1,
+                actual: entry.length,
             });
         }
         Ok(col)
@@ -110,7 +130,7 @@ impl<'s> BankBuilder<'s> {
     }
 
     pub fn set_i32_at(&mut self, name: &str, row: u32, value: i32) -> Result<&mut Self> {
-        let col = self.check_col(name, DataType::Int)?;
+        let col = self.check_col_scalar(name, DataType::Int)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 4;
         bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
@@ -123,7 +143,7 @@ impl<'s> BankBuilder<'s> {
     }
 
     pub fn set_i64_at(&mut self, name: &str, row: u32, value: i64) -> Result<&mut Self> {
-        let col = self.check_col(name, DataType::Long)?;
+        let col = self.check_col_scalar(name, DataType::Long)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 8;
         bytes[off..off + 8].copy_from_slice(&value.to_le_bytes());
@@ -136,7 +156,7 @@ impl<'s> BankBuilder<'s> {
     }
 
     pub fn set_i16_at(&mut self, name: &str, row: u32, value: i16) -> Result<&mut Self> {
-        let col = self.check_col(name, DataType::Short)?;
+        let col = self.check_col_scalar(name, DataType::Short)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 2;
         bytes[off..off + 2].copy_from_slice(&value.to_le_bytes());
@@ -149,7 +169,7 @@ impl<'s> BankBuilder<'s> {
     }
 
     pub fn set_i8_at(&mut self, name: &str, row: u32, value: i8) -> Result<&mut Self> {
-        let col = self.check_col(name, DataType::Byte)?;
+        let col = self.check_col_scalar(name, DataType::Byte)?;
         let bytes = &mut self.columns[col];
         bytes[row as usize] = value as u8;
         Ok(self)
@@ -161,7 +181,7 @@ impl<'s> BankBuilder<'s> {
     }
 
     pub fn set_f32_at(&mut self, name: &str, row: u32, value: f32) -> Result<&mut Self> {
-        let col = self.check_col(name, DataType::Float)?;
+        let col = self.check_col_scalar(name, DataType::Float)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 4;
         bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
@@ -174,10 +194,47 @@ impl<'s> BankBuilder<'s> {
     }
 
     pub fn set_f64_at(&mut self, name: &str, row: u32, value: f64) -> Result<&mut Self> {
-        let col = self.check_col(name, DataType::Double)?;
+        let col = self.check_col_scalar(name, DataType::Double)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 8;
         bytes[off..off + 8].copy_from_slice(&value.to_le_bytes());
+        Ok(self)
+    }
+
+    /// Write an array of `T` into the last-pushed row's `name` slot.
+    /// The schema must declare `name` as an array column of element
+    /// type `T` and length `values.len()`.
+    pub fn set_array<T: BankScalarType>(&mut self, name: &str, values: &[T]) -> Result<&mut Self> {
+        let row = self.last_row()?;
+        self.set_array_at(name, row, values)
+    }
+
+    /// Like [`Self::set_array`] but at an explicit row index.
+    pub fn set_array_at<T: BankScalarType>(
+        &mut self,
+        name: &str,
+        row: u32,
+        values: &[T],
+    ) -> Result<&mut Self> {
+        let col = self.check_col(name, T::DATA_TYPE)?;
+        let entry = &self.schema.entries()[col];
+        let expected_len = entry.length as usize;
+        if values.len() != expected_len {
+            return Err(HipoError::ColumnLengthMismatch {
+                schema: self.schema.name().to_string(),
+                column: name.to_string(),
+                expected: entry.length,
+                actual: values.len() as u32,
+            });
+        }
+        let item_size = T::DATA_TYPE.size();
+        let row_bytes = item_size * expected_len;
+        let off = row as usize * row_bytes;
+        let bytes = &mut self.columns[col];
+        for (i, v) in values.iter().enumerate() {
+            let start = off + i * item_size;
+            v.write_le(&mut bytes[start..start + item_size]);
+        }
         Ok(self)
     }
 
@@ -392,6 +449,94 @@ mod tests {
         assert_eq!(bank.rows(), 1);
         assert_eq!(&*bank.col::<i32>("pid").unwrap(), &[42]);
         assert_eq!(&*bank.col::<f32>("px").unwrap(), &[1.75]);
+    }
+
+    #[test]
+    fn bank_builder_with_array_columns() {
+        // px/F#3 (3 floats per row), pid/I (scalar).
+        let s = Schema::from_columns_ext(
+            "X",
+            1,
+            1,
+            [
+                ("pid".into(), DataType::Int, 1u32),
+                ("px".into(), DataType::Float, 3u32),
+            ],
+        );
+        let mut b = BankBuilder::with_row_capacity(&s, 3);
+        b.push_row()
+            .set_i32("pid", 11)
+            .unwrap()
+            .set_array("px", &[0.1f32, 0.2, 0.3])
+            .unwrap();
+        b.push_row()
+            .set_i32("pid", 22)
+            .unwrap()
+            .set_array("px", &[1.0f32, 1.1, 1.2])
+            .unwrap();
+        b.push_row()
+            .set_i32("pid", 33)
+            .unwrap()
+            .set_array("px", &[2.0f32, 2.1, 2.2])
+            .unwrap();
+        let bytes = b.finish();
+
+        let bank = Bank::new(&s, &bytes[BANK_STRUCTURE_SIZE..]).unwrap();
+        assert_eq!(bank.rows(), 3);
+
+        // Read as Cow<[[f32; 3]]>.
+        let arrays = bank.col::<[f32; 3]>("px").unwrap();
+        assert_eq!(arrays.len(), 3);
+        assert_eq!(arrays[0], [0.1, 0.2, 0.3]);
+        assert_eq!(arrays[1], [1.0, 1.1, 1.2]);
+        assert_eq!(arrays[2], [2.0, 2.1, 2.2]);
+
+        // Per-row get returns the full array.
+        let row1: [f32; 3] = bank.get("px", 1);
+        assert_eq!(row1, [1.0, 1.1, 1.2]);
+
+        // Runtime escape hatch: array_at.
+        let row2 = bank.array_at::<f32>("px", 2).unwrap();
+        assert_eq!(&*row2, &[2.0, 2.1, 2.2]);
+
+        // The scalar column still works.
+        assert_eq!(&*bank.col::<i32>("pid").unwrap(), &[11, 22, 33]);
+    }
+
+    #[test]
+    fn bank_builder_array_wrong_length_errors() {
+        let s = Schema::from_columns_ext("X", 1, 1, [("px".into(), DataType::Float, 3u32)]);
+        let mut b = BankBuilder::new(&s);
+        b.push_row();
+        let err = b.set_array("px", &[0.1f32, 0.2]).unwrap_err(); // need 3, gave 2
+        assert!(matches!(err, HipoError::ColumnLengthMismatch { .. }));
+    }
+
+    #[test]
+    fn bank_builder_scalar_set_on_array_column_errors() {
+        let s = Schema::from_columns_ext("X", 1, 1, [("px".into(), DataType::Float, 3u32)]);
+        let mut b = BankBuilder::new(&s);
+        b.push_row();
+        // set_f32 is scalar — should be rejected on an F#3 column.
+        let err = b.set_f32("px", 0.5).unwrap_err();
+        assert!(matches!(err, HipoError::ColumnLengthMismatch { .. }));
+    }
+
+    #[test]
+    fn row_writer_set_array_via_const_generic() {
+        // Through the RowWriter::set ergonomic path: set("name", [arr]).
+        // Verifies the BankColumnType blanket impl for [T; N] dispatches
+        // correctly.
+        let s = Schema::from_columns_ext("X", 1, 1, [("v".into(), DataType::Float, 4u32)]);
+        let mut b = BankBuilder::new(&s);
+        b.push_row();
+        // Via the trait method (what RowWriter::set calls under the hood):
+        <[f32; 4] as crate::schema::BankColumnType>::set_in([0.25, 0.5, 0.75, 1.0], &mut b, "v")
+            .unwrap();
+        let bytes = b.finish();
+        let bank = Bank::new(&s, &bytes[BANK_STRUCTURE_SIZE..]).unwrap();
+        let row0: [f32; 4] = bank.get("v", 0);
+        assert_eq!(row0, [0.25, 0.5, 0.75, 1.0]);
     }
 
     #[test]

@@ -52,6 +52,16 @@ pub enum HipoError {
         actual: &'static str,
     },
 
+    #[error(
+        "column length mismatch in {schema:?}.{column:?}: schema declares length {expected}, got {actual}"
+    )]
+    ColumnLengthMismatch {
+        schema: String,
+        column: String,
+        expected: u32,
+        actual: u32,
+    },
+
     #[error("corrupt record at offset {offset:#x}: {reason}")]
     CorruptRecord { offset: u64, reason: &'static str },
 

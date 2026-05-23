@@ -79,10 +79,16 @@ impl DataType {
 pub struct SchemaEntry {
     pub name: String,
     pub ty: DataType,
-    /// Per-row offset within a single row (sum of preceding columns' sizes).
-    /// In column-major layout the bank-level offset is
-    /// `total_rows * row_offset + row_idx * ty.size()`.
+    /// Per-row offset within a single row (sum of preceding columns'
+    /// total sizes, i.e. `ty.size() * length`). In column-major layout
+    /// the bank-level offset of cell `(col, row)` is
+    /// `total_rows * row_offset + row_idx * ty.size() * length`.
     pub row_offset: u32,
+    /// Number of elements per cell. `1` for ordinary scalar columns;
+    /// `N` for an array column declared in schema text as `name/T#N`.
+    /// A cell's bytes are `ty.size() * length` contiguous bytes laid
+    /// out as `[element_0, element_1, …, element_{length-1}]`.
+    pub length: u32,
 }
 
 /// Layout of a single bank.
@@ -143,9 +149,27 @@ impl Schema {
         item: u8,
         columns: impl IntoIterator<Item = (String, DataType)>,
     ) -> Self {
+        Self::from_columns_ext(
+            name,
+            group,
+            item,
+            columns.into_iter().map(|(n, t)| (n, t, 1u32)),
+        )
+    }
+
+    /// Construct a schema from an iterator of `(name, type, length)`
+    /// triples. `length == 1` is a scalar column; `length > 1` is a
+    /// fixed-length array (declared as `name/T#N` in schema text).
+    pub fn from_columns_ext(
+        name: impl Into<String>,
+        group: u16,
+        item: u8,
+        columns: impl IntoIterator<Item = (String, DataType, u32)>,
+    ) -> Self {
         let mut s = Self::new(name, group, item);
         let mut offset: u32 = 0;
-        for (col_name, ty) in columns {
+        for (col_name, ty, length) in columns {
+            let length = length.max(1);
             let idx =
                 u16::try_from(s.entries.len()).expect("more than 65535 columns is unsupported");
             s.by_name.insert(col_name.clone(), idx);
@@ -153,8 +177,9 @@ impl Schema {
                 name: col_name,
                 ty,
                 row_offset: offset,
+                length,
             });
-            offset += ty.size() as u32;
+            offset += ty.size() as u32 * length;
         }
         s.row_size = offset;
         s
@@ -234,7 +259,14 @@ impl Schema {
     pub fn cell_byte_offset(&self, col: usize, row: u32, total_rows: u32) -> u64 {
         let entry = &self.entries[col];
         u64::from(total_rows) * u64::from(entry.row_offset)
-            + u64::from(row) * entry.ty.size() as u64
+            + u64::from(row) * entry.ty.size() as u64 * u64::from(entry.length)
+    }
+
+    /// Per-row element count for column `col`. `1` for a scalar
+    /// column, `N` for an `T#N` array column.
+    #[inline]
+    pub fn column_length(&self, col: usize) -> u32 {
+        self.entries[col].length
     }
 }
 
@@ -320,6 +352,35 @@ mod tests {
         assert_eq!(s.column_byte_offset(2, 10), 80);
         assert_eq!(s.column_byte_offset(3, 10), 120);
         assert_eq!(s.cell_byte_offset(2, 5, 10), 100);
+    }
+
+    #[test]
+    fn schema_layout_with_array_columns() {
+        // a/I (scalar, 4 B), b/F#4 (16 B per row), c/B#2 (2 B per row).
+        // row_size = 4 + 16 + 2 = 22 bytes.
+        let s = Schema::from_columns_ext(
+            "X",
+            1,
+            1,
+            [
+                ("a".into(), DataType::Int, 1u32),
+                ("b".into(), DataType::Float, 4u32),
+                ("c".into(), DataType::Byte, 2u32),
+            ],
+        );
+        assert_eq!(s.row_size(), 22);
+        assert_eq!(s.column_length(0), 1);
+        assert_eq!(s.column_length(1), 4);
+        assert_eq!(s.column_length(2), 2);
+        // For 10 rows:
+        //   col 0 starts at 0 (10 * 4 = 40 bytes)
+        //   col 1 starts at 40 (10 * 16 = 160 bytes)
+        //   col 2 starts at 200 (10 * 2 = 20 bytes)
+        assert_eq!(s.column_byte_offset(0, 10), 0);
+        assert_eq!(s.column_byte_offset(1, 10), 40);
+        assert_eq!(s.column_byte_offset(2, 10), 200);
+        // Cell offset: col 1 row 5 = 40 + 5 * 16 = 120.
+        assert_eq!(s.cell_byte_offset(1, 5, 10), 120);
     }
 
     #[test]

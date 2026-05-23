@@ -76,11 +76,13 @@ impl<'b> Bank<'b> {
         self.rows == 0
     }
 
-    /// Raw bytes of column `col`. Length is `rows * ty.size()`.
+    /// Raw bytes of column `col`. Length is
+    /// `rows * ty.size() * length` (array columns are stored
+    /// element-major within each row).
     pub fn col_bytes(&self, col: usize) -> &'b [u8] {
         let entry = &self.schema.entries()[col];
         let start = self.schema.column_byte_offset(col, self.rows) as usize;
-        let len = self.rows as usize * entry.ty.size();
+        let len = self.rows as usize * entry.ty.size() * entry.length as usize;
         &self.data[start..start + len]
     }
 
@@ -121,7 +123,12 @@ impl<'b> Bank<'b> {
         debug_assert_eq!(
             self.schema.entries()[col].ty,
             T::DATA_TYPE,
-            "ColumnHandle resolved against a different schema"
+            "ColumnHandle resolved against a different schema (type)"
+        );
+        debug_assert_eq!(
+            self.schema.entries()[col].length,
+            T::LENGTH,
+            "ColumnHandle resolved against a different schema (length)"
         );
         self.cast_column_unchecked::<T>(col)
     }
@@ -132,14 +139,16 @@ impl<'b> Bank<'b> {
         self.schema.handle::<T>(name)
     }
 
-    /// Read one cell as `T`. Infallible: returns `T::default()` (`0` /
-    /// `0.0`) if the column is missing, the wire type doesn't match `T`,
-    /// or the row is out of range.
+    /// Read one cell as `T`. Infallible: returns `T::default()` if the
+    /// column is missing, the wire type doesn't match `T`'s element
+    /// type, the column's per-row length doesn't match `T::LENGTH`, or
+    /// the row is out of range.
     ///
     /// Type-inferred from the binding site:
     /// ```ignore
-    /// let pid: i32 = bank.get("pid", row);
-    /// let px:  f32 = bank.get("px",  row);
+    /// let pid: i32        = bank.get("pid", row);    // scalar column
+    /// let px:  f32        = bank.get("px",  row);    // scalar column
+    /// let cov: [f32; 16]  = bank.get("cov", row);    // array column (F#16)
     /// ```
     ///
     /// Use [`Self::col`] / [`Self::read`] for strict access (error on
@@ -150,7 +159,7 @@ impl<'b> Bank<'b> {
             return T::default();
         };
         let entry = &self.schema.entries()[col];
-        if entry.ty != T::DATA_TYPE || row >= self.rows {
+        if entry.ty != T::DATA_TYPE || entry.length != T::LENGTH || row >= self.rows {
             return T::default();
         }
         let offset = self.schema.cell_byte_offset(col, row, self.rows) as usize;
@@ -159,8 +168,62 @@ impl<'b> Bank<'b> {
         // `rows * row_size` bytes and the entry's row_offset places the
         // cell entirely within bounds. We read unaligned because event
         // boundaries inside a record don't guarantee `T`'s natural
-        // alignment for 8-byte primitives.
+        // alignment for 8-byte primitives. For `T = [U; N]` the read
+        // grabs `N * size_of::<U>()` bytes — exactly the row's array.
         unsafe { (self.data.as_ptr().add(offset) as *const T).read_unaligned() }
+    }
+
+    /// Read one row's array bytes for an array column with runtime
+    /// length. Returns a borrowed slice when alignment permits, otherwise
+    /// a fresh owned copy. Errors if the column doesn't exist, the wire
+    /// type doesn't match `T`, or `row` is out of range.
+    ///
+    /// This is the runtime escape hatch: useful when the array length
+    /// isn't known at compile time (e.g. a generic dump tool walking a
+    /// dictionary). For known-N hot loops, prefer
+    /// [`Self::get`]::<[T; N]> or [`Self::read`]::<[T; N]>.
+    pub fn array_at<T: crate::schema::BankScalarType>(
+        &self,
+        name: &str,
+        row: u32,
+    ) -> Result<Cow<'b, [T]>> {
+        let col = self.schema.require_column(name)?;
+        let entry = &self.schema.entries()[col];
+        if entry.ty != T::DATA_TYPE {
+            return Err(HipoError::TypeMismatch {
+                schema: self.schema.name().to_string(),
+                column: name.to_string(),
+                expected: T::DATA_TYPE.name(),
+                actual: entry.ty.name(),
+            });
+        }
+        if row >= self.rows {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Bank::array_at: row index out of range",
+            });
+        }
+        let len = entry.length as usize;
+        let elem = std::mem::size_of::<T>();
+        let offset = self.schema.cell_byte_offset(col, row, self.rows) as usize;
+        let bytes = &self.data[offset..offset + len * elem];
+        let ptr = bytes.as_ptr();
+        if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) && len > 0 {
+            // SAFETY: alignment just checked; len * elem bytes are
+            // borrowed; HIPO files are little-endian, matching all
+            // supported targets.
+            let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, len) };
+            Ok(Cow::Borrowed(slice))
+        } else if len == 0 {
+            Ok(Cow::Borrowed(&[]))
+        } else {
+            let mut owned: Vec<T> = Vec::with_capacity(len);
+            for i in 0..len {
+                let v = unsafe { (ptr.add(i * elem) as *const T).read_unaligned() };
+                owned.push(v);
+            }
+            Ok(Cow::Owned(owned))
+        }
     }
 
     /// Borrow a single row's view.
@@ -189,14 +252,27 @@ impl<'b> Bank<'b> {
         })
     }
 
-    fn check_type(&self, col: usize, expected: DataType) -> Result<()> {
-        let actual = self.schema.entries()[col].ty;
-        if actual != expected {
+    /// Check both element type AND per-row length against the typed
+    /// view requested by `T`. Length checks ensure that
+    /// `bank.col::<f32>(name)` rejects an array column (`length > 1`)
+    /// and that `bank.col::<[f32; 32]>(name)` rejects a scalar or
+    /// wrong-N column.
+    fn check_column<T: BankColumnType>(&self, col: usize) -> Result<()> {
+        let entry = &self.schema.entries()[col];
+        if entry.ty != T::DATA_TYPE {
             return Err(HipoError::TypeMismatch {
                 schema: self.schema.name().to_string(),
-                column: self.schema.entries()[col].name.clone(),
-                expected: expected.name(),
-                actual: actual.name(),
+                column: entry.name.clone(),
+                expected: T::DATA_TYPE.name(),
+                actual: entry.ty.name(),
+            });
+        }
+        if entry.length != T::LENGTH {
+            return Err(HipoError::ColumnLengthMismatch {
+                schema: self.schema.name().to_string(),
+                column: entry.name.clone(),
+                expected: T::LENGTH,
+                actual: entry.length,
             });
         }
         Ok(())
@@ -207,7 +283,7 @@ impl<'b> Bank<'b> {
     /// came from a name lookup.
     #[inline]
     fn cast_column<T: BankColumnType>(&self, col: usize) -> Result<Cow<'b, [T]>> {
-        self.check_type(col, T::DATA_TYPE)?;
+        self.check_column::<T>(col)?;
         Ok(self.cast_column_unchecked::<T>(col))
     }
 
@@ -276,9 +352,22 @@ impl<'b> RowView<'b> {
         self.schema.cell_byte_offset(col, self.row, self.rows) as usize
     }
 
+    /// Resolve `name` to a scalar column (`length == 1`), returning
+    /// `None` for missing names or array columns. Used by the scalar
+    /// `i32` / `f32` / ... accessors that can't sensibly return a
+    /// multi-element cell.
+    #[inline]
+    fn scalar_column(&self, name: &str) -> Option<usize> {
+        let col = self.schema.column_index(name)?;
+        if self.schema.entries()[col].length != 1 {
+            return None;
+        }
+        Some(col)
+    }
+
     #[inline]
     pub fn i32(&self, name: &str) -> Option<i32> {
-        let col = self.schema.column_index(name)?;
+        let col = self.scalar_column(name)?;
         let entry = &self.schema.entries()[col];
         let off = self.cell_offset(col);
         Some(match entry.ty {
@@ -291,7 +380,7 @@ impl<'b> RowView<'b> {
 
     #[inline]
     pub fn i64(&self, name: &str) -> Option<i64> {
-        let col = self.schema.column_index(name)?;
+        let col = self.scalar_column(name)?;
         let entry = &self.schema.entries()[col];
         let off = self.cell_offset(col);
         Some(match entry.ty {
@@ -305,7 +394,7 @@ impl<'b> RowView<'b> {
 
     #[inline]
     pub fn i16(&self, name: &str) -> Option<i16> {
-        let col = self.schema.column_index(name)?;
+        let col = self.scalar_column(name)?;
         let entry = &self.schema.entries()[col];
         let off = self.cell_offset(col);
         Some(match entry.ty {
@@ -317,7 +406,7 @@ impl<'b> RowView<'b> {
 
     #[inline]
     pub fn i8(&self, name: &str) -> Option<i8> {
-        let col = self.schema.column_index(name)?;
+        let col = self.scalar_column(name)?;
         let entry = &self.schema.entries()[col];
         if !matches!(entry.ty, DataType::Byte) {
             return None;
@@ -327,7 +416,7 @@ impl<'b> RowView<'b> {
 
     #[inline]
     pub fn f32(&self, name: &str) -> Option<f32> {
-        let col = self.schema.column_index(name)?;
+        let col = self.scalar_column(name)?;
         let entry = &self.schema.entries()[col];
         let off = self.cell_offset(col);
         Some(match entry.ty {
@@ -339,7 +428,7 @@ impl<'b> RowView<'b> {
 
     #[inline]
     pub fn f64(&self, name: &str) -> Option<f64> {
-        let col = self.schema.column_index(name)?;
+        let col = self.scalar_column(name)?;
         let entry = &self.schema.entries()[col];
         let off = self.cell_offset(col);
         Some(match entry.ty {
@@ -347,6 +436,42 @@ impl<'b> RowView<'b> {
             DataType::Float => f64::from(read_f32_le(self.data, off)),
             _ => return None,
         })
+    }
+
+    /// Read this row's array bytes for an array column. Returns `None`
+    /// for missing names, scalar columns, or wire-type mismatch. The
+    /// length of the returned slice equals the schema's declared
+    /// `column_length`.
+    ///
+    /// Borrowed when the bank's bytes are aligned for `T` (usual case
+    /// for 4-byte types); falls back to a fresh owned copy for
+    /// misaligned 8-byte types.
+    pub fn array<T: crate::schema::BankScalarType>(
+        &self,
+        name: &str,
+    ) -> Option<std::borrow::Cow<'b, [T]>> {
+        let col = self.schema.column_index(name)?;
+        let entry = &self.schema.entries()[col];
+        if entry.ty != T::DATA_TYPE || entry.length == 1 {
+            return None;
+        }
+        let len = entry.length as usize;
+        let elem = std::mem::size_of::<T>();
+        let off = self.cell_offset(col);
+        let bytes = &self.data[off..off + len * elem];
+        let ptr = bytes.as_ptr();
+        if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) {
+            // SAFETY: alignment checked; `len * elem` bytes borrowed.
+            let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, len) };
+            Some(std::borrow::Cow::Borrowed(slice))
+        } else {
+            let mut owned: Vec<T> = Vec::with_capacity(len);
+            for i in 0..len {
+                let v = unsafe { (ptr.add(i * elem) as *const T).read_unaligned() };
+                owned.push(v);
+            }
+            Some(std::borrow::Cow::Owned(owned))
+        }
     }
 }
 
@@ -466,6 +591,123 @@ mod tests {
         let bank = Bank::new(&s, &data).unwrap();
         let err = bank.col::<f32>("pid").unwrap_err();
         assert!(matches!(err, HipoError::TypeMismatch { .. }));
+    }
+
+    /// Build a bank with `px/F#3` and three known rows. Used by the
+    /// array-column read tests.
+    fn make_array_bank() -> (Schema, Vec<u8>) {
+        use crate::wire::bytes::write_u32_le;
+        let s = Schema::from_columns_ext(
+            "X",
+            1,
+            1,
+            [
+                ("pid".into(), DataType::Int, 1u32),
+                ("px".into(), DataType::Float, 3u32),
+            ],
+        );
+        // 3 rows. Column-major layout:
+        //   pid column: 3 * 4 = 12 bytes
+        //   px column:  3 * 12 = 36 bytes (3 floats per row)
+        let rows: u32 = 3;
+        let pid_bytes = rows as usize * 4;
+        let px_bytes = rows as usize * 12;
+        let mut data = vec![0u8; pid_bytes + px_bytes];
+        // Write pid column: 11, 22, 33.
+        write_u32_le(&mut data, 0, 11);
+        write_u32_le(&mut data, 4, 22);
+        write_u32_le(&mut data, 8, 33);
+        // Write px column: [0.1,0.2,0.3], [1.0,1.1,1.2], [2.0,2.1,2.2].
+        let rows_data: [[f32; 3]; 3] = [[0.1, 0.2, 0.3], [1.0, 1.1, 1.2], [2.0, 2.1, 2.2]];
+        let mut off = pid_bytes;
+        for row in &rows_data {
+            for v in row {
+                data[off..off + 4].copy_from_slice(&v.to_le_bytes());
+                off += 4;
+            }
+        }
+        (s, data)
+    }
+
+    #[test]
+    fn col_array_typed() {
+        let (s, data) = make_array_bank();
+        let bank = Bank::new(&s, &data).unwrap();
+        let arrays = bank.col::<[f32; 3]>("px").unwrap();
+        assert_eq!(arrays.len(), 3);
+        assert_eq!(arrays[0], [0.1, 0.2, 0.3]);
+        assert_eq!(arrays[2], [2.0, 2.1, 2.2]);
+    }
+
+    #[test]
+    fn get_array_typed() {
+        let (s, data) = make_array_bank();
+        let bank = Bank::new(&s, &data).unwrap();
+        let row1: [f32; 3] = bank.get("px", 1);
+        assert_eq!(row1, [1.0, 1.1, 1.2]);
+    }
+
+    #[test]
+    fn get_array_wrong_length_returns_default() {
+        let (s, data) = make_array_bank();
+        let bank = Bank::new(&s, &data).unwrap();
+        // px is F#3; ask for [f32; 4] → default ([0; 4]).
+        let row: [f32; 4] = bank.get("px", 0);
+        assert_eq!(row, [0.0; 4]);
+    }
+
+    #[test]
+    fn array_at_runtime() {
+        let (s, data) = make_array_bank();
+        let bank = Bank::new(&s, &data).unwrap();
+        let row2 = bank.array_at::<f32>("px", 2).unwrap();
+        assert_eq!(&*row2, &[2.0, 2.1, 2.2]);
+        // Type mismatch.
+        let err = bank.array_at::<i32>("px", 0).unwrap_err();
+        assert!(matches!(err, HipoError::TypeMismatch { .. }));
+        // Out of range.
+        let err = bank.array_at::<f32>("px", 99).unwrap_err();
+        assert!(matches!(err, HipoError::CorruptRecord { .. }));
+    }
+
+    #[test]
+    fn col_array_wrong_length_rejected() {
+        let (s, data) = make_array_bank();
+        let bank = Bank::new(&s, &data).unwrap();
+        let err = bank.col::<[f32; 4]>("px").unwrap_err();
+        assert!(matches!(err, HipoError::ColumnLengthMismatch { .. }));
+        // Calling scalar col on an array column also rejected.
+        let err = bank.col::<f32>("px").unwrap_err();
+        assert!(matches!(err, HipoError::ColumnLengthMismatch { .. }));
+    }
+
+    #[test]
+    fn handle_resolution_checks_length() {
+        let (s, _) = make_array_bank();
+        // Correct N.
+        let _ok = s.handle::<[f32; 3]>("px").unwrap();
+        // Wrong N.
+        let err = s.handle::<[f32; 4]>("px").unwrap_err();
+        assert!(matches!(err, HipoError::ColumnLengthMismatch { .. }));
+        // Scalar handle on array column.
+        let err = s.handle::<f32>("px").unwrap_err();
+        assert!(matches!(err, HipoError::ColumnLengthMismatch { .. }));
+    }
+
+    #[test]
+    fn row_view_array() {
+        let (s, data) = make_array_bank();
+        let bank = Bank::new(&s, &data).unwrap();
+        let row = bank.row(1).unwrap();
+        // Scalar accessor on array column returns None.
+        assert_eq!(row.f32("px"), None);
+        // Array accessor returns the row's array.
+        let pxs = row.array::<f32>("px").unwrap();
+        assert_eq!(&*pxs, &[1.0, 1.1, 1.2]);
+        // Scalar column still works via scalar accessor.
+        assert_eq!(row.i32("pid"), Some(22));
+        // Array accessor on a scalar column → None.
+        assert_eq!(row.array::<i32>("pid"), None);
     }
 
     #[test]

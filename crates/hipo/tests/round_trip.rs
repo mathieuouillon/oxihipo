@@ -466,6 +466,89 @@ fn events_iter_counts_all_events() {
 }
 
 #[test]
+fn write_then_scan_array_columns() {
+    // Schema with a mix of scalar and array columns. Round-trip through
+    // the full writer → file → Chain pipeline and assert every cell
+    // matches.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("array_cols.hipo");
+
+    let dict = {
+        let mut d = Dict::new();
+        d.add(Schema::parse_text("{REC::Traj/100/1}{pid/I,cov/F#9,hits/S#4}").unwrap());
+        d
+    };
+
+    {
+        let mut w = Writer::create(&path).schemas(&dict).build().unwrap();
+        for evno in 0..50_i32 {
+            w.event(|ev| {
+                ev.bank("REC::Traj", |b| {
+                    for r in 0..3_i32 {
+                        b.row(|r_w| {
+                            r_w.set("pid", evno * 100 + r)?;
+                            r_w.set(
+                                "cov",
+                                [
+                                    evno as f32 + 0.1 * r as f32 + 0.0,
+                                    evno as f32 + 0.1 * r as f32 + 0.1,
+                                    evno as f32 + 0.1 * r as f32 + 0.2,
+                                    evno as f32 + 0.1 * r as f32 + 0.3,
+                                    evno as f32 + 0.1 * r as f32 + 0.4,
+                                    evno as f32 + 0.1 * r as f32 + 0.5,
+                                    evno as f32 + 0.1 * r as f32 + 0.6,
+                                    evno as f32 + 0.1 * r as f32 + 0.7,
+                                    evno as f32 + 0.1 * r as f32 + 0.8,
+                                ],
+                            )?;
+                            r_w.set(
+                                "hits",
+                                [
+                                    (evno + r) as i16,
+                                    (evno + r + 1) as i16,
+                                    (evno + r + 2) as i16,
+                                    (evno + r + 3) as i16,
+                                ],
+                            )?;
+                            Ok(())
+                        })?;
+                    }
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    let file = Chain::open(&path).unwrap();
+    assert_eq!(file.event_count(), 50);
+
+    let mut seen = 0_i32;
+    for ev in file.events() {
+        let bank = ev.bank("REC::Traj").unwrap();
+        assert_eq!(bank.rows(), 3);
+        let pids = bank.col::<i32>("pid").unwrap();
+        let cov = bank.col::<[f32; 9]>("cov").unwrap();
+        let hits = bank.col::<[i16; 4]>("hits").unwrap();
+        for r in 0..3_usize {
+            assert_eq!(pids[r], seen * 100 + r as i32);
+            let expected_cov: [f32; 9] =
+                std::array::from_fn(|i| seen as f32 + 0.1 * r as f32 + i as f32 * 0.1);
+            for (a, b) in cov[r].iter().zip(expected_cov.iter()) {
+                assert!((a - b).abs() < 1e-5, "cov[{r}][...]={a} expected {b}");
+            }
+            let expected_hits: [i16; 4] =
+                std::array::from_fn(|i| (seen + r as i32 + i as i32) as i16);
+            assert_eq!(hits[r], expected_hits);
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 50);
+}
+
+#[test]
 fn write_then_scan_lz4_chunked() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunked.hipo");
