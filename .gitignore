@@ -23,6 +23,9 @@ Thumbs.db
 # Local fixtures (large data files kept outside the repo)
 fixtures/large/
 
+# Analysis / example output artifacts
+/out
+
 # Local env / secrets
 .env
 .env.local

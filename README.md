@@ -1,18 +1,51 @@
-# hipo-rs
+# oxhipo
 
-Pure-Rust port of the HIPO data format library used at Jefferson Lab CLAS12.
-The goal is **read throughput meaningfully exceeds the C++ `hipo4` reader**
-on the same hardware, with an API that fits Rust idioms.
+[![CI](https://github.com/mathieuouillon/oxhipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxhipo/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 
-This crate reads and writes HIPO version 6 files. Physics, FFI, ROOT, and
-XRootD layers are intentionally out of scope.
+Pure-Rust reader and writer for the **HIPO v6** binary container used at
+Jefferson Lab CLAS12. Built so that **read throughput meaningfully exceeds
+the C++ `hipo4` reader** on the same hardware, with an API that fits Rust
+idioms.
+
+Reads and writes HIPO version 6 files. Physics, FFI, ROOT, and XRootD
+layers are intentionally out of scope.
+
+## Features
+
+- **Zero-copy columnar reads.** `bank.col::<T>("name")` returns a
+  `Cow<[T]>` that borrows straight from the mmap when the bytes are
+  aligned (always for 4-byte types), with a one-shot copy fallback
+  otherwise. Fixed-length array columns (`name/T#N`) read as `[T; N]`.
+- **One reader: `Chain`.** Single file, directory, or glob; multi-file
+  chains share one mmap per file and a single parsed dictionary.
+- **Data-parallel scans.** `Chain::par_reduce` / `par_for_each` fan the
+  work across cores, with automatic `MADV_WILLNEED` prefetch to hide
+  page-fault latency on networked filesystems (Lustre / NFS).
+- **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions:
+  `Lz4Chunked` (intra-record parallel inflate) and `Lz4ByBank`
+  (decompress only the banks an analysis actually reads — see the
+  benchmarks below).
+- **Pure-Rust by default**, with optional features: `lz4-c` (C LZ4
+  bindings — faster decode + `Lz4Best` HC), `lz4-apple` (Apple
+  `libcompression` decode), and `mimalloc-allocator`.
+
+## Add to your project
+
+Not yet published to crates.io — depend on it via git:
+
+```toml
+[dependencies]
+oxhipo = { git = "https://github.com/mathieuouillon/oxhipo" }
+```
 
 ## Quick start
 
 ```rust
-use hipo::{Chain, Filter};
+use oxhipo::{Chain, Filter};
 
-# fn main() -> hipo::Result<()> {
+# fn main() -> oxhipo::Result<()> {
 // Single file or many — `Chain` is the sole reader entry point.
 let chain = Chain::open("rec.hipo")?
     .with_filter(Filter::require(["REC::Particle"]))?;
@@ -20,7 +53,7 @@ let chain = Chain::open("rec.hipo")?
 // Plain `for` loop. Each `OwnedEvent` is a slice into a shared,
 // ref-counted record buffer — no per-event allocation.
 for ev in chain.events() {
-    let p = hipo::or_continue!(ev.bank("REC::Particle"));
+    let p = oxhipo::or_continue!(ev.bank("REC::Particle"));
     for r in 0..p.rows() {
         let pid: i32 = p.get("pid", r);
         let px:  f32 = p.get("px",  r);
@@ -33,9 +66,9 @@ for ev in chain.events() {
 Multi-file chains are first-class:
 
 ```rust
-use hipo::Chain;
+use oxhipo::Chain;
 
-# fn main() -> hipo::Result<()> {
+# fn main() -> oxhipo::Result<()> {
 // `Chain::open_dir` takes a directory; `Chain::open` also accepts a
 // single file or a glob (e.g. "data/*.hipo").
 let chain = Chain::open_dir("/data/cooked/run5042")?;
@@ -53,9 +86,9 @@ Saturate every core with `par_reduce` — the same scan, fanned across the
 records of every file (`threads = 0` ⇒ one worker per logical CPU):
 
 ```rust
-use hipo::Chain;
+use oxhipo::Chain;
 
-# fn main() -> hipo::Result<()> {
+# fn main() -> oxhipo::Result<()> {
 let chain = Chain::open_dir("/data/cooked/run5042")?;
 
 let total_rows: u64 = chain.par_reduce(
@@ -71,9 +104,9 @@ println!("{total_rows} REC::Particle rows across the chain");
 Writing is closure-driven:
 
 ```rust
-use hipo::{Compression, Writer};
+use oxhipo::{Compression, Writer};
 
-# fn run(dict: &hipo::Dict) -> hipo::Result<()> {
+# fn run(dict: &oxhipo::Dict) -> oxhipo::Result<()> {
 let mut w = Writer::create("out.hipo")
     .schemas(dict)
     .compression(Compression::Lz4)
@@ -91,10 +124,10 @@ w.finish()?;
 
 ## Status
 
-- Single `hipo` library crate. No bundled binary; downstream consumers
+- Single `oxhipo` library crate. No bundled binary; downstream consumers
   build whatever frontend they need on top.
-- `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D
-  warnings`, and `cargo fmt --check` all clean.
+- `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
+  `cargo fmt --check` all clean.
 - Validated on a 1.7 GB CLAS12 file (`rec_clas_022050.evio.00000.hipo`):
   a sequential `Chain::events()` scan reads all 187,941 events at
   ~257 kev/s. `Chain::par_reduce` fans the same scan across cores; measure
@@ -102,12 +135,8 @@ w.finish()?;
 
 ## Layout
 
-```
-crates/
-  hipo       library — error, wire, compress, schema, event, read, write
-```
-
-Inside `crates/hipo/src`:
+Single-crate repo (`oxhipo` — error, wire, compress, schema, event, read,
+write). Inside `src/`:
 
 - `error.rs`, `prelude.rs`
 - `wire/` (private) — constants, bytes, headers, record decompression
@@ -123,14 +152,14 @@ Inside `crates/hipo/src`:
 ## Build
 
 ```sh
-cargo build --release --workspace
-cargo test --workspace
+cargo build --release
+cargo test
 
 # Examples
-cargo run -p hipo --release --example write     -- /tmp/demo.hipo
-cargo run -p hipo --release --example read      -- /tmp/demo.hipo
-cargo run -p hipo --release --example parallel  -- /path/to/file.hipo 0
-cargo run -p hipo --release --example bench_par -- /path/to/file.hipo 0
+cargo run --release --example write     -- /tmp/demo.hipo
+cargo run --release --example read      -- /tmp/demo.hipo
+cargo run --release --example parallel  -- /path/to/file.hipo 0
+cargo run --release --example bench_par -- /path/to/file.hipo 0
 ```
 
 ## Notable design decisions
@@ -161,7 +190,7 @@ cargo run -p hipo --release --example bench_par -- /path/to/file.hipo 0
 
 When the input lives on a network filesystem — JLab ifarm's `/volatile` and
 `/cache` (Lustre), NFS, etc. — `mmap` page-faults become many small RPCs
-and dominate wall time. `hipo` mitigates this in two places:
+and dominate wall time. `oxhipo` mitigates this in two places:
 
 - **Parallel runs** (`Chain::par_for_each` / `Chain::par_reduce`) auto-issue
   `MADV_WILLNEED` over each selected record before the worker pool starts,
@@ -199,9 +228,9 @@ extension that splits each record's events into independently-compressed
 LZ4 chunks with an offset table:
 
 ```rust
-use hipo::{Compression, Writer};
+use oxhipo::{Compression, Writer};
 
-# fn run(dict: &hipo::Dict) -> hipo::Result<()> {
+# fn run(dict: &oxhipo::Dict) -> oxhipo::Result<()> {
 let mut w = Writer::create("out.hipo")
     .schemas(dict)
     .compression(Compression::Lz4Chunked { events_per_chunk: 32 })
@@ -236,9 +265,9 @@ A `recook` example re-emits an existing `Lz4` file as `Lz4Chunked` for
 A/B benchmarking:
 
 ```sh
-cargo run -p hipo --release --example recook -- \
+cargo run --release --example recook -- \
     /volatile/.../in.hipo /scratch/$USER/out_chunked.hipo 32
-cargo run -p hipo --release --example bench_par -- /scratch/$USER/out_chunked.hipo 0
+cargo run --release --example bench_par -- /scratch/$USER/out_chunked.hipo 0
 ```
 
 ### `Lz4ByBank` — decompress only the banks you read
@@ -253,9 +282,9 @@ inflates a bank's stream only when `ev.bank(name)` actually asks for it.
 Banks the user never touches stay compressed for the record's lifetime.
 
 ```rust
-use hipo::{Compression, Writer};
+use oxhipo::{Compression, Writer};
 
-# fn run(dict: &hipo::Dict) -> hipo::Result<()> {
+# fn run(dict: &oxhipo::Dict) -> oxhipo::Result<()> {
 let mut w = Writer::create("out.hipo")
     .schemas(dict)
     .compression(Compression::Lz4ByBank)
@@ -295,14 +324,14 @@ A `recook_by_bank` example re-emits an existing file as `Lz4ByBank`:
 
 ```sh
 # Single file
-cargo run -p hipo --release --example recook_by_bank -- \
+cargo run --release --example recook_by_bank -- \
     /volatile/.../in.hipo /scratch/$USER/out_by_bank.hipo
 
 # Whole directory in parallel (one file per rayon worker)
-cargo run -p hipo --release --example recook_by_bank -- --batch \
+cargo run --release --example recook_by_bank -- --batch \
     /volatile/.../skim_slices/hipo /scratch/$USER/skim_by_bank/
 
-cargo run -p hipo --release --example bench_par -- /scratch/$USER/out_by_bank.hipo 0
+cargo run --release --example bench_par -- /scratch/$USER/out_by_bank.hipo 0
 ```
 
 ### Measured on JLab ifarm
@@ -341,19 +370,19 @@ End-to-end recipe for a real analysis:
 
 ```sh
 # 1. One-time conversion (per slice, in parallel over the directory)
-cargo run -p hipo --release --example recook_by_bank -- --batch \
+cargo run --release --example recook_by_bank -- --batch \
     /volatile/.../pi0_CxC_skim_slices/hipo \
     /volatile/clas12/$USER/pi0_by_bank/
 
-# 2. Point your analysis at the new directory — no code change.
-cargo run -p hipo-analysis --release --example analysis -- \
-    /volatile/clas12/$USER/pi0_by_bank/
+# 2. Point your reader at the new directory — no code change.
+#    Every `ctx.event().bank(name)` call benefits from partial
+#    decompression automatically; no `Lz4ByBank`-aware code required.
 ```
 
-The `hipo-analysis` framework (`Algorithm` trait + `Analysis::run`) uses
-the same polymorphic `EventCtx`, so every `ctx.event().bank(name)` call
-benefits from partial decompression automatically — no `Lz4ByBank`-aware
-algorithm code is required.
+Because the reader is polymorphic over the storage backend (`Bytes` vs
+`ByBank`, on `OwnedEvent`), downstream code stays unchanged whether or
+not the input is `Lz4ByBank` — banks the analysis never touches stay
+compressed for the record's lifetime.
 
 ## Known gaps
 
@@ -370,6 +399,10 @@ algorithm code is required.
 
 Every PR runs:
 - `cargo fmt --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
 - `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings`
+
+## License
+
+Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).
