@@ -4,7 +4,7 @@
 //! Single-file mode (default):
 //!
 //! ```sh
-//! cargo run -p hipo --release --example recook_by_bank -- \
+//! cargo run --release --example recook_by_bank -- \
 //!     /Users/.../in.hipo /tmp/out_by_bank.hipo
 //! ```
 //!
@@ -12,10 +12,24 @@
 //! parallel, mirroring filenames into `<output_dir>`:
 //!
 //! ```sh
-//! cargo run -p hipo --release --example recook_by_bank -- --batch \
+//! cargo run --release --example recook_by_bank -- --batch \
 //!     /volatile/.../skim_slices/hipo \
 //!     /scratch/$USER/skim_by_bank/
 //! ```
+//!
+//! Append `--merge <merged_file.hipo>` to also concatenate every
+//! per-file output into a single combined `Lz4ByBank` file at the
+//! end. Useful when you want one file per slice-set instead of N:
+//!
+//! ```sh
+//! cargo run --release --example recook_by_bank -- --batch \
+//!     /volatile/.../skim_slices/hipo \
+//!     /scratch/$USER/skim_by_bank/ \
+//!     --merge /scratch/$USER/skim_combined.hipo
+//! ```
+//!
+//! The per-file outputs are kept after the merge (you can delete
+//! `<output_dir>` yourself once the merged file is verified).
 //!
 //! Files produced are not readable by the C++ `hipo4` reader (new
 //! compression tag = 5).
@@ -37,20 +51,37 @@ enum Mode {
     Batch {
         input_dir: PathBuf,
         output_dir: PathBuf,
+        /// Optional `--merge <path>`: after recooking each input into
+        /// `output_dir`, concatenate every per-file output into one
+        /// combined `Lz4ByBank` file at `path`.
+        merge: Option<PathBuf>,
     },
 }
 
 fn parse_args() -> Mode {
+    const USAGE: &str = "usage: recook_by_bank [--batch] <in> <out> [--merge <merged_file>]";
     let mut args = std::env::args().skip(1);
-    let first = args
-        .next()
-        .expect("usage: recook_by_bank [--batch] <in> <out>");
+    let first = args.next().expect(USAGE);
     if first == "--batch" {
-        let input_dir = PathBuf::from(args.next().expect("batch mode: <input_dir> <output_dir>"));
-        let output_dir = PathBuf::from(args.next().expect("batch mode: <input_dir> <output_dir>"));
+        let input_dir = PathBuf::from(args.next().expect("--batch: <input_dir> <output_dir>"));
+        let output_dir = PathBuf::from(args.next().expect("--batch: <input_dir> <output_dir>"));
+        // Optional trailing flags. Currently only `--merge <path>`.
+        let mut merge: Option<PathBuf> = None;
+        while let Some(tok) = args.next() {
+            match tok.as_str() {
+                "--merge" => {
+                    let p = args
+                        .next()
+                        .expect("--merge: needs a path (--merge <merged_file>)");
+                    merge = Some(PathBuf::from(p));
+                }
+                other => panic!("unknown argument: {other:?} — {USAGE}"),
+            }
+        }
         Mode::Batch {
             input_dir,
             output_dir,
+            merge,
         }
     } else {
         let output = PathBuf::from(args.next().expect("usage: recook_by_bank <in> <out>"));
@@ -67,7 +98,8 @@ fn main() -> Result<()> {
         Mode::Batch {
             input_dir,
             output_dir,
-        } => recook_batch(&input_dir, &output_dir),
+            merge,
+        } => recook_batch(&input_dir, &output_dir, merge.as_deref()),
     }
 }
 
@@ -124,7 +156,7 @@ fn recook_one(input: &Path, output: &Path, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn recook_batch(input_dir: &Path, output_dir: &Path) -> Result<()> {
+fn recook_batch(input_dir: &Path, output_dir: &Path, merge: Option<&Path>) -> Result<()> {
     if !input_dir.is_dir() {
         return Err(HipoError::Io(std::io::Error::other(format!(
             "batch mode: {} is not a directory",
@@ -200,6 +232,72 @@ fn recook_batch(input_dir: &Path, output_dir: &Path) -> Result<()> {
         human_bytes(in_total),
         human_bytes(out_total),
         100.0 * (out_total as f64 - in_total as f64) / (in_total as f64).max(1.0),
+    );
+
+    // Optional merge phase: glue every successful per-file output into
+    // one combined `Lz4ByBank` file. Skips files that failed (no output
+    // on disk) so a partial batch still produces a usable merged file.
+    if let Some(merged_path) = merge {
+        let outputs: Vec<PathBuf> = entries
+            .iter()
+            .map(|input| output_dir.join(input.file_name().expect("regular file has a name")))
+            .filter(|p| p.is_file())
+            .collect();
+        if outputs.is_empty() {
+            eprintln!("merge: no per-file outputs to combine — skipping");
+        } else {
+            merge_into(&outputs, merged_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Open `inputs` as a single `Chain` and write every event to `merged`
+/// as `Lz4ByBank`. All inputs must share the same dict (enforced by
+/// `Chain::open_all`, which is the natural guarantee when they came
+/// from the same upstream slice-set).
+fn merge_into(inputs: &[PathBuf], merged: &Path) -> Result<()> {
+    eprintln!("merge: {} file(s) → {}", inputs.len(), merged.display());
+    let chain = Chain::open_all(inputs)?;
+    let dict = chain.schemas().clone();
+    let total_events = chain.event_count();
+    let start = Instant::now();
+    {
+        let mut w = Writer::create(merged)
+            .schemas(&dict)
+            .compression(Compression::Lz4ByBank)
+            .build()?;
+        let mut written: u64 = 0;
+        let mut last_pct = -1i64;
+        for ev in chain.events() {
+            // Same caveat as `recook_one`: when the source is already
+            // `Lz4ByBank`, `ev.bytes()` synthesises (decompressing every
+            // bank in the event); for `Bytes`-backed sources it's
+            // zero-copy.
+            w.append_raw(ev.bytes())?;
+            written += 1;
+            if let Some(pct) = (written * 100).checked_div(total_events) {
+                let pct = pct as i64;
+                if pct != last_pct && pct % 10 == 0 {
+                    eprintln!("  merge {pct:3}%  ({written}/{total_events})");
+                    last_pct = pct;
+                }
+            }
+        }
+        w.finish()?;
+    }
+    let elapsed = start.elapsed();
+    let total_in: u64 = inputs
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+    let merged_bytes = std::fs::metadata(merged).map(|m| m.len()).unwrap_or(0);
+    eprintln!(
+        "merge done in {:.1}s — {} → {} ({:+.1}%)",
+        elapsed.as_secs_f64(),
+        human_bytes(total_in),
+        human_bytes(merged_bytes),
+        100.0 * (merged_bytes as f64 - total_in as f64) / (total_in as f64).max(1.0),
     );
     Ok(())
 }
