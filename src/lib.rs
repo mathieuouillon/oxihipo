@@ -4,9 +4,9 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use oxhipo::Chain;
+//! use oxihipo::Chain;
 //!
-//! # fn main() -> oxhipo::Result<()> {
+//! # fn main() -> oxihipo::Result<()> {
 //! let chain = Chain::open("rec.hipo")?;          // single file
 //! // or: let chain = Chain::open_all(["a.hipo", "b.hipo"])?;
 //! for ev in chain.events() {
@@ -52,7 +52,7 @@ pub use crate::write::{BankWriter, Compression, RowWriter, Writer, WriterOptions
 ///
 /// ```ignore
 /// for ev in file.events() {
-///     let p = oxhipo::or_continue!(ev.bank("REC::Particle"));
+///     let p = oxihipo::or_continue!(ev.bank("REC::Particle"));
 ///     // use p ...
 /// }
 /// ```
@@ -77,7 +77,7 @@ macro_rules! or_continue {
 ///
 /// ```ignore
 /// while let Some(rec) = file.event(global_idx) {
-///     let p = oxhipo::or_break!(rec.bank("REC::Particle"));
+///     let p = oxihipo::or_break!(rec.bank("REC::Particle"));
 ///     // ... if missing, leave the while loop ...
 /// }
 /// ```
@@ -97,7 +97,7 @@ macro_rules! or_break {
 ///
 /// ```ignore
 /// #[global_allocator]
-/// static GLOBAL: oxhipo::mimalloc::MiMalloc = oxhipo::mimalloc::MiMalloc;
+/// static GLOBAL: oxihipo::mimalloc::MiMalloc = oxihipo::mimalloc::MiMalloc;
 /// ```
 ///
 /// Recommended for allocation-heavy workloads on macOS, where the

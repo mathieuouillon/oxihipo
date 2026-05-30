@@ -16,7 +16,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use oxhipo::{Chain, DataType, Dict, Schema, Writer};
+use oxihipo::{Chain, DataType, Dict, Schema, Writer};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static COUNTING: AtomicBool = AtomicBool::new(false);

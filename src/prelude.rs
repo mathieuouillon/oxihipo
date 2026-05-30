@@ -1,7 +1,7 @@
 //! Common imports for the typical read/write use case.
 //!
 //! ```no_run
-//! use oxhipo::prelude::*;
+//! use oxihipo::prelude::*;
 //! ```
 
 pub use crate::error::{HipoError, Result};

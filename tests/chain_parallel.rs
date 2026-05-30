@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oxhipo::{Chain, DataType, Dict, Filter, Schema, Writer};
+use oxihipo::{Chain, DataType, Dict, Filter, Schema, Writer};
 
 fn dict() -> Dict {
     let mut d = Dict::new();

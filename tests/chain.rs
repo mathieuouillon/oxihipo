@@ -1,7 +1,7 @@
 //! Integration tests for `Chain` — eager multi-file open, dict
 //! validation, and random access by global event index.
 
-use oxhipo::{Chain, DataType, Dict, Schema, Writer};
+use oxihipo::{Chain, DataType, Dict, Schema, Writer};
 
 fn dict() -> Dict {
     let mut d = Dict::new();
@@ -207,5 +207,5 @@ fn chain_open_expands_glob_pattern() {
 fn chain_open_rejects_malformed_glob() {
     // An unclosed `[` character class is an invalid glob pattern.
     let err = Chain::open("some/dir/[bad.hipo").unwrap_err();
-    assert!(matches!(err, oxhipo::HipoError::InvalidGlob { .. }));
+    assert!(matches!(err, oxihipo::HipoError::InvalidGlob { .. }));
 }

@@ -7,7 +7,7 @@
 
 use std::env;
 
-use oxhipo::{Chain, Compression, Dict, Result, Schema, Writer};
+use oxihipo::{Chain, Compression, Dict, Result, Schema, Writer};
 
 fn main() -> Result<()> {
     let path = env::args()

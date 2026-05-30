@@ -10,7 +10,7 @@
 use std::env;
 use std::hint::black_box;
 
-use oxhipo::{Chain, Result};
+use oxihipo::{Chain, Result};
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);

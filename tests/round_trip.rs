@@ -1,6 +1,6 @@
 //! End-to-end round-trip tests across the full Writer → File → events path.
 
-use oxhipo::{Chain, Compression, DataType, Dict, Filter, Schema, Writer};
+use oxihipo::{Chain, Compression, DataType, Dict, Filter, Schema, Writer};
 
 fn sample_dict() -> Dict {
     let mut d = Dict::new();

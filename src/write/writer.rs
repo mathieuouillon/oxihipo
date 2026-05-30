@@ -3,9 +3,9 @@
 //! Builder-style construction:
 //!
 //! ```no_run
-//! use oxhipo::{Compression, Dict, Writer};
+//! use oxihipo::{Compression, Dict, Writer};
 //!
-//! # fn run(dict: &Dict) -> oxhipo::Result<()> {
+//! # fn run(dict: &Dict) -> oxihipo::Result<()> {
 //! let mut w = Writer::create("out.hipo")
 //!     .schemas(dict)
 //!     .compression(Compression::Lz4)

@@ -14,7 +14,7 @@ use std::env;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use oxhipo::{Chain, EventCtx, Result};
+use oxihipo::{Chain, EventCtx, Result};
 
 /// Sum REC::Particle row counts — a cheap, representative per-event probe.
 fn particle_rows(ev: &EventCtx<'_>) -> u64 {

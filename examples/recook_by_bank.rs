@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
-use oxhipo::{Chain, Compression, HipoError, Result, Writer};
+use oxihipo::{Chain, Compression, HipoError, Result, Writer};
 
 enum Mode {
     Single {

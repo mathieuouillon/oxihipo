@@ -10,7 +10,7 @@
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oxhipo::{Chain, EventCtx, Result};
+use oxihipo::{Chain, EventCtx, Result};
 
 /// Per-thread accumulator for `par_reduce`. Each worker folds events into
 /// its own `Stats`; `combine` then merges the workers' partial results.

@@ -1,10 +1,10 @@
 [package]
-name = "oxhipo"
+name = "oxihipo"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
 license = "MIT"
-repository = "https://github.com/mathieuouillon/oxhipo"
+repository = "https://github.com/mathieuouillon/oxihipo"
 authors = ["hipo-rs contributors"]
 description = "Pure-Rust HIPO v6 reader and writer (Jefferson Lab CLAS12)."
 

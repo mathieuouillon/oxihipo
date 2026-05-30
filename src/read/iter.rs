@@ -4,9 +4,9 @@
 //! `std::iter::Iterator` and plays with `for` loops:
 //!
 //! ```no_run
-//! use oxhipo::Chain;
+//! use oxihipo::Chain;
 //!
-//! # fn main() -> oxhipo::Result<()> {
+//! # fn main() -> oxihipo::Result<()> {
 //! let chain = Chain::open("rec.hipo")?;
 //! for ev in chain.events() {
 //!     if let Some(p) = ev.bank("REC::Particle") {

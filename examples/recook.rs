@@ -25,7 +25,7 @@
 use std::env;
 use std::time::Instant;
 
-use oxhipo::{Chain, Compression, Result, Writer};
+use oxihipo::{Chain, Compression, Result, Writer};
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);

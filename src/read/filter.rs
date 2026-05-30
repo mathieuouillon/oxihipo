@@ -1,7 +1,7 @@
 //! `Filter` — event-level bank-name pushdown.
 //!
 //! ```
-//! # use oxhipo::read::Filter;
+//! # use oxihipo::read::Filter;
 //! let filter = Filter::require(["REC::Particle", "REC::Event"])
 //!     .record_tag([0x42_u64]);
 //! # let _ = filter;

@@ -5,7 +5,7 @@ fn or_continue_skips_none() {
     let inputs = [Some(1_i32), None, Some(2), None, Some(3)];
     let mut kept = Vec::new();
     for opt in inputs {
-        let v = oxhipo::or_continue!(opt);
+        let v = oxihipo::or_continue!(opt);
         kept.push(v);
     }
     assert_eq!(kept, vec![1, 2, 3]);
@@ -16,7 +16,7 @@ fn or_break_exits_on_none() {
     let inputs = [Some(1_i32), Some(2), None, Some(3)];
     let mut kept = Vec::new();
     for opt in inputs {
-        let v = oxhipo::or_break!(opt);
+        let v = oxihipo::or_break!(opt);
         kept.push(v);
     }
     assert_eq!(kept, vec![1, 2]);
@@ -27,7 +27,7 @@ fn or_continue_in_nested_loops_targets_inner() {
     let mut visited = Vec::new();
     for outer in 0..3 {
         for inner in [Some(outer), None, Some(outer + 100)] {
-            let v = oxhipo::or_continue!(inner);
+            let v = oxihipo::or_continue!(inner);
             visited.push(v);
         }
     }

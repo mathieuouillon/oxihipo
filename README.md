@@ -1,6 +1,6 @@
-# oxhipo
+# oxihipo
 
-[![CI](https://github.com/mathieuouillon/oxhipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxhipo/actions/workflows/ci.yml)
+[![CI](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 
@@ -37,15 +37,15 @@ Not yet published to crates.io — depend on it via git:
 
 ```toml
 [dependencies]
-oxhipo = { git = "https://github.com/mathieuouillon/oxhipo" }
+oxihipo = { git = "https://github.com/mathieuouillon/oxihipo" }
 ```
 
 ## Quick start
 
 ```rust
-use oxhipo::{Chain, Filter};
+use oxihipo::{Chain, Filter};
 
-# fn main() -> oxhipo::Result<()> {
+# fn main() -> oxihipo::Result<()> {
 // Single file or many — `Chain` is the sole reader entry point.
 let chain = Chain::open("rec.hipo")?
     .with_filter(Filter::require(["REC::Particle"]))?;
@@ -53,7 +53,7 @@ let chain = Chain::open("rec.hipo")?
 // Plain `for` loop. Each `OwnedEvent` is a slice into a shared,
 // ref-counted record buffer — no per-event allocation.
 for ev in chain.events() {
-    let p = oxhipo::or_continue!(ev.bank("REC::Particle"));
+    let p = oxihipo::or_continue!(ev.bank("REC::Particle"));
     for r in 0..p.rows() {
         let pid: i32 = p.get("pid", r);
         let px:  f32 = p.get("px",  r);
@@ -66,9 +66,9 @@ for ev in chain.events() {
 Multi-file chains are first-class:
 
 ```rust
-use oxhipo::Chain;
+use oxihipo::Chain;
 
-# fn main() -> oxhipo::Result<()> {
+# fn main() -> oxihipo::Result<()> {
 // `Chain::open_dir` takes a directory; `Chain::open` also accepts a
 // single file or a glob (e.g. "data/*.hipo").
 let chain = Chain::open_dir("/data/cooked/run5042")?;
@@ -86,9 +86,9 @@ Saturate every core with `par_reduce` — the same scan, fanned across the
 records of every file (`threads = 0` ⇒ one worker per logical CPU):
 
 ```rust
-use oxhipo::Chain;
+use oxihipo::Chain;
 
-# fn main() -> oxhipo::Result<()> {
+# fn main() -> oxihipo::Result<()> {
 let chain = Chain::open_dir("/data/cooked/run5042")?;
 
 let total_rows: u64 = chain.par_reduce(
@@ -104,9 +104,9 @@ println!("{total_rows} REC::Particle rows across the chain");
 Writing is closure-driven:
 
 ```rust
-use oxhipo::{Compression, Writer};
+use oxihipo::{Compression, Writer};
 
-# fn run(dict: &oxhipo::Dict) -> oxhipo::Result<()> {
+# fn run(dict: &oxihipo::Dict) -> oxihipo::Result<()> {
 let mut w = Writer::create("out.hipo")
     .schemas(dict)
     .compression(Compression::Lz4)
@@ -124,7 +124,7 @@ w.finish()?;
 
 ## Status
 
-- Single `oxhipo` library crate. No bundled binary; downstream consumers
+- Single `oxihipo` library crate. No bundled binary; downstream consumers
   build whatever frontend they need on top.
 - `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo fmt --check` all clean.
@@ -135,7 +135,7 @@ w.finish()?;
 
 ## Layout
 
-Single-crate repo (`oxhipo` — error, wire, compress, schema, event, read,
+Single-crate repo (`oxihipo` — error, wire, compress, schema, event, read,
 write). Inside `src/`:
 
 - `error.rs`, `prelude.rs`
@@ -190,7 +190,7 @@ cargo run --release --example bench_par -- /path/to/file.hipo 0
 
 When the input lives on a network filesystem — JLab ifarm's `/volatile` and
 `/cache` (Lustre), NFS, etc. — `mmap` page-faults become many small RPCs
-and dominate wall time. `oxhipo` mitigates this in two places:
+and dominate wall time. `oxihipo` mitigates this in two places:
 
 - **Parallel runs** (`Chain::par_for_each` / `Chain::par_reduce`) auto-issue
   `MADV_WILLNEED` over each selected record before the worker pool starts,
@@ -228,9 +228,9 @@ extension that splits each record's events into independently-compressed
 LZ4 chunks with an offset table:
 
 ```rust
-use oxhipo::{Compression, Writer};
+use oxihipo::{Compression, Writer};
 
-# fn run(dict: &oxhipo::Dict) -> oxhipo::Result<()> {
+# fn run(dict: &oxihipo::Dict) -> oxihipo::Result<()> {
 let mut w = Writer::create("out.hipo")
     .schemas(dict)
     .compression(Compression::Lz4Chunked { events_per_chunk: 32 })
@@ -282,9 +282,9 @@ inflates a bank's stream only when `ev.bank(name)` actually asks for it.
 Banks the user never touches stay compressed for the record's lifetime.
 
 ```rust
-use oxhipo::{Compression, Writer};
+use oxihipo::{Compression, Writer};
 
-# fn run(dict: &oxhipo::Dict) -> oxhipo::Result<()> {
+# fn run(dict: &oxihipo::Dict) -> oxihipo::Result<()> {
 let mut w = Writer::create("out.hipo")
     .schemas(dict)
     .compression(Compression::Lz4ByBank)
