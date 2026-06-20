@@ -76,24 +76,6 @@ impl Endianness {
     }
 }
 
-/// Reinterpret `bytes` as `&[T]` of `count` elements without copying.
-///
-/// # Safety
-/// - `bytes.len()` must be at least `count * size_of::<T>()`.
-/// - `T` must be `Copy` and have no internal padding.
-/// - On big-endian machines the slice is wrong-endian; supported targets
-///   (x86_64, aarch64) are little-endian and this is zero-cost.
-#[inline(always)]
-pub unsafe fn cast_slice<T: Copy>(bytes: &[u8], count: usize) -> &[T] {
-    debug_assert!(bytes.len() >= count * std::mem::size_of::<T>());
-    debug_assert_eq!(
-        bytes.as_ptr() as usize % std::mem::align_of::<T>(),
-        0,
-        "cast_slice requires aligned source"
-    );
-    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const T, count) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

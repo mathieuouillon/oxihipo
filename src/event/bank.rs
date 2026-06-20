@@ -20,6 +20,29 @@ use std::borrow::Cow;
 use crate::error::{HipoError, Result};
 use crate::schema::{BankColumnType, ColumnHandle, DataType, Schema};
 
+/// Cast `bytes` (exactly `count * size_of::<T>()` bytes) to `&[T]`,
+/// borrowing zero-copy when the source is `T`-aligned and falling back to
+/// an element-by-element copy otherwise. Both paths go through safe
+/// `bytemuck` calls — the alignment fast path is the same single
+/// reinterpretation the old hand-rolled `from_raw_parts` did, and the
+/// misaligned path matches the C++ reader's per-cell `memcpy`.
+#[inline]
+fn cast_cells<T: bytemuck::Pod>(bytes: &[u8], count: usize) -> Cow<'_, [T]> {
+    if count == 0 {
+        return Cow::Borrowed(&[]);
+    }
+    match bytemuck::try_cast_slice::<u8, T>(bytes) {
+        Ok(slice) => Cow::Borrowed(slice),
+        Err(_) => {
+            let elem = std::mem::size_of::<T>();
+            let owned: Vec<T> = (0..count)
+                .map(|i| bytemuck::pod_read_unaligned::<T>(&bytes[i * elem..i * elem + elem]))
+                .collect();
+            Cow::Owned(owned)
+        }
+    }
+}
+
 /// A read-only bank backed by a borrowed byte slice.
 #[derive(Debug, Clone)]
 pub struct Bank<'b> {
@@ -159,11 +182,10 @@ impl<'b> Bank<'b> {
         let offset = self
             .schema
             .cell_byte_offset(handle.column_index(), row, self.rows) as usize;
-        // SAFETY: handle was resolved against this schema, so the
-        // column index is valid; `row < self.rows` ⇒ in bounds.
-        // Unaligned read because event-side data isn't guaranteed
-        // `T`-aligned.
-        unsafe { (self.data.as_ptr().add(offset) as *const T).read_unaligned() }
+        // Safe unaligned read: the handle was resolved against this
+        // schema and `row < self.rows`, so the cell is in bounds.
+        let size = std::mem::size_of::<T>();
+        bytemuck::pod_read_unaligned::<T>(&self.data[offset..offset + size])
     }
 
     /// Read one cell as `T`. Infallible: returns `T::default()` if the
@@ -190,14 +212,13 @@ impl<'b> Bank<'b> {
             return T::default();
         }
         let offset = self.schema.cell_byte_offset(col, row, self.rows) as usize;
-        // SAFETY: `col` came from `column_index` so it's a valid entry;
-        // `row < self.rows`; the bank's data buffer is exactly
-        // `rows * row_size` bytes and the entry's row_offset places the
-        // cell entirely within bounds. We read unaligned because event
-        // boundaries inside a record don't guarantee `T`'s natural
-        // alignment for 8-byte primitives. For `T = [U; N]` the read
-        // grabs `N * size_of::<U>()` bytes — exactly the row's array.
-        unsafe { (self.data.as_ptr().add(offset) as *const T).read_unaligned() }
+        // Safe unaligned read: `col` came from `column_index`, `row <
+        // self.rows`, and the type/length checks above guarantee the
+        // `size_of::<T>()` bytes at `offset` lie within the cell. For
+        // `T = [U; N]` this reads `N * size_of::<U>()` bytes — exactly
+        // the row's array.
+        let size = std::mem::size_of::<T>();
+        bytemuck::pod_read_unaligned::<T>(&self.data[offset..offset + size])
     }
 
     /// Read one row's array bytes for an array column with runtime
@@ -234,23 +255,7 @@ impl<'b> Bank<'b> {
         let elem = std::mem::size_of::<T>();
         let offset = self.schema.cell_byte_offset(col, row, self.rows) as usize;
         let bytes = &self.data[offset..offset + len * elem];
-        let ptr = bytes.as_ptr();
-        if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) && len > 0 {
-            // SAFETY: alignment just checked; len * elem bytes are
-            // borrowed; HIPO files are little-endian, matching all
-            // supported targets.
-            let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, len) };
-            Ok(Cow::Borrowed(slice))
-        } else if len == 0 {
-            Ok(Cow::Borrowed(&[]))
-        } else {
-            let mut owned: Vec<T> = Vec::with_capacity(len);
-            for i in 0..len {
-                let v = unsafe { (ptr.add(i * elem) as *const T).read_unaligned() };
-                owned.push(v);
-            }
-            Ok(Cow::Owned(owned))
-        }
+        Ok(cast_cells::<T>(bytes, len))
     }
 
     /// Borrow a single row's view.
@@ -319,32 +324,10 @@ impl<'b> Bank<'b> {
     /// `T` — typically by going through [`ColumnHandle`].
     #[inline]
     fn cast_column_unchecked<T: BankColumnType>(&self, col: usize) -> Cow<'b, [T]> {
-        let bytes = self.col_bytes(col);
-        let rows = self.rows as usize;
-        if rows == 0 {
-            return Cow::Borrowed(&[]);
-        }
-        let ptr = bytes.as_ptr();
-        if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) {
-            // SAFETY: rows > 0; `bytes.len() == rows * size_of::<T>()` by
-            // construction; alignment just checked; HIPO files are
-            // little-endian, matching all supported targets.
-            let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, rows) };
-            Cow::Borrowed(slice)
-        } else {
-            // Misaligned — copy with read_unaligned. Same fallback the C++
-            // reader uses via memcpy.
-            let mut owned = Vec::with_capacity(rows);
-            let elem = std::mem::size_of::<T>();
-            for i in 0..rows {
-                // SAFETY: bounds: `i * elem + elem <= bytes.len()` because
-                // `bytes.len() == rows * elem` and `i < rows`. The unaligned
-                // read is sound for any T: Copy.
-                let v = unsafe { (ptr.add(i * elem) as *const T).read_unaligned() };
-                owned.push(v);
-            }
-            Cow::Owned(owned)
-        }
+        // `col_bytes` returns exactly `rows * size_of::<T>()` bytes for the
+        // matching `T`, so `cast_cells` borrows zero-copy on aligned data
+        // (the common case for 4-byte types) and copies otherwise.
+        cast_cells::<T>(self.col_bytes(col), self.rows as usize)
     }
 }
 
@@ -486,19 +469,7 @@ impl<'b> RowView<'b> {
         let elem = std::mem::size_of::<T>();
         let off = self.cell_offset(col);
         let bytes = &self.data[off..off + len * elem];
-        let ptr = bytes.as_ptr();
-        if (ptr as usize).is_multiple_of(std::mem::align_of::<T>()) {
-            // SAFETY: alignment checked; `len * elem` bytes borrowed.
-            let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, len) };
-            Some(std::borrow::Cow::Borrowed(slice))
-        } else {
-            let mut owned: Vec<T> = Vec::with_capacity(len);
-            for i in 0..len {
-                let v = unsafe { (ptr.add(i * elem) as *const T).read_unaligned() };
-                owned.push(v);
-            }
-            Some(std::borrow::Cow::Owned(owned))
-        }
+        Some(cast_cells::<T>(bytes, len))
     }
 }
 

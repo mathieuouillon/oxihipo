@@ -25,7 +25,12 @@ use crate::schema::types::{DataType, Schema};
 
 /// Sealed trait — primitive types that can occupy one element of a bank
 /// column. Implemented for `i8`, `i16`, `i32`, `i64`, `f32`, `f64`.
-pub trait BankScalarType: Copy + sealed::Sealed + 'static {
+///
+/// The `bytemuck::Pod` bound lets the reader cast raw bank bytes to
+/// `&[T]` / read a single `T` through *safe* `bytemuck` calls instead of
+/// hand-rolled `unsafe` pointer reads — every supported element type is a
+/// plain-old-data primitive, so this is always satisfiable.
+pub trait BankScalarType: Copy + sealed::Sealed + 'static + bytemuck::Pod {
     /// The wire-level [`DataType`] this Rust type corresponds to.
     const DATA_TYPE: DataType;
 
@@ -148,7 +153,11 @@ impl BankScalarType for f64 {
 ///   works for an array column declared `name/F#32`), with `LENGTH = N`.
 ///
 /// Sealed; downstream crates can't add fishy implementations.
-pub trait BankColumnType: Copy + sealed::Sealed + 'static {
+///
+/// The `bytemuck::Pod` bound covers both forms (scalars are `Pod`;
+/// `[T; N]` is `Pod` when `T` is) and is what makes the column casts in
+/// [`Bank`](crate::event::Bank) safe.
+pub trait BankColumnType: Copy + sealed::Sealed + 'static + bytemuck::Pod {
     /// Wire-level element type. For arrays, this is the *element* type,
     /// not the array type — `[f32; 32]::DATA_TYPE == DataType::Float`.
     const DATA_TYPE: DataType;

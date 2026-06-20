@@ -10,6 +10,9 @@ description = "Pure-Rust HIPO v6 reader and writer (Jefferson Lab CLAS12)."
 
 [dependencies]
 thiserror = "2"
+# `min_const_generics` provides `Pod for [T; N]` over a *generic* N, which
+# the array-column cast (`bank.col::<[f32; N]>()`) relies on.
+bytemuck = { version = "1", features = ["min_const_generics"] }
 lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-decode"] }
 flate2 = { version = "1", features = ["zlib-rs"] }
 memmap2 = "0.9"
