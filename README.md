@@ -20,6 +20,9 @@ layers are intentionally out of scope.
   otherwise. Fixed-length array columns (`name/T#N`) read as `[T; N]`.
 - **One reader: `Chain`.** Single file, directory, or glob; multi-file
   chains share one mmap per file and a single parsed dictionary.
+  `chain.events()` is the panic-on-corruption convenience path;
+  `chain.try_events()` yields `Result<OwnedEvent>` for untrusted or
+  possibly-truncated input.
 - **Data-parallel scans.** `Chain::par_reduce` / `par_for_each` fan the
   work across cores, with automatic `MADV_WILLNEED` prefetch to hide
   page-fault latency on networked filesystems (Lustre / NFS).

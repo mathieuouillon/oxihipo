@@ -282,6 +282,33 @@ impl Chain {
     /// buffer is shared by `Arc` and recycled). Composes with the usual
     /// iterator adapters — `filter`, `take`, `map`, and friends.
     pub fn events(&self) -> ChainEventIter {
+        self.make_event_iter()
+    }
+
+    /// The **fallible** sequential reader: like [`Self::events`] but
+    /// yields `Result<OwnedEvent>`, so a corrupt or truncated record
+    /// surfaces as an `Err` (after which iteration ends) instead of
+    /// panicking the process. Reach for this when the input may be
+    /// untrusted or partially written.
+    ///
+    /// ```no_run
+    /// use oxihipo::Chain;
+    ///
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("rec.hipo")?;
+    /// for ev in chain.try_events() {
+    ///     let ev = ev?;               // propagate corruption as an error
+    ///     let _ = ev.bank("REC::Particle");
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn try_events(&self) -> TryChainEventIter {
+        TryChainEventIter {
+            inner: self.make_event_iter(),
+        }
+    }
+
+    fn make_event_iter(&self) -> ChainEventIter {
         ChainEventIter {
             files: self.files.clone(),
             next_file: 0,
@@ -756,12 +783,11 @@ impl ChainEventIter {
         self.current = Some(iter);
         true
     }
-}
 
-impl Iterator for ChainEventIter {
-    type Item = OwnedEvent;
-
-    fn next(&mut self) -> Option<OwnedEvent> {
+    /// Fallible core, shared by the panicking [`Iterator`] impl and the
+    /// recoverable [`TryChainEventIter`]. Yields `Some(Err)` once on the
+    /// first corrupt record (then ends).
+    fn next_result(&mut self) -> Option<Result<OwnedEvent>> {
         if self.finished {
             return None;
         }
@@ -770,13 +796,47 @@ impl Iterator for ChainEventIter {
                 self.finished = true;
                 return None;
             }
-            match self.current.as_mut().expect("just opened").next() {
-                Some(item) => return Some(item),
+            match self.current.as_mut().expect("just opened").next_result() {
+                Some(Ok(ev)) => return Some(Ok(ev)),
+                Some(Err(e)) => {
+                    self.finished = true;
+                    return Some(Err(e));
+                }
                 None => {
                     self.current = None;
                 }
             }
         }
+    }
+}
+
+impl Iterator for ChainEventIter {
+    type Item = OwnedEvent;
+
+    fn next(&mut self) -> Option<OwnedEvent> {
+        match self.next_result() {
+            Some(Ok(ev)) => Some(ev),
+            Some(Err(e)) => panic!(
+                "oxihipo: corrupt record during events() iteration: {e}\n  \
+                 (use Chain::try_events() for a recoverable Result<OwnedEvent> stream)"
+            ),
+            None => None,
+        }
+    }
+}
+
+/// The fallible sibling of [`ChainEventIter`]: yields `Result<OwnedEvent>`
+/// so corruption is recoverable. Built by [`Chain::try_events`].
+#[derive(Debug)]
+pub struct TryChainEventIter {
+    inner: ChainEventIter,
+}
+
+impl Iterator for TryChainEventIter {
+    type Item = Result<OwnedEvent>;
+
+    fn next(&mut self) -> Option<Result<OwnedEvent>> {
+        self.inner.next_result()
     }
 }
 

@@ -40,7 +40,7 @@ pub mod write;
 
 pub use crate::error::{HipoError, Result};
 pub use crate::event::{Bank, BankRow, BankView, Composite, Event, EventCtx, OwnedEvent, RowView};
-pub use crate::read::{Chain, ChainEventIter, ChainStats, EventIter, Filter};
+pub use crate::read::{Chain, ChainEventIter, ChainStats, EventIter, Filter, TryChainEventIter};
 pub use crate::schema::{ColumnHandle, DataType, Dict, Schema, SchemaEntry};
 pub use crate::write::{BankWriter, Compression, RowWriter, Writer, WriterOptions};
 

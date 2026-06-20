@@ -8,6 +8,6 @@ mod filter;
 mod inner;
 mod iter;
 
-pub use chain::{Chain, ChainEventIter, ChainStats};
+pub use chain::{Chain, ChainEventIter, ChainStats, TryChainEventIter};
 pub use filter::Filter;
 pub use iter::EventIter;

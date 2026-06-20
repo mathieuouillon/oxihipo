@@ -6,7 +6,7 @@
 
 use std::env;
 
-use oxihipo::{Chain, Result};
+use oxihipo::{Bank, Chain, Result};
 
 fn main() -> Result<()> {
     let path = env::args()
@@ -32,8 +32,8 @@ fn main() -> Result<()> {
     let mut total_particles = 0u64;
     for ev in chain.events() {
         events_seen += 1;
-        let p = oxihipo::or_continue!(ev.bank("REC::Particle"));
-        let e = oxihipo::or_continue!(ev.bank("REC::Event"));
+        let p: Bank = oxihipo::or_continue!(ev.bank("REC::Particle"));
+        let e: Bank = oxihipo::or_continue!(ev.bank("REC::Event"));
         total_particles += p.rows() as u64;
         if events_seen <= 3 {
             let event_id: i32 = e.get("event", 0);

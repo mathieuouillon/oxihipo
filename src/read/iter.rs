@@ -30,13 +30,22 @@
 //!
 //! # Error model
 //!
-//! Internal corruption (truncated record, bad LZ4 stream, EOF mid-
-//! decompress) panics with a clear message. HIPO files in production are
-//! write-once and integrity-checked at `File::open`; mid-file corruption
-//! is treated as a bug, not a recoverable error.
+//! Two flavours of the sequential reader:
+//!
+//! - [`Chain::events`](crate::Chain::events) yields `OwnedEvent` and is
+//!   the convenience path. Internal corruption (truncated record, bad
+//!   LZ4 stream, EOF mid-decompress) **panics** with a clear message —
+//!   suited to the write-once, integrity-checked HIPO files of a
+//!   production pipeline, where mid-file corruption is a bug.
+//! - [`Chain::try_events`](crate::Chain::try_events) yields
+//!   `Result<OwnedEvent>`: the same stream, but corruption is surfaced
+//!   as an `Err` (after which iteration ends) instead of aborting the
+//!   process. Use this when reading untrusted or possibly-truncated
+//!   input.
 
 use std::sync::Arc;
 
+use crate::error::{HipoError, Result};
 use crate::event::{Event, OwnedEvent};
 use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
@@ -168,13 +177,16 @@ impl EventIter {
         }
     }
 
-    /// Load the next record that passes the tag filter. Returns false at
-    /// EOF.
-    fn advance_record(&mut self) -> bool {
+    /// Load the next record that passes the tag filter. `Ok(true)` =
+    /// loaded, `Ok(false)` = EOF, `Err` = corruption (truncated span,
+    /// unparseable header, bad LZ4 stream). The fallible signature is what
+    /// lets [`Self::next_result`] surface corruption as a recoverable
+    /// `Result` instead of aborting the process.
+    fn advance_record(&mut self) -> Result<bool> {
         loop {
             let records = self.inner.index.records();
             if self.next_record >= records.len() {
-                return false;
+                return Ok(false);
             }
             let span = records[self.next_record];
             self.next_record += 1;
@@ -183,14 +195,13 @@ impl EventIter {
             if let Some(tags) = &self.record_tags {
                 let hdr_off = span.file_offset as usize;
                 if hdr_off + RECORD_HEADER_SIZE > mmap_len {
-                    panic!("record header past EOF at offset {:#x}", span.file_offset);
+                    return Err(HipoError::CorruptRecord {
+                        offset: span.file_offset,
+                        reason: "record header past EOF",
+                    });
                 }
-                let matches = {
-                    let h = RecordHeader::parse(&self.inner.mmap[hdr_off..])
-                        .expect("record header parse on well-formed file");
-                    tags.contains(&h.user_word_1)
-                };
-                if !matches {
+                let h = RecordHeader::parse(&self.inner.mmap[hdr_off..])?;
+                if !tags.contains(&h.user_word_1) {
                     continue;
                 }
             }
@@ -198,18 +209,16 @@ impl EventIter {
             let lo = span.file_offset as usize;
             let hi = lo + span.record_length as usize;
             if hi > mmap_len {
-                panic!("record extends past EOF at offset {:#x}", span.file_offset);
+                return Err(HipoError::CorruptRecord {
+                    offset: span.file_offset,
+                    reason: "record extends past EOF",
+                });
             }
 
             // Peek the header to decide which decoder to use. Lz4ByBank
             // routes to the lazy bank-stream path; everything else uses
             // the existing decompressed-payload path.
-            let header_kind = {
-                let src = &self.inner.mmap[lo..hi];
-                RecordHeader::parse(src)
-                    .expect("record header on well-formed file")
-                    .compression
-            };
+            let header_kind = RecordHeader::parse(&self.inner.mmap[lo..hi])?.compression;
 
             if matches!(header_kind, CompressionType::Lz4ByBank) {
                 // ByBank: parse the directory eagerly (cheap), defer
@@ -228,17 +237,14 @@ impl EventIter {
                         self.scratch = v;
                     }
                 }
-                let by_bank = {
-                    let src = &self.inner.mmap[lo..hi];
-                    ByBankRecord::parse(src).expect("parse Lz4ByBank record")
-                };
+                let by_bank = ByBankRecord::parse(&self.inner.mmap[lo..hi])?;
                 let event_count = by_bank.event_count();
                 self.cur = CurrentRecord::ByBank {
                     record: by_bank,
                     event_count,
                 };
                 self.next_event = 0;
-                return true;
+                return Ok(true);
             }
 
             // Bytes-backed path. Reclaim buffers first (mut self), then
@@ -246,8 +252,7 @@ impl EventIter {
             let (mut buf, mut event_offsets) = self.take_bytes_buffers();
             let decoded = {
                 let src = &self.inner.mmap[lo..hi];
-                decode_record_into(src, &mut buf, &mut event_offsets)
-                    .expect("decompress well-formed record")
+                decode_record_into(src, &mut buf, &mut event_offsets)?
             };
             self.cur = CurrentRecord::Bytes {
                 payload: Arc::new(buf),
@@ -255,29 +260,38 @@ impl EventIter {
                 data_start: decoded.data_start,
             };
             self.next_event = 0;
-            return true;
+            return Ok(true);
         }
     }
-}
 
-impl Iterator for EventIter {
-    type Item = OwnedEvent;
-
-    fn next(&mut self) -> Option<OwnedEvent> {
+    /// Fallible iteration core: `Some(Ok(ev))` per event, `Some(Err)` once
+    /// on the first corrupt record (after which iteration ends), then
+    /// `None`. The panicking [`Iterator`] impl and the recoverable
+    /// `try_events()` stream both funnel through this.
+    pub(crate) fn next_result(&mut self) -> Option<Result<OwnedEvent>> {
         if self.finished {
             return None;
         }
         loop {
             // Refill the current record if exhausted.
-            if self.next_event >= self.cur.event_count() && !self.advance_record() {
-                self.finished = true;
-                return None;
+            if self.next_event >= self.cur.event_count() {
+                match self.advance_record() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.finished = true;
+                        return None;
+                    }
+                    Err(e) => {
+                        self.finished = true;
+                        return Some(Err(e));
+                    }
+                }
             }
             let i = self.next_event;
             self.next_event += 1;
 
             match &self.cur {
-                CurrentRecord::None => unreachable!("advance_record returns true ⇒ Some current"),
+                CurrentRecord::None => unreachable!("advance_record Ok(true) ⇒ Some current"),
                 CurrentRecord::Bytes {
                     payload,
                     event_offsets,
@@ -291,12 +305,12 @@ impl Iterator for EventIter {
                             continue;
                         }
                     }
-                    return Some(OwnedEvent::slice(
+                    return Some(Ok(OwnedEvent::slice(
                         Arc::clone(payload),
                         start,
                         end,
                         Arc::clone(&self.dict),
-                    ));
+                    )));
                 }
                 CurrentRecord::ByBank { record, .. } => {
                     if let Some(filter) = &self.filter
@@ -304,13 +318,28 @@ impl Iterator for EventIter {
                     {
                         continue;
                     }
-                    return Some(OwnedEvent::by_bank(
+                    return Some(Ok(OwnedEvent::by_bank(
                         Arc::clone(record),
                         i,
                         Arc::clone(&self.dict),
-                    ));
+                    )));
                 }
             }
+        }
+    }
+}
+
+impl Iterator for EventIter {
+    type Item = OwnedEvent;
+
+    fn next(&mut self) -> Option<OwnedEvent> {
+        match self.next_result() {
+            Some(Ok(ev)) => Some(ev),
+            Some(Err(e)) => panic!(
+                "oxihipo: corrupt record during events() iteration: {e}\n  \
+                 (use Chain::try_events() for a recoverable Result<OwnedEvent> stream)"
+            ),
+            None => None,
         }
     }
 }
