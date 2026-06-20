@@ -11,11 +11,38 @@
 
 use std::sync::{Arc, OnceLock};
 
+use memmap2::Mmap;
+
 use crate::compress::decompress;
 use crate::error::{HipoError, Result};
 use crate::wire::bytes::read_u32_le;
 use crate::wire::constants::CompressionType;
 use crate::wire::record_header::RecordHeader;
+
+/// Where a [`ByBankRecord`]'s compressed payload section lives.
+///
+/// The reader path borrows it straight from the memory-mapped file
+/// (`Mmap`) — the `Arc<Mmap>` keeps the mapping alive for the record's
+/// lifetime, so there is **no per-record copy** of the (potentially
+/// multi-MB) compressed section. Test / in-memory construction owns a
+/// copy instead.
+#[derive(Debug)]
+enum Backing {
+    /// Borrowed from the mmap at `[section_off, section_off + len)`.
+    Mmap { mmap: Arc<Mmap>, section_off: usize },
+    /// Owned copy of the section (tests, in-memory `parse`).
+    Owned(Box<[u8]>),
+}
+
+impl Backing {
+    #[inline]
+    fn section(&self, section_len: usize) -> &[u8] {
+        match self {
+            Backing::Mmap { mmap, section_off } => &mmap[*section_off..*section_off + section_len],
+            Backing::Owned(b) => b,
+        }
+    }
+}
 
 /// Counts bank-stream inflate calls. Active under `cfg(test)` or when
 /// the (non-default) `test-instrumentation` feature is enabled —
@@ -53,11 +80,14 @@ pub struct ByBankRecord {
     /// `bank_data[b]` lazily holds the decompressed bank stream once
     /// any caller has touched it.
     bank_data: Vec<OnceLock<Box<[u8]>>>,
-    /// Owned copy of the **compressed** section (the slice between the
-    /// record header and the trailing pad). Used by lazy decompression.
-    raw: Box<[u8]>,
-    /// For each bank, the byte range of its compressed stream within
-    /// `raw`.
+    /// The compressed payload section — borrowed from the mmap on the
+    /// reader path (no copy), owned for in-memory construction.
+    backing: Backing,
+    /// Length in bytes of the compressed section (`backing` resolves to a
+    /// slice of exactly this length).
+    section_len: usize,
+    /// For each bank, the byte range of its compressed stream **within the
+    /// section** (i.e. relative to `backing.section(..)`).
     compressed_streams: Vec<std::ops::Range<usize>>,
     /// For each bank, the expected decompressed size.
     decompressed_sizes: Vec<u32>,
@@ -71,10 +101,44 @@ struct BankDescriptor {
 }
 
 impl ByBankRecord {
-    /// Parse a freshly read on-disk record (header at offset 0, then
-    /// the compressed payload section) into the in-memory directory.
-    /// **Does not decompress any bank stream.**
+    /// Parse a record from an in-memory byte buffer, **owning** a copy of
+    /// its compressed section. Used by tests and any caller that doesn't
+    /// have the bytes in an mmap. **Does not decompress any bank stream.**
     pub fn parse(src: &[u8]) -> Result<Arc<Self>> {
+        let header = Self::check_header(src)?;
+        let (section_off, section_len) = Self::section_bounds(&header, src.len(), 0)?;
+        let section = &src[section_off..section_off + section_len];
+        Self::parse_section(
+            header,
+            section,
+            Backing::Owned(section.to_vec().into_boxed_slice()),
+        )
+    }
+
+    /// Parse a record that lives in a memory-mapped file at
+    /// `[lo, hi)`, **borrowing** its compressed section from the mmap —
+    /// no per-record copy. The `Arc<Mmap>` is cloned into the record so
+    /// the mapping outlives it. **Does not decompress any bank stream.**
+    pub fn parse_mmap(mmap: Arc<Mmap>, lo: usize, hi: usize) -> Result<Arc<Self>> {
+        let src = &mmap[lo..hi];
+        let header = Self::check_header(src)?;
+        // Section bounds are relative to `src` (offset `lo` in the mmap).
+        let (rel_off, section_len) = Self::section_bounds(&header, src.len(), lo)?;
+        let section_off = rel_off; // already absolute (section_bounds adds `lo`)
+        let section = &mmap[section_off..section_off + section_len];
+        Self::parse_section(
+            header,
+            section,
+            Backing::Mmap {
+                mmap: Arc::clone(&mmap),
+                section_off,
+            },
+        )
+    }
+
+    /// Validate that `src` begins with an `Lz4ByBank` record header that
+    /// fits within `src`.
+    fn check_header(src: &[u8]) -> Result<RecordHeader> {
         let header = RecordHeader::parse(src)?;
         if !matches!(header.compression, CompressionType::Lz4ByBank) {
             return Err(HipoError::CorruptRecord {
@@ -88,16 +152,31 @@ impl ByBankRecord {
                 min: header.total_bytes(),
             });
         }
+        Ok(header)
+    }
+
+    /// Compute the compressed section's `(offset, len)`. `base` is added
+    /// to the offset so callers reading from an mmap get an absolute
+    /// offset; pass `0` for a `src`-relative offset.
+    fn section_bounds(
+        header: &RecordHeader,
+        src_len: usize,
+        base: usize,
+    ) -> Result<(usize, usize)> {
         let header_len = header.header_length as usize;
         let payload_disk_len = header.payload_bytes() as usize;
         let pad = header.compressed_data_padding as usize;
-        let payload_disk = &src[header_len..header_len + payload_disk_len];
-        let section = &payload_disk[..payload_disk_len.saturating_sub(pad)];
-
-        Self::parse_section(header, section)
+        if header_len + payload_disk_len > src_len {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBank: payload extends past record",
+            });
+        }
+        let section_len = payload_disk_len.saturating_sub(pad);
+        Ok((base + header_len, section_len))
     }
 
-    fn parse_section(header: RecordHeader, section: &[u8]) -> Result<Arc<Self>> {
+    fn parse_section(header: RecordHeader, section: &[u8], backing: Backing) -> Result<Arc<Self>> {
         if section.len() < 8 {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
@@ -248,7 +327,6 @@ impl ByBankRecord {
             });
         }
 
-        let raw: Box<[u8]> = section.to_vec().into_boxed_slice();
         let bank_data = (0..num_banks).map(|_| OnceLock::new()).collect();
 
         Ok(Arc::new(Self {
@@ -260,7 +338,8 @@ impl ByBankRecord {
             bytes_per_row,
             bank_offsets,
             bank_data,
-            raw,
+            backing,
+            section_len: section.len(),
             compressed_streams,
             decompressed_sizes,
         }))
@@ -329,8 +408,8 @@ impl ByBankRecord {
         // multiple threads concurrently — exactly one initializer runs;
         // others block on it.
         let expected = self.decompressed_sizes[b] as usize;
-        let range = &self.compressed_streams[b];
-        let src = &self.raw[range.clone()];
+        let section = self.backing.section(self.section_len);
+        let src = &section[self.compressed_streams[b].clone()];
 
         // `OnceLock::get_or_init` doesn't allow fallible closures, so we
         // do the inflate outside and stash. If two threads race, the

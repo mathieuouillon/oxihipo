@@ -237,7 +237,7 @@ impl EventIter {
                         self.scratch = v;
                     }
                 }
-                let by_bank = ByBankRecord::parse(&self.inner.mmap[lo..hi])?;
+                let by_bank = ByBankRecord::parse_mmap(Arc::clone(&self.inner.mmap), lo, hi)?;
                 let event_count = by_bank.event_count();
                 self.cur = CurrentRecord::ByBank {
                     record: by_bank,

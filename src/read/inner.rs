@@ -21,7 +21,10 @@ use crate::wire::record_header::RecordHeader;
 #[derive(Debug)]
 pub(crate) struct FileInner {
     pub path: PathBuf,
-    pub mmap: Mmap,
+    /// `Arc` so an `Lz4ByBank` record can borrow its compressed section
+    /// straight from this mapping (the `Arc` keeps it alive for the
+    /// record's lifetime) instead of copying it out per record.
+    pub mmap: Arc<Mmap>,
     pub file_header: FileHeader,
     /// Wrapped in `Arc` so iterators and `OwnedEvent`s share the dict
     /// without cloning it (which would clone each schema's name →
@@ -73,7 +76,7 @@ impl FileInner {
 
         Ok(Self {
             path,
-            mmap,
+            mmap: Arc::new(mmap),
             file_header,
             dict: Arc::new(dict),
             index,

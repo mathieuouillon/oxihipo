@@ -342,7 +342,7 @@ impl Chain {
         let src = &inner.mmap[lo..hi];
         let header = RecordHeader::parse(src).ok()?;
         if matches!(header.compression, CompressionType::Lz4ByBank) {
-            let by_bank = ByBankRecord::parse(src).ok()?;
+            let by_bank = ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi).ok()?;
             if ev_local >= by_bank.event_count() {
                 return None;
             }
@@ -453,7 +453,7 @@ impl Chain {
                     if matches!(header.compression, CompressionType::Lz4ByBank) {
                         // Lazy per-bank decompression — the user's
                         // closure only inflates bank streams it touches.
-                        let by_bank = ByBankRecord::parse(src)?;
+                        let by_bank = ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
                         for ev_idx in 0..by_bank.event_count() {
                             local_in += 1;
                             if filter_active
@@ -557,7 +557,8 @@ impl Chain {
                         let header = RecordHeader::parse(src)?;
 
                         if matches!(header.compression, CompressionType::Lz4ByBank) {
-                            let by_bank = ByBankRecord::parse(src)?;
+                            let by_bank =
+                                ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
                             for ev_idx in 0..by_bank.event_count() {
                                 if filter_active
                                     && let Some(filt) = filter
@@ -651,7 +652,8 @@ impl Chain {
                         let header = RecordHeader::parse(src)?;
 
                         if matches!(header.compression, CompressionType::Lz4ByBank) {
-                            let by_bank = ByBankRecord::parse(src)?;
+                            let by_bank =
+                                ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
                             let n_events = by_bank.event_count();
                             let mut events: Vec<EventCtx<'_>> =
                                 Vec::with_capacity(n_events as usize);
