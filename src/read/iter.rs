@@ -51,7 +51,7 @@ use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
 use crate::schema::Dict;
 use crate::wire::by_bank::ByBankRecord;
-use crate::wire::constants::{CompressionType, RECORD_HEADER_SIZE};
+use crate::wire::constants::RECORD_HEADER_SIZE;
 use crate::wire::record::decode_record_into;
 use crate::wire::record_header::RecordHeader;
 
@@ -220,7 +220,7 @@ impl EventIter {
             // the existing decompressed-payload path.
             let header_kind = RecordHeader::parse(&self.inner.mmap[lo..hi])?.compression;
 
-            if matches!(header_kind, CompressionType::Lz4ByBank) {
+            if header_kind.is_by_bank() {
                 // ByBank: parse the directory eagerly (cheap), defer
                 // bank decompression to first `ev.bank(name)`.
                 // Recover the previous record's Bytes-path scratch first.

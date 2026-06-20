@@ -55,6 +55,12 @@ pub enum Compression {
     /// plus an event×bank presence table. Readers decompress only the
     /// bank streams they actually touch.
     Lz4ByBank,
+    /// Version 2 of [`Self::Lz4ByBank`]: identical bank streams, but the
+    /// directory is prefixed with an extension-format-version byte and is
+    /// itself LZ4-compressed (the per-event size matrix is highly
+    /// redundant), shrinking the on-disk directory on skim-like data.
+    /// The reader handles both v1 and v2 transparently.
+    Lz4ByBankV2,
 }
 
 impl Compression {
@@ -79,6 +85,7 @@ impl Compression {
             Self::Gzip => CompressionType::Gzip,
             Self::Lz4Chunked { .. } => CompressionType::Lz4Chunked,
             Self::Lz4ByBank => CompressionType::Lz4ByBank,
+            Self::Lz4ByBankV2 => CompressionType::Lz4ByBankV2,
         }
     }
 }
@@ -181,6 +188,14 @@ pub fn build_record_bytes(
             compress_buf,
         ),
         Compression::Lz4ByBank => build_by_bank_record_bytes(
+            events,
+            user_word_1,
+            user_word_2,
+            record_number,
+            payload_buf,
+            compress_buf,
+        ),
+        Compression::Lz4ByBankV2 => build_by_bank_v2_record_bytes(
             events,
             user_word_1,
             user_word_2,
@@ -438,92 +453,19 @@ fn build_by_bank_record_bytes(
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
-    let event_count = events.len() as u32;
-    let e_count = events.len();
-
-    // ---- 1. Walk events, build directory + per-event bank tables. -----
-    //
-    // We accumulate banks in encounter order, then sort by (group, item)
-    // for a reproducible on-disk layout. Each bank has:
-    //  - a fixed descriptor (group, item, data_type) taken from its
-    //    first occurrence;
-    //  - a per-event presence bit and a per-event byte size (0 is valid
-    //    for "present but empty");
-    //  - a concatenated uncompressed bytes buffer in event order.
-    let mut event_tags: Vec<u32> = Vec::with_capacity(e_count);
-    let mut descriptors: Vec<(u16, u8, u8)> = Vec::new();
-    let mut lookup: std::collections::HashMap<(u16, u8), usize> = std::collections::HashMap::new();
-    let mut present: Vec<Vec<bool>> = Vec::new(); // [b][e]
-    let mut sizes: Vec<Vec<u32>> = Vec::new(); // [b][e]
-    let mut streams: Vec<Vec<u8>> = Vec::new(); // [b] = concat
-
-    for (e_idx, ev_bytes) in events.iter().enumerate() {
-        let ev = Event::new(ev_bytes);
-        event_tags.push(ev.tag());
-        for (hdr, data) in ev.iter_structures() {
-            let key = (hdr.group, hdr.item);
-            let b = match lookup.get(&key) {
-                Some(&b) => b,
-                None => {
-                    let b = descriptors.len();
-                    descriptors.push((hdr.group, hdr.item, hdr.ty));
-                    lookup.insert(key, b);
-                    present.push(vec![false; e_count]);
-                    sizes.push(vec![0u32; e_count]);
-                    streams.push(Vec::new());
-                    b
-                }
-            };
-            present[b][e_idx] = true;
-            sizes[b][e_idx] = data.len() as u32;
-            streams[b].extend_from_slice(data);
-        }
-    }
-    let num_banks = descriptors.len();
-
-    // ---- 2. Sort banks by (group, item) for determinism. --------------
-    let mut sort_idx: Vec<usize> = (0..num_banks).collect();
-    sort_idx.sort_by_key(|&b| (descriptors[b].0, descriptors[b].1));
-    let descriptors: Vec<(u16, u8, u8)> = sort_idx.iter().map(|&b| descriptors[b]).collect();
-    let present: Vec<Vec<bool>> = sort_idx.iter().map(|&b| present[b].clone()).collect();
-    let sizes: Vec<Vec<u32>> = sort_idx.iter().map(|&b| sizes[b].clone()).collect();
-    let mut streams: Vec<Vec<u8>> = sort_idx
-        .iter()
-        .map(|&b| std::mem::take(&mut streams[b]))
-        .collect();
-
-    // ---- 3. Compress each bank's concatenated bytes (one LZ4 block). --
-    let mut compressed_streams: Vec<Vec<u8>> = Vec::with_capacity(num_banks);
-    let mut compressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
-    let mut decompressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
-    for stream in &mut streams {
-        let decompressed = stream.len() as u32;
-        decompressed_sizes.push(decompressed);
-        if decompressed == 0 {
-            // Every present occurrence had zero bytes (bank with 0 rows
-            // across every event). Skip compression.
-            compressed_sizes.push(0);
-            compressed_streams.push(Vec::new());
-            continue;
-        }
-        compress_buf.clear();
-        let n = compress(CompressionType::Lz4, stream, compress_buf)?;
-        compressed_sizes.push(n as u32);
-        compressed_streams.push(compress_buf[..n].to_vec());
-    }
-
-    // ---- 4. Pack the presence matrix (row-major, ceil(B/8) bytes/row).
-    let bytes_per_row = num_banks.div_ceil(8);
-    let mut presence: Vec<u8> = vec![0u8; e_count * bytes_per_row];
-    for (b, row) in present.iter().enumerate() {
-        for (e, &p) in row.iter().enumerate() {
-            if p {
-                let byte = e * bytes_per_row + b / 8;
-                let bit = (b % 8) as u8;
-                presence[byte] |= 1u8 << bit;
-            }
-        }
-    }
+    let ByBankParts {
+        num_banks,
+        event_count,
+        e_count,
+        descriptors,
+        compressed_streams,
+        compressed_sizes,
+        decompressed_sizes,
+        event_tags,
+        presence,
+        bytes_per_row,
+        sizes,
+    } = build_by_bank_parts(events, compress_buf)?;
 
     // ---- 5. Assemble the payload section. -----------------------------
     let directory_bytes = 8                       // num_banks + event_count
@@ -593,6 +535,267 @@ fn build_by_bank_record_bytes(
         data_length,
         compressed_data_length: compressed_with_pad as u32,
         compression: CompressionType::Lz4ByBank,
+        user_word_1,
+        user_word_2,
+        endianness: Endianness::Little,
+        user_header_padding: 0,
+        data_padding: 0,
+        compressed_data_padding: pad as u8,
+    };
+
+    let mut out = vec![0u8; total_bytes as usize];
+    let hdr: &mut [u8; RECORD_HEADER_SIZE] = (&mut out[..RECORD_HEADER_SIZE])
+        .try_into()
+        .map_err(|_| HipoError::Compression("record header slice"))?;
+    header.write(hdr);
+    out[RECORD_HEADER_SIZE..].copy_from_slice(&payload_buf[..compressed_with_pad]);
+    Ok(out)
+}
+
+/// Per-bank directory pieces shared by the v1 and v2 by-bank builders.
+/// `compressed_streams[b]` is the LZ4 block for bank `b`'s concatenated
+/// data; `sizes[b][e]` is the (uncompressed) byte size of bank `b` in
+/// event `e`.
+struct ByBankParts {
+    num_banks: usize,
+    event_count: u32,
+    e_count: usize,
+    descriptors: Vec<(u16, u8, u8)>,
+    compressed_streams: Vec<Vec<u8>>,
+    compressed_sizes: Vec<u32>,
+    decompressed_sizes: Vec<u32>,
+    event_tags: Vec<u32>,
+    presence: Vec<u8>,
+    bytes_per_row: usize,
+    sizes: Vec<Vec<u32>>,
+}
+
+/// Steps 1–4 shared by both by-bank builders: walk events into per-bank
+/// tables, sort banks for determinism, LZ4 each bank stream, pack the
+/// presence matrix.
+fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<ByBankParts> {
+    let event_count = events.len() as u32;
+    let e_count = events.len();
+
+    let mut event_tags: Vec<u32> = Vec::with_capacity(e_count);
+    let mut descriptors: Vec<(u16, u8, u8)> = Vec::new();
+    let mut lookup: std::collections::HashMap<(u16, u8), usize> = std::collections::HashMap::new();
+    let mut present: Vec<Vec<bool>> = Vec::new(); // [b][e]
+    let mut sizes: Vec<Vec<u32>> = Vec::new(); // [b][e]
+    let mut streams: Vec<Vec<u8>> = Vec::new(); // [b] = concat
+
+    for (e_idx, ev_bytes) in events.iter().enumerate() {
+        let ev = Event::new(ev_bytes);
+        event_tags.push(ev.tag());
+        for (hdr, data) in ev.iter_structures() {
+            let key = (hdr.group, hdr.item);
+            let b = match lookup.get(&key) {
+                Some(&b) => b,
+                None => {
+                    let b = descriptors.len();
+                    descriptors.push((hdr.group, hdr.item, hdr.ty));
+                    lookup.insert(key, b);
+                    present.push(vec![false; e_count]);
+                    sizes.push(vec![0u32; e_count]);
+                    streams.push(Vec::new());
+                    b
+                }
+            };
+            present[b][e_idx] = true;
+            sizes[b][e_idx] = data.len() as u32;
+            streams[b].extend_from_slice(data);
+        }
+    }
+    let num_banks = descriptors.len();
+
+    // Sort banks by (group, item) for a reproducible on-disk layout.
+    let mut sort_idx: Vec<usize> = (0..num_banks).collect();
+    sort_idx.sort_by_key(|&b| (descriptors[b].0, descriptors[b].1));
+    let descriptors: Vec<(u16, u8, u8)> = sort_idx.iter().map(|&b| descriptors[b]).collect();
+    let present: Vec<Vec<bool>> = sort_idx.iter().map(|&b| present[b].clone()).collect();
+    let sizes: Vec<Vec<u32>> = sort_idx.iter().map(|&b| sizes[b].clone()).collect();
+    let mut streams: Vec<Vec<u8>> = sort_idx
+        .iter()
+        .map(|&b| std::mem::take(&mut streams[b]))
+        .collect();
+
+    // Compress each bank's concatenated bytes (one LZ4 block).
+    let mut compressed_streams: Vec<Vec<u8>> = Vec::with_capacity(num_banks);
+    let mut compressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
+    let mut decompressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
+    for stream in &mut streams {
+        let decompressed = stream.len() as u32;
+        decompressed_sizes.push(decompressed);
+        if decompressed == 0 {
+            compressed_sizes.push(0);
+            compressed_streams.push(Vec::new());
+            continue;
+        }
+        compress_buf.clear();
+        let n = compress(CompressionType::Lz4, stream, compress_buf)?;
+        compressed_sizes.push(n as u32);
+        compressed_streams.push(compress_buf[..n].to_vec());
+    }
+
+    // Pack the presence matrix (row-major, ceil(B/8) bytes/row).
+    let bytes_per_row = num_banks.div_ceil(8);
+    let mut presence: Vec<u8> = vec![0u8; e_count * bytes_per_row];
+    for (b, row) in present.iter().enumerate() {
+        for (e, &p) in row.iter().enumerate() {
+            if p {
+                let byte = e * bytes_per_row + b / 8;
+                let bit = (b % 8) as u8;
+                presence[byte] |= 1u8 << bit;
+            }
+        }
+    }
+
+    Ok(ByBankParts {
+        num_banks,
+        event_count,
+        e_count,
+        descriptors,
+        compressed_streams,
+        compressed_sizes,
+        decompressed_sizes,
+        event_tags,
+        presence,
+        bytes_per_row,
+        sizes,
+    })
+}
+
+/// By-bank **version 2** record path.
+///
+/// Same bank streams as v1, but the directory is prefixed with an
+/// extension-format-version byte and LZ4-compressed (it is dominated by
+/// the redundant per-event size matrix). Compressed payload layout:
+///
+/// ```text
+/// +-- compressed payload section -------------------+
+/// | u8  ext_format_version (= 2)                    |
+/// | u8  reserved[3]                                 |   pad to 4-byte align
+/// | u32 num_banks (B)                               |
+/// | u32 event_count (E)                             |
+/// | u32 directory_compressed_len                    |
+/// | u32 directory_decompressed_len                  |
+/// | LZ4(directory)                                  |   the v1 directory body
+/// | concat B × LZ4 bank streams                     |   (identical to v1)
+/// +-------------------------------------------------+
+///
+/// directory (decompressed) =
+///   B × { u16 group, u8 item, u8 data_type }
+///   B × u32 compressed_bank_sizes
+///   B × u32 decompressed_bank_sizes
+///   E × u32 event_tags
+///   E × ceil(B/8) presence
+///   B × E × u32 event_bank_sizes
+/// ```
+fn build_by_bank_v2_record_bytes(
+    events: &[&[u8]],
+    user_word_1: u64,
+    user_word_2: u64,
+    record_number: u32,
+    payload_buf: &mut Vec<u8>,
+    compress_buf: &mut Vec<u8>,
+) -> Result<Vec<u8>> {
+    const EXT_FORMAT_VERSION: u8 = 2;
+
+    let ByBankParts {
+        num_banks,
+        event_count,
+        e_count,
+        descriptors,
+        compressed_streams,
+        compressed_sizes,
+        decompressed_sizes,
+        event_tags,
+        presence,
+        bytes_per_row,
+        sizes,
+    } = build_by_bank_parts(events, compress_buf)?;
+
+    // ---- Build the directory body (uncompressed). ---------------------
+    let dir_len = 4 * num_banks            // descriptors
+        + 4 * num_banks                     // compressed sizes
+        + 4 * num_banks                     // decompressed sizes
+        + 4 * e_count                       // tags
+        + e_count * bytes_per_row           // presence
+        + 4 * num_banks * e_count; // event_bank_sizes
+    let mut dir = Vec::with_capacity(dir_len);
+    for &(g, i, t) in &descriptors {
+        dir.extend_from_slice(&g.to_le_bytes());
+        dir.push(i);
+        dir.push(t);
+    }
+    for s in &compressed_sizes {
+        dir.extend_from_slice(&s.to_le_bytes());
+    }
+    for s in &decompressed_sizes {
+        dir.extend_from_slice(&s.to_le_bytes());
+    }
+    for t in &event_tags {
+        dir.extend_from_slice(&t.to_le_bytes());
+    }
+    dir.extend_from_slice(&presence);
+    for row in &sizes {
+        for &s in row {
+            dir.extend_from_slice(&s.to_le_bytes());
+        }
+    }
+    debug_assert_eq!(dir.len(), dir_len);
+
+    // ---- LZ4-compress the directory. ----------------------------------
+    let mut dir_compressed = Vec::new();
+    let dir_comp_len = if dir.is_empty() {
+        0
+    } else {
+        compress(CompressionType::Lz4, &dir, &mut dir_compressed)?
+    };
+
+    // ---- Assemble the v2 payload section. -----------------------------
+    let v2_header = 4 + 4 + 4 + 4 + 4; // version+reserved | B | E | dir_comp | dir_decomp
+    let stream_bytes: usize = compressed_streams.iter().map(|s| s.len()).sum();
+    let section_len = v2_header + dir_comp_len + stream_bytes;
+
+    payload_buf.clear();
+    payload_buf.reserve(section_len);
+    payload_buf.push(EXT_FORMAT_VERSION);
+    payload_buf.extend_from_slice(&[0u8, 0, 0]); // reserved
+    payload_buf.extend_from_slice(&(num_banks as u32).to_le_bytes());
+    payload_buf.extend_from_slice(&event_count.to_le_bytes());
+    payload_buf.extend_from_slice(&(dir_comp_len as u32).to_le_bytes());
+    payload_buf.extend_from_slice(&(dir_len as u32).to_le_bytes());
+    payload_buf.extend_from_slice(&dir_compressed[..dir_comp_len]);
+    for stream in &compressed_streams {
+        payload_buf.extend_from_slice(stream);
+    }
+    debug_assert_eq!(payload_buf.len(), section_len);
+
+    // ---- 4-byte align + record header. --------------------------------
+    let pad = (4 - (section_len % 4)) % 4;
+    let compressed_with_pad = section_len + pad;
+    payload_buf.extend(std::iter::repeat_n(0u8, pad));
+
+    let data_length: u32 = decompressed_sizes.iter().sum();
+    let index_array_length = event_count * 4;
+    let header_length = RECORD_HEADER_SIZE as u32;
+    let total_bytes = header_length as u64 + compressed_with_pad as u64;
+    let mut bit_info: u32 = HIPO_VERSION;
+    bit_info |= ((pad as u32) & BITINFO_PAD_MASK) << BITINFO_PAD3_SHIFT;
+    bit_info |= 4 << BITINFO_HEADER_TYPE_SHIFT;
+
+    let header = RecordHeader {
+        record_length: total_bytes,
+        record_number,
+        header_length,
+        event_count,
+        index_array_length,
+        bit_info,
+        user_header_length: 0,
+        data_length,
+        compressed_data_length: compressed_with_pad as u32,
+        compression: CompressionType::Lz4ByBankV2,
         user_word_1,
         user_word_2,
         endianness: Endianness::Little,

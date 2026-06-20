@@ -31,8 +31,13 @@
 //! The per-file outputs are kept after the merge (you can delete
 //! `<output_dir>` yourself once the merged file is verified).
 //!
-//! Files produced are not readable by the C++ `hipo4` reader (new
-//! compression tag = 5).
+//! Pass `--v2` (anywhere on the command line) to emit the version-2
+//! by-bank format: the directory is LZ4-compressed and carries an
+//! extension-format-version byte, shrinking the on-disk directory.
+//! The default stays v1 for byte-stable, backward-compatible output.
+//!
+//! Files produced are not readable by the C++ `hipo4` reader (Rust-only
+//! compression tags 5 / 6).
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -58,52 +63,59 @@ enum Mode {
     },
 }
 
-fn parse_args() -> Mode {
-    const USAGE: &str = "usage: recook_by_bank [--batch] <in> <out> [--merge <merged_file>]";
+fn parse_args() -> (Mode, Compression) {
+    const USAGE: &str = "usage: recook_by_bank [--v2] [--batch] <in> <out> [--merge <merged_file>]";
+    // `--v2` selects the version-2 by-bank format (compressed directory +
+    // version byte); the default stays v1 for byte-stable output and
+    // backward compatibility with existing readers.
+    let mut compression = Compression::Lz4ByBank;
+    let mut batch = false;
+    let mut merge: Option<PathBuf> = None;
+    let mut positional: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
-    let first = args.next().expect(USAGE);
-    if first == "--batch" {
-        let input_dir = PathBuf::from(args.next().expect("--batch: <input_dir> <output_dir>"));
-        let output_dir = PathBuf::from(args.next().expect("--batch: <input_dir> <output_dir>"));
-        // Optional trailing flags. Currently only `--merge <path>`.
-        let mut merge: Option<PathBuf> = None;
-        while let Some(tok) = args.next() {
-            match tok.as_str() {
-                "--merge" => {
-                    let p = args
-                        .next()
-                        .expect("--merge: needs a path (--merge <merged_file>)");
-                    merge = Some(PathBuf::from(p));
-                }
-                other => panic!("unknown argument: {other:?} — {USAGE}"),
+    while let Some(tok) = args.next() {
+        match tok.as_str() {
+            "--v2" => compression = Compression::Lz4ByBankV2,
+            "--batch" => batch = true,
+            "--merge" => {
+                merge = Some(PathBuf::from(
+                    args.next()
+                        .expect("--merge: needs a path (--merge <merged_file>)"),
+                ));
             }
+            other if other.starts_with("--") => panic!("unknown flag {other:?} — {USAGE}"),
+            _ => positional.push(tok),
         }
+    }
+    let input = PathBuf::from(positional.first().cloned().expect(USAGE));
+    let output = PathBuf::from(positional.get(1).cloned().expect(USAGE));
+    let mode = if batch {
         Mode::Batch {
-            input_dir,
-            output_dir,
+            input_dir: input,
+            output_dir: output,
             merge,
         }
     } else {
-        let output = PathBuf::from(args.next().expect("usage: recook_by_bank <in> <out>"));
-        Mode::Single {
-            input: PathBuf::from(first),
-            output,
-        }
-    }
+        Mode::Single { input, output }
+    };
+    (mode, compression)
 }
 
 fn main() -> Result<()> {
-    match parse_args() {
-        Mode::Single { input, output } => recook_one(&input, &output, /*quiet=*/ false),
+    let (mode, compression) = parse_args();
+    match mode {
+        Mode::Single { input, output } => {
+            recook_one(&input, &output, /*quiet=*/ false, compression)
+        }
         Mode::Batch {
             input_dir,
             output_dir,
             merge,
-        } => recook_batch(&input_dir, &output_dir, merge.as_deref()),
+        } => recook_batch(&input_dir, &output_dir, merge.as_deref(), compression),
     }
 }
 
-fn recook_one(input: &Path, output: &Path, quiet: bool) -> Result<()> {
+fn recook_one(input: &Path, output: &Path, quiet: bool, compression: Compression) -> Result<()> {
     let chain = Chain::open(input)?;
     let dict = chain.schemas().clone();
     let total_events = chain.event_count();
@@ -119,7 +131,7 @@ fn recook_one(input: &Path, output: &Path, quiet: bool) -> Result<()> {
     {
         let mut w = Writer::create(output)
             .schemas(&dict)
-            .compression(Compression::Lz4ByBank)
+            .compression(compression)
             .build()?;
         let mut written: u64 = 0;
         let mut last_pct = -1i64;
@@ -156,7 +168,12 @@ fn recook_one(input: &Path, output: &Path, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn recook_batch(input_dir: &Path, output_dir: &Path, merge: Option<&Path>) -> Result<()> {
+fn recook_batch(
+    input_dir: &Path,
+    output_dir: &Path,
+    merge: Option<&Path>,
+    compression: Compression,
+) -> Result<()> {
     if !input_dir.is_dir() {
         return Err(HipoError::Io(std::io::Error::other(format!(
             "batch mode: {} is not a directory",
@@ -199,7 +216,7 @@ fn recook_batch(input_dir: &Path, output_dir: &Path, merge: Option<&Path>) -> Re
     entries.par_iter().for_each(|input| {
         let fname = input.file_name().expect("regular file has a name");
         let output = output_dir.join(fname);
-        let r = recook_one(input, &output, /*quiet=*/ true);
+        let r = recook_one(input, &output, /*quiet=*/ true, compression);
         let i = done.fetch_add(1, Ordering::Relaxed) + 1;
         match r {
             Ok(()) => {
@@ -246,7 +263,7 @@ fn recook_batch(input_dir: &Path, output_dir: &Path, merge: Option<&Path>) -> Re
         if outputs.is_empty() {
             eprintln!("merge: no per-file outputs to combine — skipping");
         } else {
-            merge_into(&outputs, merged_path)?;
+            merge_into(&outputs, merged_path, compression)?;
         }
     }
     Ok(())
@@ -256,7 +273,7 @@ fn recook_batch(input_dir: &Path, output_dir: &Path, merge: Option<&Path>) -> Re
 /// as `Lz4ByBank`. All inputs must share the same dict (enforced by
 /// `Chain::open_all`, which is the natural guarantee when they came
 /// from the same upstream slice-set).
-fn merge_into(inputs: &[PathBuf], merged: &Path) -> Result<()> {
+fn merge_into(inputs: &[PathBuf], merged: &Path, compression: Compression) -> Result<()> {
     eprintln!("merge: {} file(s) → {}", inputs.len(), merged.display());
     let chain = Chain::open_all(inputs)?;
     let dict = chain.schemas().clone();
@@ -265,7 +282,7 @@ fn merge_into(inputs: &[PathBuf], merged: &Path) -> Result<()> {
     {
         let mut w = Writer::create(merged)
             .schemas(&dict)
-            .compression(Compression::Lz4ByBank)
+            .compression(compression)
             .build()?;
         let mut written: u64 = 0;
         let mut last_pct = -1i64;

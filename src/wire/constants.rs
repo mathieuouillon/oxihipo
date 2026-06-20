@@ -136,6 +136,12 @@ pub enum CompressionType {
     /// decompression — `ev.bank("name")` inflates only the requested
     /// bank's stream. **Not readable by the C++ `hipo4` reader.**
     Lz4ByBank = 5,
+    /// Version 2 of the by-bank format: the directory carries an explicit
+    /// extension-format-version byte and is itself LZ4-compressed (the
+    /// per-event size matrix is highly redundant), shrinking the on-disk
+    /// directory. Bank streams are unchanged. Layout in `wire/by_bank.rs`.
+    /// **Not readable by the C++ `hipo4` reader.**
+    Lz4ByBankV2 = 6,
 }
 
 impl CompressionType {
@@ -147,7 +153,14 @@ impl CompressionType {
             3 => Some(Self::Gzip),
             4 => Some(Self::Lz4Chunked),
             5 => Some(Self::Lz4ByBank),
+            6 => Some(Self::Lz4ByBankV2),
             _ => None,
         }
+    }
+
+    /// True for both by-bank formats (v1 tag 5 and v2 tag 6) — the
+    /// reader treats them identically except for directory decoding.
+    pub const fn is_by_bank(self) -> bool {
+        matches!(self, Self::Lz4ByBank | Self::Lz4ByBankV2)
     }
 }

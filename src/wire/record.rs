@@ -347,14 +347,14 @@ impl Record {
         compressed_record: &[u8],
         header: RecordHeader,
     ) -> Result<()> {
-        if matches!(header.compression, CompressionType::Lz4ByBank) {
-            // Lz4ByBank records can't be loaded into a single payload
+        if header.compression.is_by_bank() {
+            // By-bank records (v1/v2) can't be loaded into a single payload
             // buffer — they keep banks individually compressed for
             // partial decode. Callers must use `ByBankRecord::parse`
             // instead. Bug to reach here in production code.
             return Err(HipoError::CorruptRecord {
                 offset: 0,
-                reason: "Record::load on Lz4ByBank record; use ByBankRecord::parse",
+                reason: "Record::load on by-bank record; use ByBankRecord::parse",
             });
         }
         if compressed_record.len() < header.total_bytes() as usize {

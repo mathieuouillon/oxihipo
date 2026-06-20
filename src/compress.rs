@@ -89,7 +89,8 @@ pub fn decompress(
         CompressionType::Lz4
         | CompressionType::Lz4Best
         | CompressionType::Lz4Chunked
-        | CompressionType::Lz4ByBank => {
+        | CompressionType::Lz4ByBank
+        | CompressionType::Lz4ByBankV2 => {
             // `Lz4Chunked` / `Lz4ByBank` reach this point only when their
             // record decoders hand us a single inner LZ4 block; their
             // record-level wrappers always pass `Lz4` explicitly. Routing
@@ -234,7 +235,8 @@ pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) 
         CompressionType::Lz4
         | CompressionType::Lz4Best
         | CompressionType::Lz4Chunked
-        | CompressionType::Lz4ByBank => {
+        | CompressionType::Lz4ByBank
+        | CompressionType::Lz4ByBankV2 => {
             if expected == 0 {
                 return Ok(0);
             }
@@ -316,7 +318,8 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
         CompressionType::Lz4
         | CompressionType::Lz4Best
         | CompressionType::Lz4Chunked
-        | CompressionType::Lz4ByBank => {
+        | CompressionType::Lz4ByBank
+        | CompressionType::Lz4ByBankV2 => {
             // `Lz4Chunked` / `Lz4ByBank` are record-level format extensions;
             // their inner compression units still flow through this same
             // code path with `Lz4`. The tags route here to keep the match

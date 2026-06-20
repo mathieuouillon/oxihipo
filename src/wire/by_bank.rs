@@ -100,6 +100,38 @@ struct BankDescriptor {
     data_type: u8,
 }
 
+/// Overflow-checked byte length of the by-bank directory *body*
+/// (descriptors through the per-event size matrix, excluding any outer
+/// header). `num_banks` and `event_count` are attacker-controlled, so the
+/// `4 * num_banks * event_count` size matrix is computed with checked
+/// arithmetic to avoid a `usize` wrap that could bypass a length gate.
+fn directory_body_len(num_banks: usize, event_count: u32) -> Result<usize> {
+    let nb = num_banks as u64;
+    let ec = event_count as u64;
+    let bpr = (num_banks.div_ceil(8)) as u64;
+    let total = (|| -> Option<u64> {
+        let desc = 4u64.checked_mul(nb)?;
+        let comp = 4u64.checked_mul(nb)?;
+        let decomp = 4u64.checked_mul(nb)?;
+        let tags = 4u64.checked_mul(ec)?;
+        let presence = ec.checked_mul(bpr)?;
+        let sizes = 4u64.checked_mul(nb)?.checked_mul(ec)?;
+        desc.checked_add(comp)?
+            .checked_add(decomp)?
+            .checked_add(tags)?
+            .checked_add(presence)?
+            .checked_add(sizes)
+    })()
+    .ok_or(HipoError::CorruptRecord {
+        offset: 0,
+        reason: "Lz4ByBank: directory size overflow",
+    })?;
+    usize::try_from(total).map_err(|_| HipoError::CorruptRecord {
+        offset: 0,
+        reason: "Lz4ByBank: directory size overflow",
+    })
+}
+
 impl ByBankRecord {
     /// Parse a record from an in-memory byte buffer, **owning** a copy of
     /// its compressed section. Used by tests and any caller that doesn't
@@ -140,10 +172,10 @@ impl ByBankRecord {
     /// fits within `src`.
     fn check_header(src: &[u8]) -> Result<RecordHeader> {
         let header = RecordHeader::parse(src)?;
-        if !matches!(header.compression, CompressionType::Lz4ByBank) {
+        if !header.compression.is_by_bank() {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
-                reason: "ByBankRecord::parse called on non-Lz4ByBank record",
+                reason: "ByBankRecord::parse called on non-by-bank record",
             });
         }
         if src.len() < header.total_bytes() as usize {
@@ -177,6 +209,20 @@ impl ByBankRecord {
     }
 
     fn parse_section(header: RecordHeader, section: &[u8], backing: Backing) -> Result<Arc<Self>> {
+        match header.compression {
+            CompressionType::Lz4ByBankV2 => Self::parse_section_v2(header, section, backing),
+            // v1 (`Lz4ByBank`) — `check_header` guarantees a by-bank tag.
+            _ => Self::parse_section_v1(header, section, backing),
+        }
+    }
+
+    /// v1 layout: `[u32 B, u32 E, <directory body>, bank streams]` — the
+    /// directory is uncompressed and contiguous with the streams.
+    fn parse_section_v1(
+        header: RecordHeader,
+        section: &[u8],
+        backing: Backing,
+    ) -> Result<Arc<Self>> {
         if section.len() < 8 {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
@@ -185,110 +231,162 @@ impl ByBankRecord {
         }
         let num_banks = read_u32_le(section, 0) as usize;
         let event_count = read_u32_le(section, 4);
-
-        // Sanity: event_count in the section must match the record header.
         if event_count != header.event_count {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "Lz4ByBank: event_count mismatch with record header",
             });
         }
-
-        // Overflow-safe directory size. `num_banks` and `event_count` are
-        // attacker-controlled u32 fields; `4 * num_banks * event_count` (the
-        // size matrix) is a product of two u32s that can wrap a 64-bit
-        // `usize`. Compute the total in u64 with explicit overflow checks
-        // FIRST, so the wrapping multiply can't bypass the length gate and
-        // drive the per-element read loop out of bounds.
-        let nb = num_banks as u64;
-        let ec = event_count as u64;
-        let bytes_per_row_u64 = (num_banks.div_ceil(8)) as u64;
-        let total_dir = (|| -> Option<u64> {
-            let desc = 4u64.checked_mul(nb)?;
-            let comp = 4u64.checked_mul(nb)?;
-            let decomp = 4u64.checked_mul(nb)?;
-            let tags = 4u64.checked_mul(ec)?;
-            let presence = ec.checked_mul(bytes_per_row_u64)?;
-            let sizes = 4u64.checked_mul(nb)?.checked_mul(ec)?;
-            8u64.checked_add(desc)?
-                .checked_add(comp)?
-                .checked_add(decomp)?
-                .checked_add(tags)?
-                .checked_add(presence)?
-                .checked_add(sizes)
-        })()
-        .ok_or(HipoError::CorruptRecord {
-            offset: 0,
-            reason: "Lz4ByBank: directory size overflow",
-        })?;
-        if (section.len() as u64) < total_dir {
+        let dir_body_len = directory_body_len(num_banks, event_count)?;
+        if section.len() - 8 < dir_body_len {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "Lz4ByBank: directory truncated",
             });
         }
+        let streams_off = 8 + dir_body_len;
+        let dir = &section[8..];
+        Self::from_directory(
+            header,
+            section,
+            backing,
+            num_banks,
+            event_count,
+            dir,
+            streams_off,
+        )
+    }
 
-        // The total fits and is <= section.len() <= isize::MAX, so every
-        // sub-offset below is a valid usize that cannot overflow.
-        let desc_off = 8;
-        let desc_bytes = 4 * num_banks;
-        let comp_sizes_off = desc_off + desc_bytes;
-        let comp_sizes_bytes = 4 * num_banks;
-        let decomp_sizes_off = comp_sizes_off + comp_sizes_bytes;
-        let decomp_sizes_bytes = 4 * num_banks;
-        let tags_off = decomp_sizes_off + decomp_sizes_bytes;
-        let tags_bytes = 4 * event_count as usize;
-        let presence_off = tags_off + tags_bytes;
+    /// v2 layout: `[u8 ver=2, u8×3 reserved, u32 B, u32 E, u32 dir_comp,
+    /// u32 dir_decomp, LZ4(directory), bank streams]`.
+    fn parse_section_v2(
+        header: RecordHeader,
+        section: &[u8],
+        backing: Backing,
+    ) -> Result<Arc<Self>> {
+        if section.len() < 20 {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBankV2: section truncated (header)",
+            });
+        }
+        if section[0] != 2 {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBankV2: unsupported extension-format version",
+            });
+        }
+        let num_banks = read_u32_le(section, 4) as usize;
+        let event_count = read_u32_le(section, 8);
+        if event_count != header.event_count {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBankV2: event_count mismatch with record header",
+            });
+        }
+        let dir_comp_len = read_u32_le(section, 12) as usize;
+        let dir_decomp_len = read_u32_le(section, 16) as usize;
+        let streams_off = 20usize
+            .checked_add(dir_comp_len)
+            .ok_or(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBankV2: directory size overflow",
+            })?;
+        if streams_off > section.len() {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBankV2: directory truncated",
+            });
+        }
+        // The declared decompressed directory length must match the layout
+        // implied by the bank/event counts — reject before inflating into a
+        // buffer of that size.
+        if dir_decomp_len != directory_body_len(num_banks, event_count)? {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBankV2: directory size inconsistent with bank/event counts",
+            });
+        }
+        // Inflate the (small) directory into an owned buffer.
+        let dir: Vec<u8> = if dir_decomp_len == 0 {
+            Vec::new()
+        } else {
+            let mut buf = Vec::with_capacity(dir_decomp_len);
+            decompress(
+                CompressionType::Lz4,
+                &section[20..streams_off],
+                &mut buf,
+                dir_decomp_len,
+            )?;
+            buf.truncate(dir_decomp_len);
+            buf
+        };
+        Self::from_directory(
+            header,
+            section,
+            backing,
+            num_banks,
+            event_count,
+            &dir,
+            streams_off,
+        )
+    }
+
+    /// Parse the directory *body* (descriptors at offset 0 of `dir`) and
+    /// assemble the record. `streams_off` is the byte offset of the first
+    /// bank stream within `section`. Shared by v1 (where `dir` borrows the
+    /// section) and v2 (where `dir` is the inflated directory).
+    fn from_directory(
+        header: RecordHeader,
+        section: &[u8],
+        backing: Backing,
+        num_banks: usize,
+        event_count: u32,
+        dir: &[u8],
+        streams_off: usize,
+    ) -> Result<Arc<Self>> {
+        let dir_body_len = directory_body_len(num_banks, event_count)?;
+        if dir.len() < dir_body_len {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBank: directory body truncated",
+            });
+        }
         let bytes_per_row = num_banks.div_ceil(8);
+        let comp_sizes_off = 4 * num_banks;
+        let decomp_sizes_off = comp_sizes_off + 4 * num_banks;
+        let tags_off = decomp_sizes_off + 4 * num_banks;
+        let presence_off = tags_off + 4 * event_count as usize;
         let presence_bytes = event_count as usize * bytes_per_row;
         let event_bank_sizes_off = presence_off + presence_bytes;
-        let event_bank_sizes_bytes = 4 * num_banks * event_count as usize;
-        let streams_off = event_bank_sizes_off + event_bank_sizes_bytes;
 
-        if section.len() < streams_off {
-            return Err(HipoError::CorruptRecord {
-                offset: 0,
-                reason: "Lz4ByBank: directory truncated",
-            });
-        }
-
-        // Parse descriptors.
+        // descriptors
         let mut descriptors = Vec::with_capacity(num_banks);
         for b in 0..num_banks {
-            let off = desc_off + b * 4;
-            let group = u16::from_le_bytes([section[off], section[off + 1]]);
-            let item = section[off + 2];
-            let data_type = section[off + 3];
+            let off = b * 4;
             descriptors.push(BankDescriptor {
-                group,
-                item,
-                data_type,
+                group: u16::from_le_bytes([dir[off], dir[off + 1]]),
+                item: dir[off + 2],
+                data_type: dir[off + 3],
             });
         }
-
-        // Parse compressed/decompressed sizes.
+        // compressed / decompressed sizes
         let mut compressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
         let mut decompressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
         for b in 0..num_banks {
-            compressed_sizes.push(read_u32_le(section, comp_sizes_off + b * 4));
-            decompressed_sizes.push(read_u32_le(section, decomp_sizes_off + b * 4));
+            compressed_sizes.push(read_u32_le(dir, comp_sizes_off + b * 4));
+            decompressed_sizes.push(read_u32_le(dir, decomp_sizes_off + b * 4));
         }
-
-        // Parse per-event tags.
+        // per-event tags
         let mut event_tags: Vec<u32> = Vec::with_capacity(event_count as usize);
         for e in 0..event_count as usize {
-            event_tags.push(read_u32_le(section, tags_off + e * 4));
+            event_tags.push(read_u32_le(dir, tags_off + e * 4));
         }
-
-        // Copy presence as-is (already packed).
-        let presence = section[presence_off..presence_off + presence_bytes].to_vec();
-
-        // Parse the per-event size matrix into per-bank CUMULATIVE offset
-        // tables (event_count+1 entries each). Computing the prefix sum here,
-        // once, makes `bank_byte_range`/`bank_size` O(1). We also validate
-        // that each bank's sizes sum to its decompressed stream length, so a
-        // hostile directory can never make `bank_byte_range` index past the
-        // inflated stream (which would otherwise panic on `&stream[range]`).
+        // presence (already packed)
+        let presence = dir[presence_off..presence_off + presence_bytes].to_vec();
+        // per-bank CUMULATIVE offset tables (event_count+1 entries) — O(1)
+        // random access; validate Σ sizes == decompressed stream length so a
+        // hostile directory can't index past the inflated stream.
         let mut bank_offsets: Vec<Vec<u32>> = Vec::with_capacity(num_banks);
         for (b, &expected) in decompressed_sizes.iter().enumerate() {
             let mut cum: Vec<u32> = Vec::with_capacity(event_count as usize + 1);
@@ -296,7 +394,7 @@ impl ByBankRecord {
             let mut acc: u32 = 0;
             cum.push(0);
             for e in 0..event_count as usize {
-                let sz = read_u32_le(section, row_off + e * 4);
+                let sz = read_u32_le(dir, row_off + e * 4);
                 acc = acc.saturating_add(sz);
                 cum.push(acc);
             }
@@ -308,17 +406,17 @@ impl ByBankRecord {
             }
             bank_offsets.push(cum);
         }
-
-        // Compute compressed-stream byte ranges within the (eventually
-        // owned) `raw` buffer. We copy the whole section into an owned
-        // buffer so callers can drop the source mmap range and we still
-        // have what we need for lazy decompression.
+        // compressed-stream ranges within `section` (absolute section offsets)
         let mut compressed_streams = Vec::with_capacity(num_banks);
         let mut off = streams_off;
         for &cs in &compressed_sizes {
             let cs = cs as usize;
-            compressed_streams.push(off..off + cs);
-            off += cs;
+            let end = off.checked_add(cs).ok_or(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBank: stream offset overflow",
+            })?;
+            compressed_streams.push(off..end);
+            off = end;
         }
         if off > section.len() {
             return Err(HipoError::CorruptRecord {
@@ -328,7 +426,6 @@ impl ByBankRecord {
         }
 
         let bank_data = (0..num_banks).map(|_| OnceLock::new()).collect();
-
         Ok(Arc::new(Self {
             header,
             descriptors,
@@ -608,5 +705,103 @@ mod tests {
             assert_eq!(&p_stream[p_range], orig_particle);
             assert_eq!(&e_stream[e_range], orig_event);
         }
+    }
+
+    fn build_raw(events: &[&[u8]], compression: crate::write::Compression) -> Vec<u8> {
+        let mut payload_buf = Vec::new();
+        let mut compress_buf = Vec::new();
+        crate::write::build_record_bytes(
+            events,
+            0,
+            0,
+            compression,
+            1,
+            &mut payload_buf,
+            &mut compress_buf,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn v2_round_trip_preserves_event_bytes() {
+        let evs: Vec<Vec<u8>> = (0..5).map(build_event).collect();
+        let refs: Vec<&[u8]> = evs.iter().map(|v| v.as_slice()).collect();
+        let raw = build_raw(&refs, crate::write::Compression::Lz4ByBankV2);
+
+        // The header must carry the v2 tag.
+        let header = RecordHeader::parse(&raw).unwrap();
+        assert_eq!(header.compression, CompressionType::Lz4ByBankV2);
+
+        let rec = ByBankRecord::parse(&raw).unwrap();
+        let particle_b = rec.bank_index(300, 1).unwrap();
+        let event_b = rec.bank_index(300, 30).unwrap();
+        let p_stream = rec.bank_stream(particle_b).unwrap();
+        let e_stream = rec.bank_stream(event_b).unwrap();
+        for evno in 0..5_u32 {
+            let original = Event::new(&evs[evno as usize]);
+            let (_, orig_particle) = original.find(300, 1).unwrap();
+            let (_, orig_event) = original.find(300, 30).unwrap();
+            assert_eq!(
+                &p_stream[rec.bank_byte_range(evno, particle_b)],
+                orig_particle
+            );
+            assert_eq!(&e_stream[rec.bank_byte_range(evno, event_b)], orig_event);
+        }
+    }
+
+    #[test]
+    fn v1_and_v2_decode_identically() {
+        let evs: Vec<Vec<u8>> = (0..8).map(build_event).collect();
+        let refs: Vec<&[u8]> = evs.iter().map(|v| v.as_slice()).collect();
+        let v1 =
+            ByBankRecord::parse(&build_raw(&refs, crate::write::Compression::Lz4ByBank)).unwrap();
+        let v2 =
+            ByBankRecord::parse(&build_raw(&refs, crate::write::Compression::Lz4ByBankV2)).unwrap();
+
+        assert_eq!(v1.event_count(), v2.event_count());
+        assert_eq!(v1.num_banks(), v2.num_banks());
+        for b in 0..v1.num_banks() as u32 {
+            assert_eq!(v1.descriptor(b), v2.descriptor(b));
+            let s1 = v1.bank_stream(b).unwrap();
+            let s2 = v2.bank_stream(b).unwrap();
+            assert_eq!(s1, s2, "bank {b} streams differ between v1 and v2");
+            for e in 0..v1.event_count() {
+                assert_eq!(v1.has(e, b), v2.has(e, b));
+                assert_eq!(v1.bank_byte_range(e, b), v2.bank_byte_range(e, b));
+            }
+        }
+    }
+
+    #[test]
+    fn v2_directory_is_smaller_than_v1() {
+        // Many events × repetitive sizes → the v2 compressed directory
+        // should be strictly smaller than v1's raw directory.
+        let evs: Vec<Vec<u8>> = (0..200).map(build_event).collect();
+        let refs: Vec<&[u8]> = evs.iter().map(|v| v.as_slice()).collect();
+        let v1 = build_raw(&refs, crate::write::Compression::Lz4ByBank);
+        let v2 = build_raw(&refs, crate::write::Compression::Lz4ByBankV2);
+        assert!(
+            v2.len() < v1.len(),
+            "v2 ({}) should be smaller than v1 ({}) thanks to the compressed directory",
+            v2.len(),
+            v1.len()
+        );
+    }
+
+    #[test]
+    fn v2_touching_one_bank_does_not_inflate_others() {
+        let evs: Vec<Vec<u8>> = (0..10).map(build_event).collect();
+        let refs: Vec<&[u8]> = evs.iter().map(|v| v.as_slice()).collect();
+        let rec =
+            ByBankRecord::parse(&build_raw(&refs, crate::write::Compression::Lz4ByBankV2)).unwrap();
+
+        let event_b = rec.bank_index(300, 30).unwrap();
+        let particle_b = rec.bank_index(300, 1).unwrap();
+        let _ = rec.bank_stream(event_b).unwrap();
+        assert!(rec.is_bank_inflated(event_b));
+        assert!(
+            !rec.is_bank_inflated(particle_b),
+            "v2: untouched bank must stay compressed"
+        );
     }
 }

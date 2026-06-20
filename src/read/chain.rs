@@ -25,7 +25,7 @@ use crate::read::inner::FileInner;
 use crate::read::iter::EventIter;
 use crate::schema::Dict;
 use crate::wire::by_bank::ByBankRecord;
-use crate::wire::constants::{CompressionType, RECORD_HEADER_SIZE};
+use crate::wire::constants::RECORD_HEADER_SIZE;
 use crate::wire::record::{Record, decode_record_into};
 use crate::wire::record_header::RecordHeader;
 
@@ -242,7 +242,7 @@ impl Chain {
                 Ok(h) => h,
                 Err(_) => return false,
             };
-            if !matches!(header.compression, CompressionType::Lz4ByBank) {
+            if !header.compression.is_by_bank() {
                 return false;
             }
         }
@@ -341,7 +341,7 @@ impl Chain {
         }
         let src = &inner.mmap[lo..hi];
         let header = RecordHeader::parse(src).ok()?;
-        if matches!(header.compression, CompressionType::Lz4ByBank) {
+        if header.compression.is_by_bank() {
             let by_bank = ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi).ok()?;
             if ev_local >= by_bank.event_count() {
                 return None;
@@ -450,7 +450,7 @@ impl Chain {
                     let mut local_in = 0u64;
                     let mut local_out = 0u64;
 
-                    if matches!(header.compression, CompressionType::Lz4ByBank) {
+                    if header.compression.is_by_bank() {
                         // Lazy per-bank decompression — the user's
                         // closure only inflates bank streams it touches.
                         let by_bank = ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
@@ -556,7 +556,7 @@ impl Chain {
                         let src = &inner.mmap[lo..hi];
                         let header = RecordHeader::parse(src)?;
 
-                        if matches!(header.compression, CompressionType::Lz4ByBank) {
+                        if header.compression.is_by_bank() {
                             let by_bank =
                                 ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
                             for ev_idx in 0..by_bank.event_count() {
@@ -651,7 +651,7 @@ impl Chain {
                         let src = &inner.mmap[lo..hi];
                         let header = RecordHeader::parse(src)?;
 
-                        if matches!(header.compression, CompressionType::Lz4ByBank) {
+                        if header.compression.is_by_bank() {
                             let by_bank =
                                 ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
                             let n_events = by_bank.event_count();
