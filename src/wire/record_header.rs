@@ -64,15 +64,15 @@ impl RecordHeader {
             found: magic,
             expected: HEADER_MAGIC,
         })?;
-        let swap = matches!(endianness, Endianness::Big);
-        let r32 = |off| {
-            let v = read_u32_le(buf, off);
-            if swap { v.swap_bytes() } else { v }
-        };
-        let r64 = |off| {
-            let v = read_u64_le(buf, off);
-            if swap { v.swap_bytes() } else { v }
-        };
+        // Big-endian records are unsupported — column data is read native LE
+        // with no swap (see `FileHeader::parse` for the rationale).
+        if matches!(endianness, Endianness::Big) {
+            return Err(HipoError::UnsupportedEndianness {
+                offset: RH_MAGIC_NUMBER as u64,
+            });
+        }
+        let r32 = |off| read_u32_le(buf, off);
+        let r64 = |off| read_u64_le(buf, off);
 
         let record_length_words = r32(RH_RECORD_LENGTH);
         let record_number = r32(RH_RECORD_NUMBER);
@@ -95,10 +95,24 @@ impl RecordHeader {
         let data_padding = ((bit_info >> BITINFO_PAD2_SHIFT) & BITINFO_PAD_MASK) as u8;
         let compressed_data_padding = ((bit_info >> BITINFO_PAD3_SHIFT) & BITINFO_PAD_MASK) as u8;
 
+        let record_length = u64::from(record_length_words) * 4;
+        let header_length = header_length_words.saturating_mul(4);
+        // `payload_bytes()` is `record_length - header_length`; both are
+        // attacker-controlled. Enforce the invariant here so that subtraction
+        // (and the slice indexing that uses it) can never underflow on a
+        // corrupt header — a hostile `header_length > record_length` is
+        // rejected as corruption rather than panicking the reader.
+        if u64::from(header_length) > record_length {
+            return Err(HipoError::CorruptRecord {
+                offset: RH_RECORD_LENGTH as u64,
+                reason: "record header_length exceeds record_length",
+            });
+        }
+
         Ok(Self {
-            record_length: u64::from(record_length_words) * 4,
+            record_length,
             record_number,
-            header_length: header_length_words.saturating_mul(4),
+            header_length,
             event_count,
             index_array_length,
             bit_info,
@@ -191,5 +205,27 @@ mod tests {
     fn decompressed_size_includes_padding() {
         let h = sample();
         assert_eq!(h.decompressed_payload_size(), 8400);
+    }
+
+    #[test]
+    fn rejects_big_endian() {
+        let mut buf = [0u8; RECORD_HEADER_SIZE];
+        sample().write(&mut buf);
+        // Re-stamp the endian magic with the big-endian marker; the reader
+        // identifies BE but does not support it (column data is read LE).
+        write_u32_le(&mut buf, RH_MAGIC_NUMBER, HEADER_MAGIC_BE);
+        let err = RecordHeader::parse(&buf).unwrap_err();
+        assert!(matches!(err, HipoError::UnsupportedEndianness { .. }));
+    }
+
+    #[test]
+    fn rejects_header_longer_than_record() {
+        let mut buf = [0u8; RECORD_HEADER_SIZE];
+        let mut h = sample();
+        h.record_length = 4096; // 1024 words
+        h.header_length = 8192; // 2048 words > record_length
+        h.write(&mut buf);
+        let err = RecordHeader::parse(&buf).unwrap_err();
+        assert!(matches!(err, HipoError::CorruptRecord { .. }));
     }
 }

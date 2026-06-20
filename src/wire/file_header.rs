@@ -62,15 +62,19 @@ impl FileHeader {
             expected: HEADER_MAGIC,
         })?;
 
-        let swap = matches!(endianness, Endianness::Big);
-        let r32 = |off| {
-            let v = read_u32_le(buf, off);
-            if swap { v.swap_bytes() } else { v }
-        };
-        let r64 = |off| {
-            let v = read_u64_le(buf, off);
-            if swap { v.swap_bytes() } else { v }
-        };
+        // Big-endian is identifiable via the magic word but unsupported: bank
+        // column/scalar payload is reinterpreted native little-endian with no
+        // per-element swap (see `Bank::cast_column_unchecked` and the
+        // `read_*_le` helpers), so a BE file would parse its headers fine and
+        // then yield byte-swapped garbage with no error. Reject it loudly at
+        // open time instead.
+        if matches!(endianness, Endianness::Big) {
+            return Err(HipoError::UnsupportedEndianness {
+                offset: FH_MAGIC_NUMBER as u64,
+            });
+        }
+        let r32 = |off| read_u32_le(buf, off);
+        let r64 = |off| read_u64_le(buf, off);
 
         let header = Self {
             file_number: r32(FH_FILE_NUMBER),
@@ -157,6 +161,17 @@ mod tests {
         write_u32_le(&mut buf, FH_MAGIC_NUMBER, 0xDEAD_BEEF);
         let err = FileHeader::parse(&buf).unwrap_err();
         assert!(matches!(err, HipoError::BadMagic { .. }));
+    }
+
+    #[test]
+    fn rejects_big_endian() {
+        let mut buf = [0u8; FILE_HEADER_SIZE];
+        sample().write(&mut buf);
+        // Keep the (LE) unique word valid so we reach the endian check, then
+        // stamp the big-endian magic marker.
+        write_u32_le(&mut buf, FH_MAGIC_NUMBER, HEADER_MAGIC_BE);
+        let err = FileHeader::parse(&buf).unwrap_err();
+        assert!(matches!(err, HipoError::UnsupportedEndianness { .. }));
     }
 
     #[test]

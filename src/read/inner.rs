@@ -195,26 +195,48 @@ fn build_index_from_trailer(
 
     let mut idx = FileEventIndex::new();
     let trailer_pos = header.trailer_position;
+    let mmap_len = mmap.len() as u64;
     for r in 0..rows as usize {
         let pos = i64::from_le_bytes(
             bank_data[pos_off + r * 8..pos_off + r * 8 + 8]
                 .try_into()
                 .expect("8 bytes for i64"),
-        ) as u64;
+        );
         let len = i32::from_le_bytes(
             bank_data[len_off + r * 4..len_off + r * 4 + 4]
                 .try_into()
                 .expect("4 bytes for i32"),
-        ) as u64;
+        );
         let ent = i32::from_le_bytes(
             bank_data[ent_off + r * 4..ent_off + r * 4 + 4]
                 .try_into()
                 .expect("4 bytes for i32"),
-        ) as u32;
+        );
+        // Reject negative position/length/entries — these are file-controlled
+        // and a negative value would wrap to a huge `u64`/`u32` offset used to
+        // index the mmap at iteration time. On any bad row, bail so the caller
+        // falls back to the trustworthy sequential scan.
+        if pos < 0 || len < 0 || ent < 0 {
+            return Err(HipoError::CorruptRecord {
+                offset: trailer_pos,
+                reason: "trailer index row has a negative field",
+            });
+        }
+        let pos = pos as u64;
+        let len = len as u64;
+        let ent = ent as u32;
         // Skip the dictionary record (lives in the file user header) and
         // the trailer itself (writer included it in its own index).
         if pos < first_data_record_offset || pos == trailer_pos {
             continue;
+        }
+        // A record that starts past EOF or extends past it is corruption;
+        // fall back to scanning rather than indexing out of bounds later.
+        if pos > mmap_len || pos.checked_add(len).is_none_or(|end| end > mmap_len) {
+            return Err(HipoError::CorruptRecord {
+                offset: trailer_pos,
+                reason: "trailer index row position/length out of file bounds",
+            });
         }
         idx.push(pos, len, ent);
     }

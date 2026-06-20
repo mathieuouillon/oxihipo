@@ -13,13 +13,15 @@
 use crate::wire::constants::{HEADER_MAGIC, HEADER_MAGIC_BE};
 
 /// Read a little-endian `u32` from `buf[off..off+4]`.
+///
+/// Bounds-checked: an out-of-range `off` panics on the slice index rather
+/// than reading out of bounds. `from_le_bytes` over a length-4 slice lowers
+/// to a single (possibly unaligned) load in release, so this is zero-cost
+/// versus the previous hand-rolled `read_unaligned` while removing the UB
+/// hole the `debug_assert!`-only guard left open on corrupt input.
 #[inline(always)]
 pub fn read_u32_le(buf: &[u8], off: usize) -> u32 {
-    debug_assert!(off + 4 <= buf.len(), "read_u32_le out of bounds");
-    // We read unaligned — record buffers are aligned to 4 bytes by HIPO
-    // itself, but mmap slices into compressed payloads can land anywhere.
-    let p = unsafe { buf.as_ptr().add(off) as *const u32 };
-    u32::from_le(unsafe { p.read_unaligned() })
+    u32::from_le_bytes(buf[off..off + 4].try_into().expect("4-byte window"))
 }
 
 #[inline(always)]
@@ -29,16 +31,12 @@ pub fn read_i32_le(buf: &[u8], off: usize) -> i32 {
 
 #[inline(always)]
 pub fn read_u64_le(buf: &[u8], off: usize) -> u64 {
-    debug_assert!(off + 8 <= buf.len(), "read_u64_le out of bounds");
-    let p = unsafe { buf.as_ptr().add(off) as *const u64 };
-    u64::from_le(unsafe { p.read_unaligned() })
+    u64::from_le_bytes(buf[off..off + 8].try_into().expect("8-byte window"))
 }
 
 #[inline(always)]
 pub fn read_i16_le(buf: &[u8], off: usize) -> i16 {
-    debug_assert!(off + 2 <= buf.len());
-    let p = unsafe { buf.as_ptr().add(off) as *const i16 };
-    i16::from_le(unsafe { p.read_unaligned() })
+    i16::from_le_bytes(buf[off..off + 2].try_into().expect("2-byte window"))
 }
 
 #[inline(always)]
@@ -53,16 +51,12 @@ pub fn read_f64_le(buf: &[u8], off: usize) -> f64 {
 
 #[inline(always)]
 pub fn write_u32_le(buf: &mut [u8], off: usize, v: u32) {
-    debug_assert!(off + 4 <= buf.len());
-    let p = unsafe { buf.as_mut_ptr().add(off) as *mut u32 };
-    unsafe { p.write_unaligned(v.to_le()) };
+    buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
 
 #[inline(always)]
 pub fn write_u64_le(buf: &mut [u8], off: usize, v: u64) {
-    debug_assert!(off + 8 <= buf.len());
-    let p = unsafe { buf.as_mut_ptr().add(off) as *mut u64 };
-    unsafe { p.write_unaligned(v.to_le()) };
+    buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

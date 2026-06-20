@@ -43,8 +43,13 @@ pub struct ByBankRecord {
     /// Bit `(e * bytes_per_row + b/8) & (1 << (b%8))` = 1 iff event e has bank b.
     presence: Vec<u8>,
     bytes_per_row: usize,
-    /// `event_bank_sizes[b][e]` = byte size of bank b for event e.
-    event_bank_sizes: Vec<Vec<u32>>,
+    /// Per-bank **cumulative** byte offsets into the decompressed stream:
+    /// `bank_offsets[b]` has `event_count + 1` entries, and event `e`'s
+    /// bank-`b` data occupies `bank_offsets[b][e]..bank_offsets[b][e+1]`.
+    /// Precomputing the prefix sum once at parse makes `bank_byte_range`
+    /// and `bank_size` O(1) (previously an O(events) re-summation per call,
+    /// i.e. O(events²·banks) to walk a record).
+    bank_offsets: Vec<Vec<u32>>,
     /// `bank_data[b]` lazily holds the decompressed bank stream once
     /// any caller has touched it.
     bank_data: Vec<OnceLock<Box<[u8]>>>,
@@ -110,7 +115,42 @@ impl ByBankRecord {
             });
         }
 
-        // Compute directory offsets.
+        // Overflow-safe directory size. `num_banks` and `event_count` are
+        // attacker-controlled u32 fields; `4 * num_banks * event_count` (the
+        // size matrix) is a product of two u32s that can wrap a 64-bit
+        // `usize`. Compute the total in u64 with explicit overflow checks
+        // FIRST, so the wrapping multiply can't bypass the length gate and
+        // drive the per-element read loop out of bounds.
+        let nb = num_banks as u64;
+        let ec = event_count as u64;
+        let bytes_per_row_u64 = (num_banks.div_ceil(8)) as u64;
+        let total_dir = (|| -> Option<u64> {
+            let desc = 4u64.checked_mul(nb)?;
+            let comp = 4u64.checked_mul(nb)?;
+            let decomp = 4u64.checked_mul(nb)?;
+            let tags = 4u64.checked_mul(ec)?;
+            let presence = ec.checked_mul(bytes_per_row_u64)?;
+            let sizes = 4u64.checked_mul(nb)?.checked_mul(ec)?;
+            8u64.checked_add(desc)?
+                .checked_add(comp)?
+                .checked_add(decomp)?
+                .checked_add(tags)?
+                .checked_add(presence)?
+                .checked_add(sizes)
+        })()
+        .ok_or(HipoError::CorruptRecord {
+            offset: 0,
+            reason: "Lz4ByBank: directory size overflow",
+        })?;
+        if (section.len() as u64) < total_dir {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4ByBank: directory truncated",
+            });
+        }
+
+        // The total fits and is <= section.len() <= isize::MAX, so every
+        // sub-offset below is a valid usize that cannot overflow.
         let desc_off = 8;
         let desc_bytes = 4 * num_banks;
         let comp_sizes_off = desc_off + desc_bytes;
@@ -164,15 +204,30 @@ impl ByBankRecord {
         // Copy presence as-is (already packed).
         let presence = section[presence_off..presence_off + presence_bytes].to_vec();
 
-        // Parse event_bank_sizes.
-        let mut event_bank_sizes: Vec<Vec<u32>> = Vec::with_capacity(num_banks);
-        for b in 0..num_banks {
-            let mut row = Vec::with_capacity(event_count as usize);
+        // Parse the per-event size matrix into per-bank CUMULATIVE offset
+        // tables (event_count+1 entries each). Computing the prefix sum here,
+        // once, makes `bank_byte_range`/`bank_size` O(1). We also validate
+        // that each bank's sizes sum to its decompressed stream length, so a
+        // hostile directory can never make `bank_byte_range` index past the
+        // inflated stream (which would otherwise panic on `&stream[range]`).
+        let mut bank_offsets: Vec<Vec<u32>> = Vec::with_capacity(num_banks);
+        for (b, &expected) in decompressed_sizes.iter().enumerate() {
+            let mut cum: Vec<u32> = Vec::with_capacity(event_count as usize + 1);
             let row_off = event_bank_sizes_off + b * 4 * event_count as usize;
+            let mut acc: u32 = 0;
+            cum.push(0);
             for e in 0..event_count as usize {
-                row.push(read_u32_le(section, row_off + e * 4));
+                let sz = read_u32_le(section, row_off + e * 4);
+                acc = acc.saturating_add(sz);
+                cum.push(acc);
             }
-            event_bank_sizes.push(row);
+            if acc != expected {
+                return Err(HipoError::CorruptRecord {
+                    offset: 0,
+                    reason: "Lz4ByBank: per-event sizes do not sum to decompressed bank size",
+                });
+            }
+            bank_offsets.push(cum);
         }
 
         // Compute compressed-stream byte ranges within the (eventually
@@ -203,7 +258,7 @@ impl ByBankRecord {
             event_tags,
             presence,
             bytes_per_row,
-            event_bank_sizes,
+            bank_offsets,
             bank_data,
             raw,
             compressed_streams,
@@ -254,9 +309,12 @@ impl ByBankRecord {
 
     /// Byte size of event `event_idx`'s instance of bank `bank_idx`.
     /// Zero if the event lacks the bank, *or* if it has an empty bank.
-    /// Combine with [`Self::has`] to disambiguate.
+    /// Combine with [`Self::has`] to disambiguate. O(1) — a difference of
+    /// two cumulative offsets.
     pub fn bank_size(&self, event_idx: u32, bank_idx: u32) -> u32 {
-        self.event_bank_sizes[bank_idx as usize][event_idx as usize]
+        let o = &self.bank_offsets[bank_idx as usize];
+        let e = event_idx as usize;
+        o[e + 1] - o[e]
     }
 
     /// Borrow the decompressed bank stream for `bank_idx`, inflating it
@@ -299,20 +357,13 @@ impl ByBankRecord {
 
     /// Byte range within `bank_stream(bank_idx)` of event `event_idx`'s
     /// bank data. Caller is responsible for checking `has(event, bank)`
-    /// first.
+    /// first. O(1): a slice of the precomputed cumulative-offset table
+    /// (`bank_offsets`), validated at parse to stay within the inflated
+    /// stream, so the returned range can never index past `bank_stream`.
     pub fn bank_byte_range(&self, event_idx: u32, bank_idx: u32) -> std::ops::Range<usize> {
-        let b = bank_idx as usize;
+        let o = &self.bank_offsets[bank_idx as usize];
         let e = event_idx as usize;
-        // Sum sizes for events 0..e that *have* this bank — only those
-        // contributed bytes to the stream. (Events that don't have the
-        // bank contribute zero, so we can sum sizes unconditionally
-        // since absent events have size 0.)
-        let mut start: usize = 0;
-        for prev in 0..e {
-            start += self.event_bank_sizes[b][prev] as usize;
-        }
-        let len = self.event_bank_sizes[b][e] as usize;
-        start..start + len
+        o[e] as usize..o[e + 1] as usize
     }
 
     /// True if bank `bank_idx`'s stream has already been decompressed

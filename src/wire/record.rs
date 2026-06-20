@@ -68,8 +68,19 @@ pub fn decode_record_into(
     )?;
 
     // Build event offsets from the index array (first `index_array_length`
-    // bytes of the decompressed payload).
+    // bytes of the decompressed payload). `event_count` comes straight from
+    // the header and is decoupled from the produced payload length: a short
+    // LZ4 decode (tolerated by `DECOMPRESS_SLACK`) or an inconsistent header
+    // can leave `payload` shorter than `n*4`. Guard before the read loop so a
+    // corrupt record surfaces as `CorruptRecord` instead of an out-of-bounds
+    // read. (u64 math avoids wrapping `n*4` on a 32-bit usize.)
     let n = header.event_count as usize;
+    if (payload.len() as u64) < (n as u64) * 4 {
+        return Err(HipoError::CorruptRecord {
+            offset: 0,
+            reason: "index array shorter than event_count*4",
+        });
+    }
     event_offsets.clear();
     event_offsets.reserve(n + 1);
     event_offsets.push(0u32);
@@ -386,18 +397,28 @@ impl Record {
             decompressed_size,
         )?;
 
-        self.build_event_offsets(&header);
+        self.build_event_offsets(&header)?;
         self.header = header;
         Ok(())
     }
 
-    fn build_event_offsets(&mut self, header: &RecordHeader) {
-        self.event_offsets.clear();
+    fn build_event_offsets(&mut self, header: &RecordHeader) -> Result<()> {
         let n = header.event_count as usize;
+        let payload = self.payload.as_slice();
+        // Same guard as `decode_record_into`: the index array must actually
+        // be present in the decompressed payload before we read it (the
+        // read helpers are bounds-checked, but this turns a would-be panic
+        // into a clean `CorruptRecord`).
+        if (payload.len() as u64) < (n as u64) * 4 {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "index array shorter than event_count*4",
+            });
+        }
+        self.event_offsets.clear();
         self.event_offsets.reserve(n + 1);
         self.event_offsets.push(0);
 
-        let payload = self.payload.as_slice();
         let mut acc: u32 = 0;
         for i in 0..n {
             let raw = read_u32_le(payload, i * 4);
@@ -409,6 +430,7 @@ impl Record {
             acc = acc.saturating_add(size);
             self.event_offsets.push(acc);
         }
+        Ok(())
     }
 
     /// Borrow the raw bytes of event `i`. Zero-copy; the slice points into
