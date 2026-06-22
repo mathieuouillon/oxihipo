@@ -55,6 +55,8 @@ proptest = "1"
 # Used only by the `bench_decoders` example to pull raw record bytes for
 # microbenchmarking the decoders; the library itself streams via `pread`.
 memmap2 = "0.9"
+# tqdm-style progress bars for the `recook_by_bank` / `skim` examples.
+kdam = "0.6"
 
 [lib]
 bench = false

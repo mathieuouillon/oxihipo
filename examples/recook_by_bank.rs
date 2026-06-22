@@ -41,9 +41,11 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use kdam::{BarExt, tqdm};
 use rayon::prelude::*;
 
 use oxihipo::{Chain, Compression, HipoError, Result, Writer};
@@ -133,24 +135,26 @@ fn recook_one(input: &Path, output: &Path, quiet: bool, compression: Compression
             .schemas(&dict)
             .compression(compression)
             .build()?;
-        let mut written: u64 = 0;
-        let mut last_pct = -1i64;
-        for ev in chain.events() {
+        // tqdm-style bar over the scan; `disable = quiet` silences it in
+        // batch mode, where the caller shows a per-file bar instead.
+        for ev in tqdm!(
+            chain.events(),
+            total = total_events as usize,
+            desc = "recook",
+            unit = "ev",
+            unit_scale = true,
+            disable = quiet
+        ) {
             // For Lz4ByBank source records, `ev.bytes()` triggers
             // synthetic-bytes synthesis (decompressing every bank).
             // For Bytes-backed source records (the typical case when
             // recook-ing a vanilla Lz4 file), it's zero-copy.
             w.append_raw(ev.bytes())?;
-            written += 1;
-            if !quiet && let Some(pct) = (written * 100).checked_div(total_events) {
-                let pct = pct as i64;
-                if pct != last_pct && pct % 10 == 0 {
-                    eprintln!("  {pct:3}%  ({written}/{total_events})");
-                    last_pct = pct;
-                }
-            }
         }
         w.finish()?;
+    }
+    if !quiet {
+        eprintln!();
     }
     let elapsed = start.elapsed();
 
@@ -203,42 +207,42 @@ fn recook_batch(
         input_dir.display(),
         output_dir.display()
     );
-    let done = AtomicU64::new(0);
     let total_in_bytes = AtomicU64::new(0);
     let total_out_bytes = AtomicU64::new(0);
     let start = Instant::now();
 
-    // One file per rayon worker — file-level parallelism, not within
-    // each recook. Each recook is itself a tight sequential loop that
-    // already uses the lz4-c backend; parallelism here is the win.
+    // One file per rayon worker — file-level parallelism, not within each
+    // recook (each recook is its own tight sequential loop). A shared bar
+    // advances as files complete; the per-recook bars are disabled (quiet).
     //
     // Errors per-file are reported but don't abort siblings.
+    let pb = Mutex::new(tqdm!(total = total, desc = "recook batch", unit = "file"));
     entries.par_iter().for_each(|input| {
         let fname = input.file_name().expect("regular file has a name");
         let output = output_dir.join(fname);
         let r = recook_one(input, &output, /*quiet=*/ true, compression);
-        let i = done.fetch_add(1, Ordering::Relaxed) + 1;
         match r {
             Ok(()) => {
                 let in_bytes = std::fs::metadata(input).map(|m| m.len()).unwrap_or(0);
                 let out_bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
                 total_in_bytes.fetch_add(in_bytes, Ordering::Relaxed);
                 total_out_bytes.fetch_add(out_bytes, Ordering::Relaxed);
-                eprintln!(
-                    "  [{i}/{total}] {} → {} ({:+.1}%)",
-                    input.file_name().unwrap().to_string_lossy(),
-                    human_bytes(out_bytes),
-                    100.0 * (out_bytes as f64 - in_bytes as f64) / (in_bytes as f64).max(1.0),
-                );
             }
             Err(e) => {
                 eprintln!(
-                    "  [{i}/{total}] FAILED {}: {e}",
+                    "  FAILED {}: {e}",
                     input.file_name().unwrap().to_string_lossy()
                 );
             }
         }
+        if let Ok(mut b) = pb.lock() {
+            let _ = b.update(1);
+        }
     });
+    if let Ok(mut b) = pb.lock() {
+        let _ = b.refresh();
+    }
+    eprintln!();
 
     let elapsed = start.elapsed();
     let in_total = total_in_bytes.load(Ordering::Relaxed);
@@ -284,25 +288,22 @@ fn merge_into(inputs: &[PathBuf], merged: &Path, compression: Compression) -> Re
             .schemas(&dict)
             .compression(compression)
             .build()?;
-        let mut written: u64 = 0;
-        let mut last_pct = -1i64;
-        for ev in chain.events() {
+        for ev in tqdm!(
+            chain.events(),
+            total = total_events as usize,
+            desc = "merge",
+            unit = "ev",
+            unit_scale = true
+        ) {
             // Same caveat as `recook_one`: when the source is already
             // `Lz4ByBank`, `ev.bytes()` synthesises (decompressing every
             // bank in the event); for `Bytes`-backed sources it's
             // zero-copy.
             w.append_raw(ev.bytes())?;
-            written += 1;
-            if let Some(pct) = (written * 100).checked_div(total_events) {
-                let pct = pct as i64;
-                if pct != last_pct && pct % 10 == 0 {
-                    eprintln!("  merge {pct:3}%  ({written}/{total_events})");
-                    last_pct = pct;
-                }
-            }
         }
         w.finish()?;
     }
+    eprintln!();
     let elapsed = start.elapsed();
     let total_in: u64 = inputs
         .iter()

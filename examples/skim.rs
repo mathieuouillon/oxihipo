@@ -1,5 +1,5 @@
 //! Filter-and-rewrite: copy the events that carry every named bank into a
-//! new HIPO file, re-encoded as `Lz4ByBank`.
+//! new HIPO file, re-encoded as `Lz4ByBank`, with a tqdm-style progress bar.
 //!
 //! Usage:
 //!   cargo run --release --example skim -- <in.hipo> <out.hipo> [BANK ...]
@@ -17,6 +17,7 @@
 
 use std::env;
 
+use kdam::{BarExt, tqdm};
 use oxihipo::{Chain, Compression, Filter, Result};
 
 fn main() -> Result<()> {
@@ -34,7 +35,25 @@ fn main() -> Result<()> {
         chain = chain.with_filter(Filter::require(banks.iter().map(|s| s.as_str())))?;
     }
 
-    let summary = chain.skim(&output, Compression::Lz4ByBank)?;
+    // With no filter every event is written, so the total is exact; with a
+    // filter the survivor count isn't known up front, so show an open-ended
+    // count + rate instead of a misleading percentage.
+    let mut pb = if banks.is_empty() {
+        tqdm!(
+            total = chain.event_count() as usize,
+            desc = "skim",
+            unit = "ev",
+            unit_scale = true
+        )
+    } else {
+        tqdm!(desc = "skim (filtered)", unit = "ev", unit_scale = true)
+    };
+
+    let summary = chain.skim_with(&output, Compression::Lz4ByBank, |written| {
+        let _ = pb.update_to(written as usize);
+    })?;
+    let _ = pb.refresh();
+    eprintln!();
 
     eprintln!("skim: {input} -> {output}");
     if banks.is_empty() {

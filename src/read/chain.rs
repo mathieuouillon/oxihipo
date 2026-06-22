@@ -401,12 +401,43 @@ impl Chain {
     /// the result by a record tag would therefore match nothing. (Per-event
     /// tags are preserved; only the coarser record-level tags are dropped.)
     pub fn skim(&self, dst: impl AsRef<Path>, compression: Compression) -> Result<WriteSummary> {
+        self.skim_with(dst, compression, |_| {})
+    }
+
+    /// Like [`Self::skim`], but calls `progress` after each event is written
+    /// with the running count of events written so far — drive a progress
+    /// bar (or any reporting) from it without the library taking on a
+    /// progress-bar dependency.
+    ///
+    /// ```no_run
+    /// use oxihipo::{Chain, Compression};
+    ///
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("run.hipo")?;
+    /// let total = chain.event_count();
+    /// let summary = chain.skim_with("out.hipo", Compression::Lz4ByBank, |n| {
+    ///     if n % 100_000 == 0 {
+    ///         eprintln!("  {n}/{total}");
+    ///     }
+    /// })?;
+    /// # let _ = summary;
+    /// # Ok(()) }
+    /// ```
+    pub fn skim_with(
+        &self,
+        dst: impl AsRef<Path>,
+        compression: Compression,
+        mut progress: impl FnMut(u64),
+    ) -> Result<WriteSummary> {
         let mut w = Writer::create(dst)
             .schemas(self.schemas())
             .compression(compression)
             .build()?;
+        let mut written = 0u64;
         for ev in self.try_events() {
             w.append_owned(&ev?)?;
+            written += 1;
+            progress(written);
         }
         w.finish()
     }
