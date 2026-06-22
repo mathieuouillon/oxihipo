@@ -35,9 +35,9 @@ fn main() -> Result<()> {
 
     // `Chain::open` dispatches on file / directory / glob pattern.
     let chain = Chain::open(&path)?;
-    // Async-prefetch the whole file's pages so the single-threaded pass
-    // gets the same I/O priming the parallel pass receives automatically.
-    chain.prefetch();
+    // The reader streams each record on demand (one `pread` per record into a
+    // recycled buffer), so there's no whole-file priming step — both passes
+    // rely on the kernel's per-descriptor readahead.
     let events = chain.event_count();
     eprintln!(
         "bench_par: {} file(s), {events} events, {} records",

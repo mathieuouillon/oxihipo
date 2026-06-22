@@ -1,15 +1,16 @@
-//! `Chain` — the reader. One or more HIPO files, mmap'd eagerly, with
-//! a shared dictionary validated across them.
+//! `Chain` — the reader. One or more HIPO files, opened with a shared
+//! dictionary validated across them.
 //!
 //! Single-file is just a chain of length 1 (`Chain::open(path)`).
 //! Multi-file iteration walks files in input order ([`Chain::events`])
 //! or fans out in parallel across every record of every file
 //! ([`Chain::for_each`]).
 //!
-//! Eager open: each file is mmap'd + dict-parsed at construction. mmap
-//! is virtual address space (no disk I/O until the first record read),
-//! and the dict parse is small (a few KB per file), so opening 100 files
-//! costs ≈ 100 ms wall time and ≈ 0 RAM.
+//! Streaming open: each file's header, dictionary, and trailer index are
+//! parsed at construction (small positioned reads); record payloads are
+//! never mapped or read whole — they stream in one record at a time into a
+//! recycled buffer. Opening 100 files costs ≈ 0 RAM, and scanning a
+//! 10–100 GB file holds only one record (per worker) resident, not the file.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,9 +26,8 @@ use crate::read::inner::FileInner;
 use crate::read::iter::EventIter;
 use crate::schema::Dict;
 use crate::wire::by_bank::ByBankRecord;
-use crate::wire::constants::RECORD_HEADER_SIZE;
 use crate::wire::record::{Record, decode_record_into};
-use crate::wire::record_header::RecordHeader;
+use crate::write::{Compression, WriteSummary, Writer};
 
 /// One or more HIPO files presented as a single iterable event stream.
 ///
@@ -234,11 +234,7 @@ impl Chain {
             let Some(first) = records.first() else {
                 return false;
             };
-            let off = first.file_offset as usize;
-            if off + RECORD_HEADER_SIZE > inner.mmap.len() {
-                return false;
-            }
-            let header = match RecordHeader::parse(&inner.mmap[off..]) {
+            let header = match inner.read_record_header(first.file_offset) {
                 Ok(h) => h,
                 Err(_) => return false,
             };
@@ -251,11 +247,13 @@ impl Chain {
 
     // ---- Configuration ---------------------------------------------------
 
-    /// Install (or replace) an event filter. Bound against the shared
-    /// dict immediately; unknown names are silently dropped (call
-    /// [`Filter::validate`] beforehand to fail fast on typos).
-    pub fn with_filter(mut self, filter: Filter) -> Self {
+    /// Install (or replace) an event filter, validated and bound against the
+    /// shared dict. Returns [`HipoError::UnknownSchema`] if a required bank
+    /// name isn't in the dictionary — a fail-fast guard against typos that
+    /// would otherwise silently drop every event.
+    pub fn with_filter(mut self, filter: Filter) -> Result<Self> {
         let mut f = filter;
+        f.validate(&self.dict)?;
         f.bind(&self.dict);
         if !f.record_tags().is_empty() {
             let mut tags = self.record_tags.unwrap_or_default();
@@ -263,7 +261,7 @@ impl Chain {
             self.record_tags = Some(tags);
         }
         self.filter = Some(f);
-        self
+        Ok(self)
     }
 
     pub fn with_record_tags(mut self, tags: impl IntoIterator<Item = u64>) -> Self {
@@ -334,15 +332,11 @@ impl Chain {
         let inner = &self.files[file_idx];
         let (rec, ev_local) = inner.index.locate(local)?;
         let span = &inner.index.records()[rec];
-        let lo = span.file_offset as usize;
-        let hi = lo + span.record_length as usize;
-        if hi > inner.mmap.len() {
-            return None;
-        }
-        let src = &inner.mmap[lo..hi];
-        let header = RecordHeader::parse(src).ok()?;
+        // Stream just this one record into a local buffer.
+        let mut raw = Vec::new();
+        let header = inner.read_record_into(span.file_offset, &mut raw).ok()?;
         if header.compression.is_by_bank() {
-            let by_bank = ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi).ok()?;
+            let by_bank = ByBankRecord::parse(&raw).ok()?;
             if ev_local >= by_bank.event_count() {
                 return None;
             }
@@ -352,46 +346,69 @@ impl Chain {
                 Arc::clone(&self.dict),
             ));
         }
-        let mut buf = Vec::new();
+        let mut payload = Vec::new();
         let mut offsets = Vec::new();
-        let decoded =
-            decode_record_into(src, &mut buf, &mut offsets).expect("decompress well-formed record");
+        let decoded = decode_record_into(&raw, &mut payload, &mut offsets)
+            .expect("decompress well-formed record");
         if ev_local as usize + 1 >= offsets.len() {
             return None;
         }
         let start = decoded.data_start + offsets[ev_local as usize];
         let end = decoded.data_start + offsets[ev_local as usize + 1];
         Some(OwnedEvent::slice(
-            Arc::new(buf),
+            Arc::new(payload),
             start,
             end,
             Arc::clone(&self.dict),
         ))
     }
 
-    /// Prime the page cache for a sequential [`Self::events`] scan.
+    /// No-op, kept for API compatibility.
     ///
-    /// Two layers:
-    /// 1. `MADV_WILLNEED` over each file's mmap — tells the kernel to
-    ///    start async-fetching all pages.
-    /// 2. **On Unix**, a detached background thread that opens a side
-    ///    file descriptor per file and actively `pread`s every record's
-    ///    bytes into a discard buffer. This forces the kernel to populate
-    ///    the page cache even past its bounded per-stream readahead
-    ///    window — the headline win for sequential reads of large files
-    ///    on shared filesystems (`/cache` / `/volatile` at JLab; NFS).
-    ///    The thread runs detached and terminates after walking the chain;
-    ///    on Windows only the `MADV_WILLNEED` layer applies.
+    /// The streaming reader `pread`s each record on demand and relies on the
+    /// kernel's per-descriptor readahead, so there is no whole-file mapping
+    /// to pre-fault. Earlier versions mapped the file and primed the page
+    /// cache here — exactly the unbounded-resident-memory behaviour the
+    /// streaming reader exists to avoid on 10–100 GB files.
+    pub fn prefetch(&self) {}
+
+    // ---- Skim ------------------------------------------------------------
+
+    /// Copy every event that survives the chain's filter into a new HIPO
+    /// file at `dst`, re-encoded with `compression`, and return a
+    /// [`WriteSummary`] of what was written.
     ///
-    /// The parallel modes of [`Self::for_each`]
-    /// already prefetch the records they'll touch, so calling this before
-    /// a parallel run is unnecessary.
-    pub fn prefetch(&self) {
-        for inner in &self.files {
-            inner.prefetch_all();
+    /// The chain's [`Filter`] (set via [`Self::with_filter`]) and any
+    /// record-tag pushdown apply on the read side, so only matching events
+    /// are written. The output carries the same dictionary as the input and
+    /// preserves each event's tag; multiple input files merge into one
+    /// output. Reading stops and the error is returned on the first corrupt
+    /// record (this uses the fallible [`Self::try_events`] internally).
+    ///
+    /// ```no_run
+    /// use oxihipo::{Chain, Compression, Filter};
+    ///
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let summary = Chain::open("run.hipo")?
+    ///     .with_filter(Filter::require(["REC::Particle"]))?
+    ///     .skim("electrons.hipo", Compression::Lz4ByBank)?;
+    /// println!("wrote {} events", summary.events);
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Note: per-*record* user tags (`user_word_1`/`user_word_2`) are **not**
+    /// carried over — output records are renumbered and tagged `0`. Filtering
+    /// the result by a record tag would therefore match nothing. (Per-event
+    /// tags are preserved; only the coarser record-level tags are dropped.)
+    pub fn skim(&self, dst: impl AsRef<Path>, compression: Compression) -> Result<WriteSummary> {
+        let mut w = Writer::create(dst)
+            .schemas(self.schemas())
+            .compression(compression)
+            .build()?;
+        for ev in self.try_events() {
+            w.append_owned(&ev?)?;
         }
-        #[cfg(unix)]
-        spawn_pread_prefetcher(self.files.clone());
+        w.finish()
     }
 
     // ---- Event processing -----------------------------------------------
@@ -402,7 +419,9 @@ impl Chain {
     ///
     /// - `threads == 1` → **sequential**, in input order, on the calling
     ///   thread (no rayon pool, no thread spawn).
-    /// - `threads == 0` → **parallel**, one worker per logical CPU.
+    /// - `threads == 0` → **parallel** on rayon's process-wide pool (one
+    ///   worker per logical CPU by default, or whatever a caller-installed
+    ///   global pool configures — reused across calls, no per-call spin-up).
     /// - `threads == n` (`n > 1`) → **parallel** with exactly `n` workers
     ///   (a value above the core count is allowed and can hide page-fault
     ///   stalls on a slow filesystem).
@@ -446,8 +465,9 @@ impl Chain {
 
         if threads == 1 {
             // Single-threaded: walk records in input order on this thread,
-            // reusing one decompression scratch buffer.
+            // reusing the record-read and decompression scratch buffers.
             let mut record = Record::new();
+            let mut read_buf = Vec::new();
             for &(fi, ri) in &tasks {
                 process_record(
                     &files[fi],
@@ -455,42 +475,44 @@ impl Chain {
                     filter,
                     filter_active,
                     &mut record,
+                    &mut read_buf,
                     &f,
                     &events_in,
                     &events_yielded,
                 )?;
             }
         } else {
-            // Parallel: fan records across a rayon pool, out of order.
-            let pool = build_pool(threads)?;
-            for inner in files {
-                inner.advise_parallel();
-            }
-            // Kick the kernel to start reading every selected record's
-            // pages now, in parallel with worker decompression — the
-            // headline win on shared filesystems (Lustre etc.).
-            for &(fi, ri) in &tasks {
-                let inner = &files[fi];
-                let span = &inner.index.records()[ri];
-                inner.prefetch_range(span.file_offset as usize, span.record_length as usize);
-            }
-            pool.install(|| -> Result<()> {
+            // Parallel: stream records across a rayon pool, out of order.
+            // Each worker `pread`s a record into its own recycled buffer, so
+            // resident memory is bounded by (workers × one record), never the
+            // file size. On Unix `pread` is concurrency-safe on the shared
+            // descriptor; elsewhere `FileInner` serialises behind a `Mutex`.
+            let run = || -> Result<()> {
                 tasks.par_iter().try_for_each_init::<_, _, _, Result<()>>(
-                    Record::new,
-                    |record, &(fi, ri)| {
+                    || (Record::new(), Vec::new()),
+                    |(record, read_buf), &(fi, ri)| {
                         process_record(
                             &files[fi],
                             ri,
                             filter,
                             filter_active,
                             record,
+                            read_buf,
                             &f,
                             &events_in,
                             &events_yielded,
                         )
                     },
                 )
-            })?;
+            };
+            if threads == 0 {
+                // Reuse rayon's process-wide pool (lazily initialised, shared
+                // across calls) rather than spinning up and tearing down a
+                // fresh pool every time.
+                run()?;
+            } else {
+                build_pool(threads)?.install(run)?;
+            }
         }
 
         Ok(ChainStats {
@@ -510,11 +532,8 @@ impl Chain {
             let records = inner.index.records();
             for (ri, span) in records.iter().enumerate() {
                 if let Some(tags) = &self.record_tags {
-                    let off = span.file_offset as usize;
-                    if off + RECORD_HEADER_SIZE > inner.mmap.len() {
-                        continue;
-                    }
-                    let matches = RecordHeader::parse(&inner.mmap[off..])
+                    let matches = inner
+                        .read_record_header(span.file_offset)
                         .map(|h| tags.contains(&h.user_word_1))
                         .unwrap_or(false);
                     if !matches {
@@ -528,10 +547,12 @@ impl Chain {
     }
 }
 
-/// Decode record `ri` of `inner` and call `f` on every (post-filter)
+/// Stream record `ri` of `inner` and call `f` on every (post-filter)
 /// event, accumulating per-record counts into the shared atomics. Shared
-/// by the sequential and parallel arms of [`Chain::for_each`]; `record`
-/// is a reusable scratch buffer used only for the bytes-backed path.
+/// by the sequential and parallel arms of [`Chain::for_each`]. `read_buf`
+/// holds the raw record bytes (`pread` into it, reused across calls) and
+/// `record` is the decompression scratch for the bytes-backed path — both
+/// recycled, so the resident footprint is one record, not the file.
 #[allow(clippy::too_many_arguments)]
 fn process_record<F>(
     inner: &Arc<FileInner>,
@@ -539,6 +560,7 @@ fn process_record<F>(
     filter: Option<&Filter>,
     filter_active: bool,
     record: &mut Record,
+    read_buf: &mut Vec<u8>,
     f: &F,
     events_in: &AtomicU64,
     events_yielded: &AtomicU64,
@@ -547,22 +569,13 @@ where
     F: for<'a> Fn(&EventCtx<'a>) + Send + Sync,
 {
     let span = &inner.index.records()[ri];
-    let lo = span.file_offset as usize;
-    let hi = lo + span.record_length as usize;
-    if hi > inner.mmap.len() {
-        return Err(HipoError::CorruptRecord {
-            offset: span.file_offset,
-            reason: "record extends past EOF",
-        });
-    }
-    let src = &inner.mmap[lo..hi];
-    let header = RecordHeader::parse(src)?;
+    let header = inner.read_record_into(span.file_offset, read_buf)?;
     let mut local_in = 0u64;
     let mut local_out = 0u64;
 
     if header.compression.is_by_bank() {
         // Lazy per-bank decompression — `f` only inflates banks it touches.
-        let by_bank = ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
+        let by_bank = ByBankRecord::parse(read_buf)?;
         for ev_idx in 0..by_bank.event_count() {
             local_in += 1;
             if filter_active
@@ -575,7 +588,7 @@ where
             local_out += 1;
         }
     } else {
-        record.load_with_header(src, header)?;
+        record.load_with_header(read_buf, header)?;
         for ev_idx in 0..record.event_count() {
             let raw = record.event(ev_idx).expect("event in range");
             let event = Event::new(raw);
@@ -595,16 +608,12 @@ where
     Ok(())
 }
 
-/// Build a rayon pool. `threads == 0` ⇒ rayon's default (one worker per
-/// logical CPU); any other value sets the worker count exactly (values
-/// above the core count are allowed — useful to hide filesystem stalls).
+/// Build a rayon pool with exactly `threads` workers (values above the core
+/// count are allowed — useful to hide filesystem stalls). Only called with
+/// `threads > 1`; the `threads == 0` path reuses rayon's global pool.
 fn build_pool(threads: usize) -> Result<rayon::ThreadPool> {
-    let builder = if threads == 0 {
-        rayon::ThreadPoolBuilder::new()
-    } else {
-        rayon::ThreadPoolBuilder::new().num_threads(threads)
-    };
-    builder
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
         .build()
         .map_err(|_| HipoError::Compression("rayon thread pool init failed"))
 }
@@ -716,46 +725,6 @@ impl Iterator for TryChainEventIter {
     fn next(&mut self) -> Option<Result<OwnedEvent>> {
         self.inner.next_result()
     }
-}
-
-/// Spawn a detached background thread that opens a side file descriptor
-/// per chain file and `pread`s every record's bytes into a discard buffer.
-/// Forces the kernel to populate the page cache even past its bounded
-/// per-stream readahead window — the headline win for sequential scans of
-/// large files on shared filesystems. Best-effort: failures (open / read)
-/// are silently dropped; worst case the thread is a no-op.
-#[cfg(unix)]
-fn spawn_pread_prefetcher(files: Vec<Arc<FileInner>>) {
-    use std::os::unix::fs::FileExt;
-
-    // 16 MB chunks — far below typical Lustre stripe size, well above the
-    // page-fault granularity the consumer thread pays without prefetch.
-    const CHUNK: usize = 16 << 20;
-
-    let _ = std::thread::Builder::new()
-        .name("hipo-prefetch".into())
-        .spawn(move || {
-            let mut scratch = vec![0u8; CHUNK];
-            for inner in &files {
-                let Ok(file) = std::fs::File::open(&inner.path) else {
-                    continue;
-                };
-                for span in inner.index.records() {
-                    let mut off = span.file_offset;
-                    let mut remaining = span.record_length as usize;
-                    while remaining > 0 {
-                        let chunk = remaining.min(CHUNK);
-                        match file.read_at(&mut scratch[..chunk], off) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                off += n as u64;
-                                remaining -= n;
-                            }
-                        }
-                    }
-                }
-            }
-        });
 }
 
 #[cfg(test)]

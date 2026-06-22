@@ -123,7 +123,24 @@ impl WriterBuilder {
     }
 }
 
+/// What a finished [`Writer`] wrote — returned by [`Writer::finish`].
+#[derive(Debug, Clone, Copy)]
+pub struct WriteSummary {
+    /// Total events written across all records.
+    pub events: u64,
+    /// Number of data records written (excludes the file header and trailer).
+    pub records: u64,
+    /// Total bytes on disk, including the file header, dictionary, and
+    /// trailer index.
+    pub bytes: u64,
+}
+
 /// HIPO file writer.
+///
+/// Call [`Writer::finish`] when done — it consumes the writer, writes the
+/// trailer index, and returns a [`WriteSummary`]. Dropping a writer without
+/// finishing finalises best-effort but cannot report errors, so it warns
+/// instead (loudly if that best-effort finalisation itself fails).
 #[derive(Debug)]
 pub struct Writer {
     path: PathBuf,
@@ -302,9 +319,29 @@ impl Writer {
         self.builder.set_user_word_2(v);
     }
 
-    /// Flush the last record, write the trailer, and patch the file header
-    /// with the trailer position. Idempotent.
-    pub fn finish(&mut self) -> Result<()> {
+    /// Flush the last record, write the trailer, patch the file header with
+    /// the trailer position, and return a [`WriteSummary`].
+    ///
+    /// Consumes the writer: appending after `finish` is a compile error, and
+    /// the `?` here is the place finalisation errors surface. You **must**
+    /// call this to produce a complete file — dropping a writer without
+    /// finishing runs a *best-effort* finalisation that cannot report errors
+    /// (see the [`Writer`] type docs).
+    pub fn finish(mut self) -> Result<WriteSummary> {
+        self.finalize()?;
+        Ok(WriteSummary {
+            events: self
+                .index_entries
+                .iter()
+                .map(|e| e.event_count as u64)
+                .sum(),
+            records: self.index_entries.len() as u64,
+            bytes: self.cursor,
+        })
+    }
+
+    /// Idempotent finalisation, shared by [`Self::finish`] and `Drop`.
+    fn finalize(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
         }
@@ -377,9 +414,30 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        // Best-effort finalisation. Errors here are silently dropped — it's
-        // up to the user to call `finish` explicitly to surface them.
-        let _ = self.finish();
+        if self.finished {
+            return;
+        }
+        // Dropped without an explicit `finish()`. Finalise best-effort so the
+        // file is still readable, but make noise: a `Drop` can't propagate the
+        // error the way `finish()?` does, and a silent failure here yields a
+        // truncated / index-less file. Never panic — the crate aborts on
+        // panic, and a panic while unwinding would take the process down.
+        match self.finalize() {
+            Err(e) => eprintln!(
+                "error: oxihipo::Writer for {} dropped without finish() and the \
+                 best-effort finalize failed: {e}; the file may be truncated or \
+                 missing its index.",
+                self.path.display(),
+            ),
+            Ok(()) => {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "warning: oxihipo::Writer for {} dropped without finish(); recovered \
+                     via best-effort finalize — call finish()? to surface errors.",
+                    self.path.display(),
+                );
+            }
+        }
     }
 }
 
@@ -594,5 +652,63 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, HipoError::UnknownSchema { .. }));
+    }
+
+    #[test]
+    fn finish_returns_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.hipo");
+        let mut w = Writer::create(&path)
+            .schemas(&sample_dict())
+            .compression(Compression::None)
+            .build()
+            .unwrap();
+        for pid in 1..=5 {
+            w.event(|ev| {
+                ev.bank("REC::Particle", |b| {
+                    b.row(|r| {
+                        r.set("pid", pid)?;
+                        r.set("px", pid as f32 * 0.1)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let summary = w.finish().unwrap();
+        assert_eq!(summary.events, 5);
+        assert_eq!(summary.records, 1);
+        assert!(summary.bytes > 0);
+    }
+
+    #[test]
+    fn drop_without_finish_is_still_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.hipo");
+        {
+            let mut w = Writer::create(&path)
+                .schemas(&sample_dict())
+                .compression(Compression::None)
+                .build()
+                .unwrap();
+            w.event(|ev| {
+                ev.bank("REC::Particle", |b| {
+                    b.row(|r| {
+                        r.set("pid", 7)?;
+                        r.set("px", 0.7_f32)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+            // Intentionally no `finish()` — the best-effort `Drop` must still
+            // produce a readable file (it also prints a warning to stderr).
+        }
+        let f = crate::read::Chain::open(&path).unwrap();
+        assert_eq!(f.event_count(), 1);
     }
 }

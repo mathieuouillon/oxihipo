@@ -36,9 +36,6 @@ pub enum HipoError {
     #[error("unknown compression type: {0}")]
     UnknownCompression(u32),
 
-    #[error("unknown header type: {0}")]
-    UnknownHeaderType(u32),
-
     #[error("schema {name:?} not found in dictionary")]
     UnknownSchema { name: String },
 

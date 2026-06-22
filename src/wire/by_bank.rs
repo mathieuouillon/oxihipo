@@ -11,36 +11,24 @@
 
 use std::sync::{Arc, OnceLock};
 
-use memmap2::Mmap;
-
 use crate::compress::decompress;
 use crate::error::{HipoError, Result};
 use crate::wire::bytes::read_u32_le;
 use crate::wire::constants::CompressionType;
 use crate::wire::record_header::RecordHeader;
 
-/// Where a [`ByBankRecord`]'s compressed payload section lives.
+/// Owns a [`ByBankRecord`]'s compressed payload section.
 ///
-/// The reader path borrows it straight from the memory-mapped file
-/// (`Mmap`) — the `Arc<Mmap>` keeps the mapping alive for the record's
-/// lifetime, so there is **no per-record copy** of the (potentially
-/// multi-MB) compressed section. Test / in-memory construction owns a
-/// copy instead.
+/// The streaming reader `pread`s each record into a recycled buffer and
+/// hands this an owned copy of just the compressed section, so a live
+/// record costs one section's worth of bytes — not a whole-file mapping.
 #[derive(Debug)]
-enum Backing {
-    /// Borrowed from the mmap at `[section_off, section_off + len)`.
-    Mmap { mmap: Arc<Mmap>, section_off: usize },
-    /// Owned copy of the section (tests, in-memory `parse`).
-    Owned(Box<[u8]>),
-}
+struct Backing(Box<[u8]>);
 
 impl Backing {
     #[inline]
-    fn section(&self, section_len: usize) -> &[u8] {
-        match self {
-            Backing::Mmap { mmap, section_off } => &mmap[*section_off..*section_off + section_len],
-            Backing::Owned(b) => b,
-        }
+    fn section(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -80,12 +68,9 @@ pub struct ByBankRecord {
     /// `bank_data[b]` lazily holds the decompressed bank stream once
     /// any caller has touched it.
     bank_data: Vec<OnceLock<Box<[u8]>>>,
-    /// The compressed payload section — borrowed from the mmap on the
-    /// reader path (no copy), owned for in-memory construction.
+    /// The owned compressed payload section (one `pread`'d copy per record;
+    /// individual bank streams within it inflate lazily on first access).
     backing: Backing,
-    /// Length in bytes of the compressed section (`backing` resolves to a
-    /// slice of exactly this length).
-    section_len: usize,
     /// For each bank, the byte range of its compressed stream **within the
     /// section** (i.e. relative to `backing.section(..)`).
     compressed_streams: Vec<std::ops::Range<usize>>,
@@ -133,38 +118,18 @@ fn directory_body_len(num_banks: usize, event_count: u32) -> Result<usize> {
 }
 
 impl ByBankRecord {
-    /// Parse a record from an in-memory byte buffer, **owning** a copy of
-    /// its compressed section. Used by tests and any caller that doesn't
-    /// have the bytes in an mmap. **Does not decompress any bank stream.**
+    /// Parse a record from an in-memory byte buffer — typically a single
+    /// record `pread` into a recycled buffer, or a test fixture — **owning**
+    /// a copy of its compressed section. **Does not decompress any bank
+    /// stream**; individual streams inflate lazily on first `ev.bank(name)`.
     pub fn parse(src: &[u8]) -> Result<Arc<Self>> {
         let header = Self::check_header(src)?;
-        let (section_off, section_len) = Self::section_bounds(&header, src.len(), 0)?;
+        let (section_off, section_len) = Self::section_bounds(&header, src.len())?;
         let section = &src[section_off..section_off + section_len];
         Self::parse_section(
             header,
             section,
-            Backing::Owned(section.to_vec().into_boxed_slice()),
-        )
-    }
-
-    /// Parse a record that lives in a memory-mapped file at
-    /// `[lo, hi)`, **borrowing** its compressed section from the mmap —
-    /// no per-record copy. The `Arc<Mmap>` is cloned into the record so
-    /// the mapping outlives it. **Does not decompress any bank stream.**
-    pub fn parse_mmap(mmap: Arc<Mmap>, lo: usize, hi: usize) -> Result<Arc<Self>> {
-        let src = &mmap[lo..hi];
-        let header = Self::check_header(src)?;
-        // Section bounds are relative to `src` (offset `lo` in the mmap).
-        let (rel_off, section_len) = Self::section_bounds(&header, src.len(), lo)?;
-        let section_off = rel_off; // already absolute (section_bounds adds `lo`)
-        let section = &mmap[section_off..section_off + section_len];
-        Self::parse_section(
-            header,
-            section,
-            Backing::Mmap {
-                mmap: Arc::clone(&mmap),
-                section_off,
-            },
+            Backing(section.to_vec().into_boxed_slice()),
         )
     }
 
@@ -187,14 +152,9 @@ impl ByBankRecord {
         Ok(header)
     }
 
-    /// Compute the compressed section's `(offset, len)`. `base` is added
-    /// to the offset so callers reading from an mmap get an absolute
-    /// offset; pass `0` for a `src`-relative offset.
-    fn section_bounds(
-        header: &RecordHeader,
-        src_len: usize,
-        base: usize,
-    ) -> Result<(usize, usize)> {
+    /// Compute the compressed section's `(offset, len)` relative to the
+    /// record's first byte.
+    fn section_bounds(header: &RecordHeader, src_len: usize) -> Result<(usize, usize)> {
         let header_len = header.header_length as usize;
         let payload_disk_len = header.payload_bytes() as usize;
         let pad = header.compressed_data_padding as usize;
@@ -205,7 +165,7 @@ impl ByBankRecord {
             });
         }
         let section_len = payload_disk_len.saturating_sub(pad);
-        Ok((base + header_len, section_len))
+        Ok((header_len, section_len))
     }
 
     fn parse_section(header: RecordHeader, section: &[u8], backing: Backing) -> Result<Arc<Self>> {
@@ -370,6 +330,14 @@ impl ByBankRecord {
                 data_type: dir[off + 3],
             });
         }
+        // `bank_index` binary-searches this slice, so the writer's sort-by
+        // (group, item) is a load-bearing invariant — assert it in debug.
+        debug_assert!(
+            descriptors
+                .windows(2)
+                .all(|w| (w[0].group, w[0].item) < (w[1].group, w[1].item)),
+            "ByBank descriptors must be sorted ascending by (group, item)",
+        );
         // compressed / decompressed sizes
         let mut compressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
         let mut decompressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
@@ -436,7 +404,6 @@ impl ByBankRecord {
             bank_offsets,
             bank_data,
             backing,
-            section_len: section.len(),
             compressed_streams,
             decompressed_sizes,
         }))
@@ -461,10 +428,12 @@ impl ByBankRecord {
     /// Look up a bank by (group, item). `None` if no bank with that ID
     /// appears anywhere in this record.
     pub fn bank_index(&self, group: u16, item: u8) -> Option<u32> {
-        // Linear scan — typical B ~30, faster than hashing.
+        // Descriptors are sorted ascending by (group, item) and unique (the
+        // writer sorts them; the reader preserves on-disk order), so this is
+        // a binary search — O(log B) on the hottest lookup in the reader.
         self.descriptors
-            .iter()
-            .position(|d| d.group == group && d.item == item)
+            .binary_search_by(|d| (d.group, d.item).cmp(&(group, item)))
+            .ok()
             .map(|i| i as u32)
     }
 
@@ -505,7 +474,7 @@ impl ByBankRecord {
         // multiple threads concurrently — exactly one initializer runs;
         // others block on it.
         let expected = self.decompressed_sizes[b] as usize;
-        let section = self.backing.section(self.section_len);
+        let section = self.backing.section();
         let src = &section[self.compressed_streams[b].clone()];
 
         // `OnceLock::get_or_init` doesn't allow fallible closures, so we

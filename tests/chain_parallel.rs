@@ -168,7 +168,8 @@ fn for_each_respects_filter() {
 
     let chain = Chain::open_all([&p1, &p2])
         .unwrap()
-        .with_filter(Filter::require(["RAW::tag"]));
+        .with_filter(Filter::require(["RAW::tag"]))
+        .unwrap();
 
     let counter = Arc::new(AtomicU64::new(0));
     let counter_ref = Arc::clone(&counter);

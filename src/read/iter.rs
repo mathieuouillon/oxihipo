@@ -45,15 +45,13 @@
 
 use std::sync::Arc;
 
-use crate::error::{HipoError, Result};
+use crate::error::Result;
 use crate::event::{Event, OwnedEvent};
 use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
 use crate::schema::Dict;
 use crate::wire::by_bank::ByBankRecord;
-use crate::wire::constants::RECORD_HEADER_SIZE;
 use crate::wire::record::decode_record_into;
-use crate::wire::record_header::RecordHeader;
 
 pub struct EventIter {
     inner: Arc<FileInner>,
@@ -77,6 +75,10 @@ pub struct EventIter {
     /// remain in flight. Avoids per-record allocations on the steady-
     /// state path (Bytes-backed path only).
     scratch: Vec<u8>,
+    /// Recycled buffer holding the current record's raw (still-compressed)
+    /// bytes, `pread` from the file each record. Reused across records so a
+    /// scan never holds more than one record's bytes resident.
+    read_buf: Vec<u8>,
     finished: bool,
 }
 
@@ -141,6 +143,7 @@ impl EventIter {
             next_record: 0,
             next_event: 0,
             scratch: Vec::new(),
+            read_buf: Vec::new(),
             finished: false,
         }
     }
@@ -190,39 +193,27 @@ impl EventIter {
             }
             let span = records[self.next_record];
             self.next_record += 1;
-            let mmap_len = self.inner.mmap.len();
 
+            // Record-tag pushdown: peek just the header (a small positioned
+            // read) and skip non-matching records without streaming the
+            // whole payload.
             if let Some(tags) = &self.record_tags {
-                let hdr_off = span.file_offset as usize;
-                if hdr_off + RECORD_HEADER_SIZE > mmap_len {
-                    return Err(HipoError::CorruptRecord {
-                        offset: span.file_offset,
-                        reason: "record header past EOF",
-                    });
-                }
-                let h = RecordHeader::parse(&self.inner.mmap[hdr_off..])?;
+                let h = self.inner.read_record_header(span.file_offset)?;
                 if !tags.contains(&h.user_word_1) {
                     continue;
                 }
             }
 
-            let lo = span.file_offset as usize;
-            let hi = lo + span.record_length as usize;
-            if hi > mmap_len {
-                return Err(HipoError::CorruptRecord {
-                    offset: span.file_offset,
-                    reason: "record extends past EOF",
-                });
-            }
+            // Stream the whole record into the recycled `read_buf`.
+            let mut read_buf = std::mem::take(&mut self.read_buf);
+            let header = self
+                .inner
+                .read_record_into(span.file_offset, &mut read_buf)?;
 
-            // Peek the header to decide which decoder to use. Lz4ByBank
-            // routes to the lazy bank-stream path; everything else uses
-            // the existing decompressed-payload path.
-            let header_kind = RecordHeader::parse(&self.inner.mmap[lo..hi])?.compression;
-
-            if header_kind.is_by_bank() {
-                // ByBank: parse the directory eagerly (cheap), defer
-                // bank decompression to first `ev.bank(name)`.
+            if header.compression.is_by_bank() {
+                // ByBank: parse the directory eagerly, copying out just the
+                // compressed section; bank streams inflate lazily on first
+                // `ev.bank(name)`. `read_buf` is free to recycle afterwards.
                 // Recover the previous record's Bytes-path scratch first.
                 let prev = std::mem::replace(&mut self.cur, CurrentRecord::None);
                 if let CurrentRecord::Bytes {
@@ -237,7 +228,8 @@ impl EventIter {
                         self.scratch = v;
                     }
                 }
-                let by_bank = ByBankRecord::parse_mmap(Arc::clone(&self.inner.mmap), lo, hi)?;
+                let by_bank = ByBankRecord::parse(&read_buf)?;
+                self.read_buf = read_buf;
                 let event_count = by_bank.event_count();
                 self.cur = CurrentRecord::ByBank {
                     record: by_bank,
@@ -247,17 +239,16 @@ impl EventIter {
                 return Ok(true);
             }
 
-            // Bytes-backed path. Reclaim buffers first (mut self), then
-            // borrow the mmap slice and decode.
+            // Bytes-backed path. Reclaim the decompression buffers, then
+            // decode the streamed record into them.
             let (mut buf, mut event_offsets) = self.take_bytes_buffers();
-            let decoded = {
-                let src = &self.inner.mmap[lo..hi];
-                decode_record_into(src, &mut buf, &mut event_offsets)?
-            };
+            let decoded = decode_record_into(&read_buf, &mut buf, &mut event_offsets)?;
+            let data_start = decoded.data_start;
+            self.read_buf = read_buf;
             self.cur = CurrentRecord::Bytes {
                 payload: Arc::new(buf),
                 event_offsets,
-                data_start: decoded.data_start,
+                data_start,
             };
             self.next_event = 0;
             return Ok(true);

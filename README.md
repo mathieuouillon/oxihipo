@@ -15,17 +15,22 @@ layers are intentionally out of scope.
 ## Features
 
 - **Zero-copy columnar reads.** `bank.col::<T>("name")` returns a
-  `Cow<[T]>` that borrows straight from the mmap when the bytes are
-  aligned (always for 4-byte types), with a one-shot copy fallback
-  otherwise. Fixed-length array columns (`name/T#N`) read as `[T; N]`.
+  `Cow<[T]>` that borrows straight from the decompressed record buffer when
+  the bytes are aligned (always for 4-byte types), with a one-shot copy
+  fallback otherwise. Fixed-length array columns (`name/T#N`) read as `[T; N]`.
+- **Bounded memory, any file size.** Records stream in one at a time via
+  `pread` into a recycled buffer — the file is never mapped or read whole.
+  A sequential scan of a 100 GB file holds ~one record resident (tens of MB),
+  not the file; parallel scans hold one record per worker. Safe under a
+  memory-capped batch allocation.
 - **One reader: `Chain`.** Single file, directory, or glob; multi-file
-  chains share one mmap per file and a single parsed dictionary.
+  chains share a single parsed dictionary and stream records on demand.
   `chain.events()` is the panic-on-corruption convenience path;
   `chain.try_events()` yields `Result<OwnedEvent>` for untrusted or
   possibly-truncated input.
-- **Data-parallel scans.** `Chain::for_each` fans the
-  work across cores, with automatic `MADV_WILLNEED` prefetch to hide
-  page-fault latency on networked filesystems (Lustre / NFS).
+- **Data-parallel scans.** `Chain::for_each(threads, f)` fans the work
+  across cores out of order (`threads = 0` ⇒ all cores, `1` ⇒ sequential,
+  `n` ⇒ exactly `n`); shared state in `f` is atomic or locked.
 - **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions:
   `Lz4Chunked` (intra-record parallel inflate) and `Lz4ByBank`
   (decompress only the banks an analysis actually reads — see the
@@ -172,9 +177,10 @@ cargo run --release --example bench_par -- /path/to/file.hipo 0
 ## Notable design decisions
 
 - **`Chain` is the only reader.** A chain of one file is the common case;
-  multi-file chains share a single mmap per file and one parsed dictionary.
-  `Chain::open_all` validates that every file in the chain has the same
-  `Dict` — catches mismatched cooking versions at construction time.
+  multi-file chains share one parsed dictionary and stream records on demand
+  (no whole-file mapping). `Chain::open_all` validates that every file in the
+  chain has the same `Dict` — catches mismatched cooking versions at
+  construction time.
 - **`Event<'a>` carries only borrowed bytes;** the typical handle is
   `EventCtx<'a> = (Event<'a>, &Dict)`, which lets `ev.bank("REC::Particle")`
   resolve the schema without separate juggling.
@@ -196,23 +202,14 @@ cargo run --release --example bench_par -- /path/to/file.hipo 0
 ## Performance on shared filesystems
 
 When the input lives on a network filesystem — JLab ifarm's `/volatile` and
-`/cache` (Lustre), NFS, etc. — `mmap` page-faults become many small RPCs
-and dominate wall time. `oxihipo` mitigates this in two places:
+`/cache` (Lustre), NFS, etc. — I/O latency dominates wall time. The reader
+issues one `pread` per record and relies on the kernel's per-descriptor
+readahead to fetch the next record while the current one decompresses;
+parallel mode keeps several records in flight across workers. Resident memory
+stays bounded (one record per worker) no matter how large the file, so a wide
+parallel scan won't be OOM-killed by a memory-capped batch allocation.
 
-- **Parallel runs** (`Chain::for_each`, parallel mode) auto-issue
-  `MADV_WILLNEED` over each selected record before the worker pool starts,
-  so the kernel reads pages in parallel with worker decompression. Nothing
-  to call — it's automatic.
-- **Sequential runs** can opt in by calling `chain.prefetch()` once after
-  open and before the loop:
-
-  ```rust
-  let chain = Chain::open(file)?;
-  chain.prefetch();
-  for ev in chain.events() { /* … */ }
-  ```
-
-If you are still I/O-bound after that, the levers are user-side:
+If you are still I/O-bound, the levers are user-side:
 
 - **File striping.** A Lustre file on a single OST is bandwidth-capped no
   matter the thread count. New outputs: `lfs setstripe -c 4 outfile.hipo`;

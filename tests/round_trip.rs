@@ -131,7 +131,8 @@ fn write_then_filter_require() {
 
     let file = Chain::open(&path)
         .unwrap()
-        .with_filter(Filter::require(["RAW::tag"]));
+        .with_filter(Filter::require(["RAW::tag"]))
+        .unwrap();
 
     let mut seen = 0u64;
     for ev in file.events() {
@@ -384,7 +385,8 @@ fn events_iter_honors_filter() {
 
     let file = Chain::open(&path)
         .unwrap()
-        .with_filter(Filter::require(["RAW::tag"]));
+        .with_filter(Filter::require(["RAW::tag"]))
+        .unwrap();
     let mut count = 0;
     for _ev in file.events() {
         count += 1;
