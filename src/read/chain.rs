@@ -4,7 +4,7 @@
 //! Single-file is just a chain of length 1 (`Chain::open(path)`).
 //! Multi-file iteration walks files in input order ([`Chain::events`])
 //! or fans out in parallel across every record of every file
-//! ([`Chain::par_for_each`], [`Chain::par_reduce`]).
+//! ([`Chain::for_each`]).
 //!
 //! Eager open: each file is mmap'd + dict-parsed at construction. mmap
 //! is virtual address space (no disk I/O until the first record read),
@@ -383,7 +383,7 @@ impl Chain {
     ///    The thread runs detached and terminates after walking the chain;
     ///    on Windows only the `MADV_WILLNEED` layer applies.
     ///
-    /// The parallel runners ([`Self::par_for_each`], [`Self::par_reduce`])
+    /// The parallel modes of [`Self::for_each`]
     /// already prefetch the records they'll touch, so calling this before
     /// a parallel run is unnecessary.
     pub fn prefetch(&self) {
@@ -394,101 +394,104 @@ impl Chain {
         spawn_pread_prefetcher(self.files.clone());
     }
 
-    // ---- Parallel analysis ----------------------------------------------
+    // ---- Event processing -----------------------------------------------
 
-    /// Run `f` on every event across every file in parallel. Order is
-    /// **not preserved**. Use atomics / `Arc<Mutex<_>>` for shared state,
-    /// or prefer [`Self::par_reduce`] for accumulator-style work.
+    /// Run `f` on every event across every file. The execution mode is
+    /// selected entirely by `threads` — the **only** difference between
+    /// single- and multi-threaded is this argument:
     ///
-    /// `threads = 0` lets rayon pick (one worker per logical CPU); a value
-    /// above the core count is allowed and can help hide page-fault stalls
-    /// on a slow filesystem.
+    /// - `threads == 1` → **sequential**, in input order, on the calling
+    ///   thread (no rayon pool, no thread spawn).
+    /// - `threads == 0` → **parallel**, one worker per logical CPU.
+    /// - `threads == n` (`n > 1`) → **parallel** with exactly `n` workers
+    ///   (a value above the core count is allowed and can hide page-fault
+    ///   stalls on a slow filesystem).
     ///
-    /// Switches each file's `madvise` to `MADV_NORMAL` for the parallel,
-    /// out-of-order access pattern; a later sequential [`Self::events`]
-    /// scan on the same `Chain` will not re-assert `MADV_SEQUENTIAL`.
-    pub fn par_for_each<F>(&self, threads: usize, f: F) -> Result<ChainStats>
+    /// Event order is preserved only for `threads == 1`; the parallel
+    /// modes visit events out of order, so use atomics or a `Mutex` in `f`
+    /// for shared state. Returns aggregate [`ChainStats`].
+    ///
+    /// The parallel modes switch each file's `madvise` to `MADV_NORMAL`
+    /// and prefetch the records they'll touch; the sequential mode leaves
+    /// the `MADV_SEQUENTIAL` advice set at open.
+    ///
+    /// ```no_run
+    /// use std::sync::atomic::{AtomicU64, Ordering};
+    /// use oxihipo::Chain;
+    ///
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("rec.hipo")?;
+    /// let rows = AtomicU64::new(0);
+    /// // `threads = 0` → all cores; pass `1` for the identical single-
+    /// // threaded scan.
+    /// chain.for_each(0, |ev| {
+    ///     if let Some(b) = ev.bank("REC::Particle") {
+    ///         rows.fetch_add(b.rows() as u64, Ordering::Relaxed);
+    ///     }
+    /// })?;
+    /// println!("{} REC::Particle rows", rows.load(Ordering::Relaxed));
+    /// # Ok(()) }
+    /// ```
+    pub fn for_each<F>(&self, threads: usize, f: F) -> Result<ChainStats>
     where
         F: for<'a> Fn(&EventCtx<'a>) + Send + Sync,
     {
         let tasks = self.build_tasks();
-        let pool = build_pool(threads)?;
         let filter = self.filter.as_ref();
         let filter_active = filter.is_some_and(|f| f.is_active());
         let events_in = AtomicU64::new(0);
         let events_yielded = AtomicU64::new(0);
         let start = Instant::now();
         let files = &self.files;
-        for inner in files {
-            inner.advise_parallel();
-        }
-        // Kick the kernel to start reading every selected record's pages
-        // now, in parallel with the worker pool's decompression — the
-        // headline win on shared filesystems (Lustre etc.).
-        for &(fi, ri) in &tasks {
-            let inner = &files[fi];
-            let span = &inner.index.records()[ri];
-            inner.prefetch_range(span.file_offset as usize, span.record_length as usize);
-        }
 
-        pool.install(|| -> Result<()> {
-            tasks.par_iter().try_for_each_init::<_, _, _, Result<()>>(
-                Record::new,
-                |record, &(fi, ri)| {
-                    let inner = &files[fi];
-                    let span = &inner.index.records()[ri];
-                    let lo = span.file_offset as usize;
-                    let hi = lo + span.record_length as usize;
-                    if hi > inner.mmap.len() {
-                        return Err(HipoError::CorruptRecord {
-                            offset: span.file_offset,
-                            reason: "record extends past EOF",
-                        });
-                    }
-                    let src = &inner.mmap[lo..hi];
-                    let header = RecordHeader::parse(src)?;
-                    let mut local_in = 0u64;
-                    let mut local_out = 0u64;
-
-                    if header.compression.is_by_bank() {
-                        // Lazy per-bank decompression — the user's
-                        // closure only inflates bank streams it touches.
-                        let by_bank = ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
-                        for ev_idx in 0..by_bank.event_count() {
-                            local_in += 1;
-                            if filter_active
-                                && let Some(filt) = filter
-                                && !filt.check_by_bank(&by_bank, ev_idx)
-                            {
-                                continue;
-                            }
-                            let ctx = EventCtx::new_by_bank(&by_bank, ev_idx, &inner.dict);
-                            f(&ctx);
-                            local_out += 1;
-                        }
-                    } else {
-                        record.load_with_header(src, header)?;
-                        for ev_idx in 0..record.event_count() {
-                            let raw = record.event(ev_idx).expect("event in range");
-                            let event = Event::new(raw);
-                            local_in += 1;
-                            if filter_active
-                                && let Some(filt) = filter
-                                && !filt.check(&event)
-                            {
-                                continue;
-                            }
-                            let ctx = EventCtx::new(event, &inner.dict);
-                            f(&ctx);
-                            local_out += 1;
-                        }
-                    }
-                    events_in.fetch_add(local_in, Ordering::Relaxed);
-                    events_yielded.fetch_add(local_out, Ordering::Relaxed);
-                    Ok(())
-                },
-            )
-        })?;
+        if threads == 1 {
+            // Single-threaded: walk records in input order on this thread,
+            // reusing one decompression scratch buffer.
+            let mut record = Record::new();
+            for &(fi, ri) in &tasks {
+                process_record(
+                    &files[fi],
+                    ri,
+                    filter,
+                    filter_active,
+                    &mut record,
+                    &f,
+                    &events_in,
+                    &events_yielded,
+                )?;
+            }
+        } else {
+            // Parallel: fan records across a rayon pool, out of order.
+            let pool = build_pool(threads)?;
+            for inner in files {
+                inner.advise_parallel();
+            }
+            // Kick the kernel to start reading every selected record's
+            // pages now, in parallel with worker decompression — the
+            // headline win on shared filesystems (Lustre etc.).
+            for &(fi, ri) in &tasks {
+                let inner = &files[fi];
+                let span = &inner.index.records()[ri];
+                inner.prefetch_range(span.file_offset as usize, span.record_length as usize);
+            }
+            pool.install(|| -> Result<()> {
+                tasks.par_iter().try_for_each_init::<_, _, _, Result<()>>(
+                    Record::new,
+                    |record, &(fi, ri)| {
+                        process_record(
+                            &files[fi],
+                            ri,
+                            filter,
+                            filter_active,
+                            record,
+                            &f,
+                            &events_in,
+                            &events_yielded,
+                        )
+                    },
+                )
+            })?;
+        }
 
         Ok(ChainStats {
             events_in: events_in.load(Ordering::Relaxed),
@@ -496,200 +499,6 @@ impl Chain {
             records: tasks.len() as u64,
             files: self.files.len(),
             elapsed: start.elapsed(),
-        })
-    }
-
-    /// Per-thread fold + final reduce across every event. `init` builds an
-    /// accumulator per worker; `fold(acc, ev)` adds one event into it;
-    /// `combine(a, b)` merges two thread-local accumulators. `combine`
-    /// must be associative — events are not visited in order.
-    ///
-    /// `threads = 0` lets rayon pick. Like [`Self::par_for_each`], this
-    /// switches each file's `madvise` to `MADV_NORMAL`.
-    pub fn par_reduce<H, InitFn, FoldFn, CombineFn>(
-        &self,
-        threads: usize,
-        init: InitFn,
-        fold: FoldFn,
-        combine: CombineFn,
-    ) -> Result<H>
-    where
-        H: Send,
-        InitFn: Fn() -> H + Send + Sync,
-        FoldFn: for<'a> Fn(H, &EventCtx<'a>) -> H + Send + Sync,
-        CombineFn: Fn(H, H) -> H + Send + Sync,
-    {
-        let tasks = self.build_tasks();
-        let pool = build_pool(threads)?;
-        let filter = self.filter.as_ref();
-        let filter_active = filter.is_some_and(|f| f.is_active());
-        let files = &self.files;
-        for inner in files {
-            inner.advise_parallel();
-        }
-        // Kick the kernel to start reading every selected record's pages
-        // now, in parallel with the worker pool's decompression — the
-        // headline win on shared filesystems (Lustre etc.).
-        for &(fi, ri) in &tasks {
-            let inner = &files[fi];
-            let span = &inner.index.records()[ri];
-            inner.prefetch_range(span.file_offset as usize, span.record_length as usize);
-        }
-
-        pool.install(|| -> Result<H> {
-            tasks
-                .par_iter()
-                .try_fold(
-                    || (init(), Record::new()),
-                    |state: (H, Record), &(fi, ri)| -> Result<(H, Record)> {
-                        let (mut acc, mut record) = state;
-                        let inner = &files[fi];
-                        let span = &inner.index.records()[ri];
-                        let lo = span.file_offset as usize;
-                        let hi = lo + span.record_length as usize;
-                        if hi > inner.mmap.len() {
-                            return Err(HipoError::CorruptRecord {
-                                offset: span.file_offset,
-                                reason: "record extends past EOF",
-                            });
-                        }
-                        let src = &inner.mmap[lo..hi];
-                        let header = RecordHeader::parse(src)?;
-
-                        if header.compression.is_by_bank() {
-                            let by_bank =
-                                ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
-                            for ev_idx in 0..by_bank.event_count() {
-                                if filter_active
-                                    && let Some(filt) = filter
-                                    && !filt.check_by_bank(&by_bank, ev_idx)
-                                {
-                                    continue;
-                                }
-                                let ctx = EventCtx::new_by_bank(&by_bank, ev_idx, &inner.dict);
-                                acc = fold(acc, &ctx);
-                            }
-                        } else {
-                            record.load_with_header(src, header)?;
-                            for ev_idx in 0..record.event_count() {
-                                let raw = record.event(ev_idx).expect("event in range");
-                                let event = Event::new(raw);
-                                if filter_active
-                                    && let Some(filt) = filter
-                                    && !filt.check(&event)
-                                {
-                                    continue;
-                                }
-                                let ctx = EventCtx::new(event, &inner.dict);
-                                acc = fold(acc, &ctx);
-                            }
-                        }
-                        Ok((acc, record))
-                    },
-                )
-                .map(|r| r.map(|(h, _)| h))
-                .try_reduce(&init, |a, b| Ok(combine(a, b)))
-        })
-    }
-
-    /// Per-record variant of [`Self::par_reduce`] — the `fold` closure
-    /// receives a *slice* of `EventCtx`s belonging to one record, so
-    /// callers can amortise per-event ceremony across the whole
-    /// record (RDataFrame-style bulk processing).
-    ///
-    /// The `fold` is called **once per record** with all the record's
-    /// events (post-filter) collected into a `Vec<EventCtx<'a>>`. The
-    /// Vec is local to the iteration (its `'a` is the record's
-    /// lifetime), so no extra borrow-checker contortions are needed.
-    ///
-    /// Same task-list / rayon-pool / prefetch / `MADV_NORMAL` setup
-    /// as `par_reduce`. `combine` must be associative.
-    pub fn par_reduce_records<H, InitFn, FoldFn, CombineFn>(
-        &self,
-        threads: usize,
-        init: InitFn,
-        fold: FoldFn,
-        combine: CombineFn,
-    ) -> Result<H>
-    where
-        H: Send,
-        InitFn: Fn() -> H + Send + Sync,
-        FoldFn: for<'a> Fn(H, &[EventCtx<'a>]) -> H + Send + Sync,
-        CombineFn: Fn(H, H) -> H + Send + Sync,
-    {
-        let tasks = self.build_tasks();
-        let pool = build_pool(threads)?;
-        let filter = self.filter.as_ref();
-        let filter_active = filter.is_some_and(|f| f.is_active());
-        let files = &self.files;
-        for inner in files {
-            inner.advise_parallel();
-        }
-        for &(fi, ri) in &tasks {
-            let inner = &files[fi];
-            let span = &inner.index.records()[ri];
-            inner.prefetch_range(span.file_offset as usize, span.record_length as usize);
-        }
-
-        pool.install(|| -> Result<H> {
-            tasks
-                .par_iter()
-                .try_fold(
-                    || (init(), Record::new()),
-                    |state: (H, Record), &(fi, ri)| -> Result<(H, Record)> {
-                        let (mut acc, mut record) = state;
-                        let inner = &files[fi];
-                        let span = &inner.index.records()[ri];
-                        let lo = span.file_offset as usize;
-                        let hi = lo + span.record_length as usize;
-                        if hi > inner.mmap.len() {
-                            return Err(HipoError::CorruptRecord {
-                                offset: span.file_offset,
-                                reason: "record extends past EOF",
-                            });
-                        }
-                        let src = &inner.mmap[lo..hi];
-                        let header = RecordHeader::parse(src)?;
-
-                        if header.compression.is_by_bank() {
-                            let by_bank =
-                                ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
-                            let n_events = by_bank.event_count();
-                            let mut events: Vec<EventCtx<'_>> =
-                                Vec::with_capacity(n_events as usize);
-                            for ev_idx in 0..n_events {
-                                if filter_active
-                                    && let Some(filt) = filter
-                                    && !filt.check_by_bank(&by_bank, ev_idx)
-                                {
-                                    continue;
-                                }
-                                events.push(EventCtx::new_by_bank(&by_bank, ev_idx, &inner.dict));
-                            }
-                            acc = fold(acc, &events);
-                        } else {
-                            record.load_with_header(src, header)?;
-                            let n_events = record.event_count();
-                            let mut events: Vec<EventCtx<'_>> =
-                                Vec::with_capacity(n_events as usize);
-                            for ev_idx in 0..n_events {
-                                let raw = record.event(ev_idx).expect("event in range");
-                                let event = Event::new(raw);
-                                if filter_active
-                                    && let Some(filt) = filter
-                                    && !filt.check(&event)
-                                {
-                                    continue;
-                                }
-                                events.push(EventCtx::new(event, &inner.dict));
-                            }
-                            acc = fold(acc, &events);
-                        }
-                        Ok((acc, record))
-                    },
-                )
-                .map(|r| r.map(|(h, _)| h))
-                .try_reduce(&init, |a, b| Ok(combine(a, b)))
         })
     }
 
@@ -719,6 +528,73 @@ impl Chain {
     }
 }
 
+/// Decode record `ri` of `inner` and call `f` on every (post-filter)
+/// event, accumulating per-record counts into the shared atomics. Shared
+/// by the sequential and parallel arms of [`Chain::for_each`]; `record`
+/// is a reusable scratch buffer used only for the bytes-backed path.
+#[allow(clippy::too_many_arguments)]
+fn process_record<F>(
+    inner: &Arc<FileInner>,
+    ri: usize,
+    filter: Option<&Filter>,
+    filter_active: bool,
+    record: &mut Record,
+    f: &F,
+    events_in: &AtomicU64,
+    events_yielded: &AtomicU64,
+) -> Result<()>
+where
+    F: for<'a> Fn(&EventCtx<'a>) + Send + Sync,
+{
+    let span = &inner.index.records()[ri];
+    let lo = span.file_offset as usize;
+    let hi = lo + span.record_length as usize;
+    if hi > inner.mmap.len() {
+        return Err(HipoError::CorruptRecord {
+            offset: span.file_offset,
+            reason: "record extends past EOF",
+        });
+    }
+    let src = &inner.mmap[lo..hi];
+    let header = RecordHeader::parse(src)?;
+    let mut local_in = 0u64;
+    let mut local_out = 0u64;
+
+    if header.compression.is_by_bank() {
+        // Lazy per-bank decompression — `f` only inflates banks it touches.
+        let by_bank = ByBankRecord::parse_mmap(Arc::clone(&inner.mmap), lo, hi)?;
+        for ev_idx in 0..by_bank.event_count() {
+            local_in += 1;
+            if filter_active
+                && let Some(filt) = filter
+                && !filt.check_by_bank(&by_bank, ev_idx)
+            {
+                continue;
+            }
+            f(&EventCtx::new_by_bank(&by_bank, ev_idx, &inner.dict));
+            local_out += 1;
+        }
+    } else {
+        record.load_with_header(src, header)?;
+        for ev_idx in 0..record.event_count() {
+            let raw = record.event(ev_idx).expect("event in range");
+            let event = Event::new(raw);
+            local_in += 1;
+            if filter_active
+                && let Some(filt) = filter
+                && !filt.check(&event)
+            {
+                continue;
+            }
+            f(&EventCtx::new(event, &inner.dict));
+            local_out += 1;
+        }
+    }
+    events_in.fetch_add(local_in, Ordering::Relaxed);
+    events_yielded.fetch_add(local_out, Ordering::Relaxed);
+    Ok(())
+}
+
 /// Build a rayon pool. `threads == 0` ⇒ rayon's default (one worker per
 /// logical CPU); any other value sets the worker count exactly (values
 /// above the core count are allowed — useful to hide filesystem stalls).
@@ -733,7 +609,7 @@ fn build_pool(threads: usize) -> Result<rayon::ThreadPool> {
         .map_err(|_| HipoError::Compression("rayon thread pool init failed"))
 }
 
-/// Aggregate counters returned by [`Chain::par_for_each`].
+/// Aggregate counters returned by [`Chain::for_each`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ChainStats {
     /// Events visited (before filter).

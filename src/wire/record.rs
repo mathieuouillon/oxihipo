@@ -237,7 +237,7 @@ fn decode_chunked_into(
     }
 
     // Inflate chunks in parallel. `rayon::scope` uses the global pool;
-    // when called inside a `par_for_each` worker (nested rayon), it
+    // when called inside a `for_each` worker (nested rayon), it
     // shares that pool — no deadlock. For sequential callers this is
     // a free win: idle cores on the record get used.
     //

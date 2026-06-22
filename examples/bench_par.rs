@@ -1,17 +1,19 @@
-//! Parallel-scan throughput benchmark.
+//! Scan-throughput benchmark.
 //!
-//! Times a sequential `Chain::events()` walk against `Chain::par_reduce`
-//! over the same input and prints the speed-up. Intended for measuring on
-//! shared filesystems — e.g. JLab ifarm `/cache` vs `/volatile`.
+//! Times a single-threaded scan against a parallel one over the same
+//! input and prints the speed-up — both through the *same* `for_each`
+//! call, differing only in the `threads` argument. Intended for measuring
+//! on shared filesystems — e.g. JLab ifarm `/cache` vs `/volatile`.
 //!
 //! Usage:
-//!   cargo run --release -p hipo --example bench_par -- <file|dir|glob> [threads]
+//!   cargo run --release --example bench_par -- <file|dir|glob> [threads]
 //!
 //! `threads = 0` (the default) lets rayon pick one worker per logical CPU.
 //! The path may be a single file, a directory, or a glob like `data/*.hipo`.
 
 use std::env;
 use std::hint::black_box;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use oxihipo::{Chain, EventCtx, Result};
@@ -33,7 +35,7 @@ fn main() -> Result<()> {
 
     // `Chain::open` dispatches on file / directory / glob pattern.
     let chain = Chain::open(&path)?;
-    // Async-prefetch the whole file's pages so the sequential pass below
+    // Async-prefetch the whole file's pages so the single-threaded pass
     // gets the same I/O priming the parallel pass receives automatically.
     chain.prefetch();
     let events = chain.event_count();
@@ -43,30 +45,30 @@ fn main() -> Result<()> {
         chain.record_count(),
     );
 
-    // ---- sequential baseline --------------------------------------------
+    // ---- single-threaded: for_each(1, ...) ------------------------------
+    let seq_sum = AtomicU64::new(0);
     let start = Instant::now();
-    let mut seq_sum: u64 = 0;
-    for ev in chain.events() {
-        seq_sum += particle_rows(&ev.ctx());
-    }
+    chain.for_each(1, |ev| {
+        seq_sum.fetch_add(particle_rows(ev), Ordering::Relaxed);
+    })?;
     let seq = start.elapsed();
+    let seq_sum = seq_sum.into_inner();
     let _ = black_box(seq_sum);
 
-    // ---- parallel -------------------------------------------------------
+    // ---- parallel: the *same* closure, just `threads` instead of 1 ------
+    let par_sum = AtomicU64::new(0);
     let start = Instant::now();
-    let par_sum: u64 = chain.par_reduce(
-        threads,
-        || 0u64,
-        |acc, ev| acc + particle_rows(ev),
-        |a, b| a + b,
-    )?;
+    chain.for_each(threads, |ev| {
+        par_sum.fetch_add(particle_rows(ev), Ordering::Relaxed);
+    })?;
     let par = start.elapsed();
+    let par_sum = par_sum.into_inner();
     let _ = black_box(par_sum);
 
-    assert_eq!(seq_sum, par_sum, "parallel sum must match sequential");
+    assert_eq!(seq_sum, par_sum, "parallel sum must match single-threaded");
 
-    report("sequential events()", seq, events);
-    report(&format!("par_reduce(threads={threads})"), par, events);
+    report("for_each(1)  single-thread", seq, events);
+    report(&format!("for_each({threads}) parallel"), par, events);
     eprintln!(
         "  speed-up: {:.2}x",
         seq.as_secs_f64() / par.as_secs_f64().max(f64::MIN_POSITIVE),

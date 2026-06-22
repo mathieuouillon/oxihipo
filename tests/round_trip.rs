@@ -684,8 +684,23 @@ fn write_then_scan_lz4_by_bank() {
     assert_eq!(seen, 200);
 }
 
+/// Sum `REC::Event.evno` over the chain via `for_each(threads)`.
+fn sum_evno_for_each(chain: &Chain, threads: usize) -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let acc = AtomicI64::new(0);
+    chain
+        .for_each(threads, |ev| {
+            acc.fetch_add(
+                ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0],
+                Ordering::Relaxed,
+            );
+        })
+        .unwrap();
+    acc.into_inner()
+}
+
 #[test]
-fn lz4_by_bank_par_reduce_matches_sequential() {
+fn lz4_by_bank_for_each_matches_iterator() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("by_bank_par.hipo");
 
@@ -718,16 +733,10 @@ fn lz4_by_bank_par_reduce_matches_sequential() {
         .events()
         .map(|ev| ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0])
         .sum();
-    let par_sum: i64 = file
-        .par_reduce(
-            0,
-            || 0_i64,
-            |acc, ev| acc + ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0],
-            |a, b| a + b,
-        )
-        .unwrap();
     assert_eq!(seq_sum, (0..300_i64).sum::<i64>());
-    assert_eq!(par_sum, seq_sum);
+    // Single-threaded and parallel `for_each` agree with the iterator.
+    assert_eq!(sum_evno_for_each(&file, 1), seq_sum);
+    assert_eq!(sum_evno_for_each(&file, 0), seq_sum);
 }
 
 #[test]
@@ -802,7 +811,7 @@ fn lz4_by_bank_skips_unused_banks() {
 }
 
 #[test]
-fn lz4_chunked_par_reduce_matches_sequential() {
+fn lz4_chunked_for_each_matches_iterator() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunked_par.hipo");
 
@@ -838,15 +847,7 @@ fn lz4_chunked_par_reduce_matches_sequential() {
         .map(|ev| ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0])
         .sum();
 
-    let par_sum: i64 = file
-        .par_reduce(
-            0,
-            || 0_i64,
-            |acc, ev| acc + ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0],
-            |a, b| a + b,
-        )
-        .unwrap();
-
     assert_eq!(seq_sum, (0..200_i64).sum::<i64>());
-    assert_eq!(par_sum, seq_sum);
+    assert_eq!(sum_evno_for_each(&file, 1), seq_sum);
+    assert_eq!(sum_evno_for_each(&file, 0), seq_sum);
 }

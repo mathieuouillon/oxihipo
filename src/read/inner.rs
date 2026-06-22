@@ -91,7 +91,7 @@ impl FileInner {
     ///
     /// [`open`](Self::open) sets `MADV_SEQUENTIAL`, which suits the
     /// front-to-back `events()` walk but is wrong for
-    /// `Chain::par_for_each` / `par_reduce`: under concurrent out-of-order
+    /// `Chain::for_each` (parallel mode): under concurrent out-of-order
     /// record faults its evict-behind behavior makes workers drop pages
     /// other workers still need. This resets to `MADV_NORMAL` — default
     /// per-fault readahead, no evict-behind; each record is a contiguous

@@ -23,7 +23,7 @@ layers are intentionally out of scope.
   `chain.events()` is the panic-on-corruption convenience path;
   `chain.try_events()` yields `Result<OwnedEvent>` for untrusted or
   possibly-truncated input.
-- **Data-parallel scans.** `Chain::par_reduce` / `par_for_each` fan the
+- **Data-parallel scans.** `Chain::for_each` fans the
   work across cores, with automatic `MADV_WILLNEED` prefetch to hide
   page-fault latency on networked filesystems (Lustre / NFS).
 - **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions:
@@ -85,22 +85,26 @@ println!("{total_rows} REC::Particle rows across the chain");
 # Ok(()) }
 ```
 
-Saturate every core with `par_reduce` — the same scan, fanned across the
-records of every file (`threads = 0` ⇒ one worker per logical CPU):
+Process every event with `for_each` — the `threads` argument is the only
+difference between a single-threaded and a parallel scan (`1` = on the
+calling thread in order, `0` = one worker per logical CPU, `n` = exactly
+`n` workers). Shared state is held in atomics because the parallel modes
+visit events out of order:
 
 ```rust
+use std::sync::atomic::{AtomicU64, Ordering};
 use oxihipo::Chain;
 
 # fn main() -> oxihipo::Result<()> {
 let chain = Chain::open_dir("/data/cooked/run5042")?;
 
-let total_rows: u64 = chain.par_reduce(
-    0,
-    || 0u64,
-    |acc, ev| acc + ev.bank("REC::Particle").map_or(0, |b| b.rows() as u64),
-    |a, b| a + b,
-)?;
-println!("{total_rows} REC::Particle rows across the chain");
+let total_rows = AtomicU64::new(0);
+chain.for_each(0, |ev| {                          // `0` → all cores; `1` → single-threaded
+    if let Some(b) = ev.bank("REC::Particle") {
+        total_rows.fetch_add(b.rows() as u64, Ordering::Relaxed);
+    }
+})?;
+println!("{} REC::Particle rows across the chain", total_rows.into_inner());
 # Ok(()) }
 ```
 
@@ -133,7 +137,7 @@ w.finish()?;
   `cargo fmt --check` all clean.
 - Validated on a 1.7 GB CLAS12 file (`rec_clas_022050.evio.00000.hipo`):
   a sequential `Chain::events()` scan reads all 187,941 events at
-  ~257 kev/s. `Chain::par_reduce` fans the same scan across cores; measure
+  ~257 kev/s. `Chain::for_each` (parallel mode) fans the same scan across cores; measure
   throughput on your hardware with the `bench_par` example.
 
 ## Layout
@@ -148,7 +152,7 @@ write). Inside `src/`:
 - `event/` — `Event` (raw), `EventCtx` (with `&Dict`), `Bank`, `RowView`,
   `Composite`, `OwnedEvent`, internal `BankBuilder` / `EventBuilder`
 - `read/` — `Chain` (the sole reader, `Arc<FileInner>`-backed),
-  `ChainEventIter`, `Filter`, parallel `par_for_each` / `par_reduce`
+  `ChainEventIter`, `Filter`, parallel `for_each`
   (`ChainStats`)
 - `write/` — `Writer` builder, `BankWriter`, `RowWriter`, `Compression`
 
@@ -195,7 +199,7 @@ When the input lives on a network filesystem — JLab ifarm's `/volatile` and
 `/cache` (Lustre), NFS, etc. — `mmap` page-faults become many small RPCs
 and dominate wall time. `oxihipo` mitigates this in two places:
 
-- **Parallel runs** (`Chain::par_for_each` / `Chain::par_reduce`) auto-issue
+- **Parallel runs** (`Chain::for_each`, parallel mode) auto-issue
   `MADV_WILLNEED` over each selected record before the worker pool starts,
   so the kernel reads pages in parallel with worker decompression. Nothing
   to call — it's automatic.
@@ -214,7 +218,7 @@ If you are still I/O-bound after that, the levers are user-side:
   matter the thread count. New outputs: `lfs setstripe -c 4 outfile.hipo`;
   existing files: `lfs migrate -c 4 file.hipo`.
 - **Thread oversubscription.** Pass `threads = 2 × num_cpus` to
-  `par_reduce` to hide network page-fault stalls.
+  `for_each` to hide network page-fault stalls.
 - **Stage to local scratch.** `cp /volatile/.../file.hipo /scratch/$USER/`
   before analysing — local disk easily beats Lustre per single client.
 
@@ -247,7 +251,7 @@ What that unlocks today:
 
 - **Intra-record parallel decompression.** The reader inflates chunks in
   parallel via `rayon::scope`. Sequential `chain.events()` loops use idle
-  cores; `par_reduce` workers get finer-grained units.
+  cores; `for_each` workers get finer-grained units.
 - **Lays groundwork for partial decompression** — the inline
   `event_sizes[]` table sits outside any LZ4 stream, so a future
   filter-pushdown API can decompress only chunks containing wanted
@@ -395,7 +399,7 @@ compressed for the record's lifetime.
 - **Sub-chunked `Lz4ByBank`**: combining `Lz4Chunked`-style intra-stream
   parallelism with per-bank streams, for very large records where one
   bank's stream is multi-MB. Per-bank streams already parallelise *across
-  banks* in `par_reduce`; this is the next step if profiles say a single
+  banks* in `for_each`; this is the next step if profiles say a single
   bank dominates.
 
 ## CI gates
