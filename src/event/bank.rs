@@ -14,6 +14,26 @@
 //!
 //! On little-endian targets (every supported one) the typed cast is
 //! zero-copy.
+//!
+//! # Which accessor?
+//!
+//! | Need | Method | Returns | On miss |
+//! |---|---|---|---|
+//! | one cell, lenient | [`Bank::get`] | `T` | `T::default()` |
+//! | whole column, strict | [`Bank::col`] | `Result<Cow<[T]>>` | `Err` |
+//! | whole column, hot loop | [`Bank::read`] | `Cow<[T]>` | infallible |
+//! | one cell, hot loop | [`Bank::read_handle_or_default`] | `T` | `T::default()` |
+//! | one row of a runtime-length array column | [`Bank::array_at`] | `Result<Cow<[T]>>` | `Err` |
+//!
+//! Rule of thumb: [`get`](Bank::get) for occasional lenient reads,
+//! [`col`](Bank::col) for bulk strict reads, and resolve a [`ColumnHandle`]
+//! once + [`read`](Bank::read) / [`read_handle_or_default`](Bank::read_handle_or_default)
+//! when the same column is read across many events. To skip the
+//! `ev.bank(name)?` step, the same `get` / `col` exist directly on the event
+//! ([`EventCtx::get`](crate::event::EventCtx::get) /
+//! [`EventCtx::col`](crate::event::EventCtx::col)). To read several columns
+//! per row, prefer a typed row via [`bank_row!`](crate::bank_row) +
+//! [`EventCtx::rows`](crate::event::EventCtx::rows).
 
 use std::borrow::Cow;
 

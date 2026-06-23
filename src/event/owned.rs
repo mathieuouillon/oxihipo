@@ -177,6 +177,31 @@ impl OwnedEvent {
         self.bank_for(schema)
     }
 
+    /// Read one cell of bank `bank`, column `col`, at `row`. Infallible;
+    /// see [`EventCtx::get`](crate::event::EventCtx::get).
+    #[inline]
+    pub fn get<T: crate::schema::BankColumnType + Default>(
+        &self,
+        bank: &str,
+        col: &str,
+        row: u32,
+    ) -> T {
+        self.bank(bank).map(|b| b.get(col, row)).unwrap_or_default()
+    }
+
+    /// Borrow column `col` of bank `bank` as `Cow<'_, [T]>` (tied to
+    /// `&self`). See [`EventCtx::col`](crate::event::EventCtx::col).
+    pub fn col<T: crate::schema::BankColumnType>(
+        &self,
+        bank: &str,
+        col: &str,
+    ) -> crate::Result<std::borrow::Cow<'_, [T]>> {
+        match self.bank(bank) {
+            Some(b) => b.col::<T>(col),
+            None => Ok(std::borrow::Cow::Borrowed(&[])),
+        }
+    }
+
     pub fn has(&self, name: &str) -> bool {
         let Some(schema) = self.dict.get(name) else {
             return false;

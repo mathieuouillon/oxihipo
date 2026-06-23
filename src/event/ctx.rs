@@ -149,6 +149,41 @@ impl<'a> EventCtx<'a> {
         self.bank_for(schema)
     }
 
+    /// Read one cell of bank `bank`, column `col`, at `row` — collapsing
+    /// `ev.bank(bank)?.get(col, row)` into a single call.
+    ///
+    /// Infallible: returns `T::default()` when the bank is absent, the
+    /// column is missing, the wire type doesn't match `T`, or `row` is out
+    /// of range. To read several columns per row, prefer a
+    /// [`bank_row!`](crate::bank_row) type with [`Self::rows`].
+    #[inline]
+    pub fn get<T: crate::schema::BankColumnType + Default>(
+        &self,
+        bank: &str,
+        col: &str,
+        row: u32,
+    ) -> T {
+        self.bank(bank).map(|b| b.get(col, row)).unwrap_or_default()
+    }
+
+    /// Borrow column `col` of bank `bank` as `Cow<'a, [T]>` in one call.
+    ///
+    /// Strict like [`Bank::col`](crate::event::Bank::col): errors on a
+    /// type/length mismatch. A missing bank yields an empty borrowed slice
+    /// (`Ok`), so callers can iterate uniformly without distinguishing
+    /// "absent" from "present but empty" — use [`Self::has`] if that
+    /// distinction matters.
+    pub fn col<T: crate::schema::BankColumnType>(
+        &self,
+        bank: &str,
+        col: &str,
+    ) -> crate::Result<std::borrow::Cow<'a, [T]>> {
+        match self.bank(bank) {
+            Some(b) => b.col::<T>(col),
+            None => Ok(std::borrow::Cow::Borrowed(&[])),
+        }
+    }
+
     /// True if the event contains a structure for the named schema.
     pub fn has(&self, name: &str) -> bool {
         let Some(schema) = self.dict.get(name) else {

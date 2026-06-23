@@ -33,6 +33,7 @@ pub mod prelude;
 mod compress;
 mod wire;
 
+pub mod clas12;
 pub mod event;
 pub mod read;
 pub mod schema;
@@ -87,6 +88,91 @@ macro_rules! or_break {
         match $opt {
             ::core::option::Option::Some(v) => v,
             ::core::option::Option::None => break,
+        }
+    };
+}
+
+/// Define a typed row struct for a named bank and derive its
+/// [`BankRow`](crate::event::BankRow) impl — the turn-key path to
+/// [`EventCtx::rows`](crate::event::EventCtx::rows) /
+/// [`EventCtx::bank_view`](crate::event::EventCtx::bank_view), with no
+/// hand-written trait impl.
+///
+/// Each `field: type => "column"` entry maps a struct field to a bank
+/// column. The field type must implement
+/// [`BankColumnType`](crate::schema::BankColumnType) **and** `Default` —
+/// every scalar (`i8`/`i16`/`i32`/`i64`/`f32`/`f64`) and fixed-length
+/// array (`[T; N]`). Decoding is infallible: a column missing from the
+/// runtime schema, or one whose wire type doesn't match, reads back as
+/// `T::default()`.
+///
+/// ```ignore
+/// oxihipo::bank_row! {
+///     #[derive(Clone, Copy, Debug, Default)]
+///     pub struct RecParticle for "REC::Particle" @ (300, 1) {
+///         pid: i32 => "pid",
+///         px:  f32 => "px",
+///         py:  f32 => "py",
+///         pz:  f32 => "pz",
+///     }
+/// }
+///
+/// // Then, given an `ev: EventCtx` or `OwnedEvent`:
+/// for p in ev.rows::<RecParticle>() {
+///     let _ = (p.pid, p.px, p.py, p.pz);
+/// }
+/// ```
+///
+/// The generated fields inherit the struct's visibility. Supply your own
+/// `#[derive(...)]` (typically `Clone, Copy, Debug` — add `Default` if you
+/// construct the struct yourself). Up to **12 columns** per struct (the
+/// Rust tuple-arity limit on the internal handle cache); split a wider
+/// bank into two row structs.
+#[macro_export]
+macro_rules! bank_row {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident for $bank:literal @ ($group:literal, $item:literal) {
+            $( $field:ident : $ty:ty => $col:literal ),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis struct $name {
+            $( $vis $field: $ty, )*
+        }
+
+        impl $crate::event::BankRow for $name {
+            const NAME: &'static str = $bank;
+            const GROUP: u16 = $group;
+            const ITEM: u8 = $item;
+
+            // One typed handle per field, in declaration order. The same
+            // `$(...)*` drives this tuple, `resolve_handles`, and the
+            // destructure below, so the order can never drift.
+            type Handles = ( $( $crate::schema::ColumnHandle<$ty>, )* );
+
+            fn resolve_handles(schema: &$crate::schema::Schema) -> Self::Handles {
+                (
+                    $(
+                        schema
+                            .handle::<$ty>($col)
+                            .unwrap_or_else(|_| $crate::schema::ColumnHandle::<$ty>::placeholder()),
+                    )*
+                )
+            }
+
+            #[inline]
+            fn from_row_with_handles(
+                bank: &$crate::event::Bank<'_>,
+                row: u32,
+                handles: &Self::Handles,
+            ) -> Self {
+                // `Handles` is `Copy`, so this copies each handle out.
+                let ( $( $field, )* ) = *handles;
+                Self {
+                    $( $field: bank.read_handle_or_default($field, row), )*
+                }
+            }
         }
     };
 }
