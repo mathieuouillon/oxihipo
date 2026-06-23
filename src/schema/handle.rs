@@ -243,6 +243,18 @@ impl<T: BankColumnType> ColumnHandle<T> {
         })
     }
 
+    /// Build a handle from an already-resolved column index, **without**
+    /// re-checking type or length. The caller must have verified the
+    /// column's `ty`/`length` match `T` (e.g. the per-event `ev.get`
+    /// column cache, which validates against `entries()` before reading).
+    #[inline]
+    pub(crate) fn from_index(col: u16) -> Self {
+        Self {
+            col,
+            _phantom: PhantomData,
+        }
+    }
+
     /// 0-based column index inside the schema's `entries()`.
     #[inline]
     pub fn column_index(&self) -> usize {

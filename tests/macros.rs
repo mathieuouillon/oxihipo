@@ -104,6 +104,106 @@ fn bank_row_macro_and_direct_accessors() {
     assert_eq!(total_rows, 10);
 }
 
+/// The per-event bank cache must not cross-contaminate when reads alternate
+/// between two banks: each `get` must re-validate and rebuild the right one.
+#[test]
+fn bank_cache_correct_across_banks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("two.hipo");
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Event",
+        300,
+        30,
+        [("evno".into(), DataType::Int)],
+    ));
+    d.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        31,
+        [("pid".into(), DataType::Int)],
+    ));
+    {
+        let mut w = Writer::create(&path).schemas(&d).build().unwrap();
+        for i in 0..10 {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| r.set("evno", 1000 + i).map(|_| ()))?;
+                    Ok(())
+                })?;
+                ev.bank("REC::Particle", |b| {
+                    b.row(|r| r.set("pid", 11 + i).map(|_| ()))?;
+                    b.row(|r| r.set("pid", 211 + i).map(|_| ()))?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    for (i, ev) in Chain::open(&path).unwrap().events().enumerate() {
+        let i = i as i32;
+        // Interleave the two banks repeatedly: hit, switch (miss), rebuild.
+        for _ in 0..3 {
+            assert_eq!(ev.get::<i32>("REC::Particle", "pid", 0), 11 + i);
+            assert_eq!(ev.get::<i32>("REC::Event", "evno", 0), 1000 + i);
+            assert_eq!(ev.get::<i32>("REC::Particle", "pid", 1), 211 + i);
+        }
+    }
+}
+
+/// The per-event *column* cache must switch columns within a bank and keep
+/// validating the requested type — a hit on the cached column index still
+/// returns `T::default()` on a type mismatch.
+#[test]
+fn get_column_cache_switches_columns_and_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cols.hipo");
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        31,
+        [
+            ("pid".into(), DataType::Int),
+            ("px".into(), DataType::Float),
+        ],
+    ));
+    {
+        let mut w = Writer::create(&path).schemas(&d).build().unwrap();
+        for i in 0..8 {
+            w.event(|ev| {
+                ev.bank("REC::Particle", |b| {
+                    b.row(|r| {
+                        r.set("pid", 11 + i)?;
+                        r.set("px", i as f32 * 0.5)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    for (i, ev) in Chain::open(&path).unwrap().events().enumerate() {
+        let i = i as i32;
+        for _ in 0..3 {
+            assert_eq!(ev.get::<i32>("REC::Particle", "pid", 0), 11 + i);
+            assert_eq!(ev.get::<f32>("REC::Particle", "px", 0), i as f32 * 0.5);
+            assert_eq!(ev.get::<i32>("REC::Particle", "pid", 0), 11 + i);
+            // Wrong type on a cached column → default (type still validated).
+            assert_eq!(ev.get::<f32>("REC::Particle", "pid", 0), 0.0);
+            // Absent column → default.
+            assert_eq!(ev.get::<i32>("REC::Particle", "nope", 0), 0);
+        }
+    }
+}
+
 #[test]
 fn or_continue_skips_none() {
     let inputs = [Some(1_i32), None, Some(2), None, Some(3)];

@@ -16,6 +16,7 @@
 //! backend except when calling `bytes()` (which is cheap for `Bytes` and
 //! incurs a synthesis copy for `ByBank`).
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::event::bank::Bank;
@@ -32,6 +33,33 @@ use crate::wire::constants::{BANK_STRUCTURE_SIZE, EH_SIZE, EVENT_HEADER_SIZE};
 pub struct OwnedEvent {
     inner: Inner,
     dict: Arc<Dict>,
+    /// Locator for the last bank resolved by name this event, so a per-row
+    /// loop (repeated [`Self::get`]) resolves it once: a hit skips both the
+    /// dict name-hash (re-validating via the O(1) by-id table) and the
+    /// per-call structure walk (rebuilding the `Bank` from the cached byte
+    /// range / bank index). `OwnedEvent` owns its buffer, so it can't cache
+    /// the borrowed `Bank` itself — the locator is the `Send`-safe,
+    /// allocation-free equivalent.
+    bank_cache: Cell<Option<CachedBank>>,
+}
+
+/// Single-entry per-event resolution cache for [`OwnedEvent::bank`] /
+/// [`OwnedEvent::get`]: the bank locator plus the last column index
+/// resolved within it (`col == u16::MAX` ⇒ none yet).
+#[derive(Debug, Clone, Copy)]
+struct CachedBank {
+    group: u16,
+    item: u8,
+    loc: Loc,
+    col: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Loc {
+    /// Byte range of the bank's data within the event bytes.
+    Bytes { off: u32, len: u32 },
+    /// Resolved bank index into the `ByBankRecord` (present this event).
+    ByBank { bank_idx: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +90,7 @@ impl OwnedEvent {
                 end: len,
             },
             dict,
+            bank_cache: Cell::new(None),
         }
     }
 
@@ -77,6 +106,7 @@ impl OwnedEvent {
                 end,
             },
             dict,
+            bank_cache: Cell::new(None),
         }
     }
 
@@ -91,6 +121,7 @@ impl OwnedEvent {
                 synth: Arc::new(std::sync::OnceLock::new()),
             },
             dict,
+            bank_cache: Cell::new(None),
         }
     }
 
@@ -148,8 +179,100 @@ impl OwnedEvent {
     }
 
     pub fn bank(&self, name: &str) -> Option<Bank<'_>> {
+        // Fast path: same bank as the last call this event? Re-validate the
+        // cached id by name (cheap O(1) by-id lookup + a string compare),
+        // then rebuild the `Bank` from the cached locator — no name-hash, no
+        // structure walk.
+        if let Some(c) = self.bank_cache.get()
+            && let Some(schema) = self.dict.get_by_id(c.group, c.item)
+            && schema.name() == name
+        {
+            return self.rebuild(schema, c.loc);
+        }
         let schema = self.dict.get(name)?;
-        self.bank_for(schema)
+        self.resolve_and_cache(schema)
+    }
+
+    /// Resolve a bank from scratch and remember its locator for the next
+    /// same-name call this event.
+    fn resolve_and_cache<'a>(&'a self, schema: &'a Schema) -> Option<Bank<'a>> {
+        let (g, i) = (schema.group(), schema.item());
+        match &self.inner {
+            Inner::Bytes {
+                payload,
+                start,
+                end,
+            } => {
+                let ev_bytes = &payload[*start as usize..*end as usize];
+                let (_, data) = Event::new(ev_bytes).find(g, i)?;
+                let off = (data.as_ptr().addr() - ev_bytes.as_ptr().addr()) as u32;
+                let bank = Bank::new(schema, data).ok()?;
+                self.bank_cache.set(Some(CachedBank {
+                    group: g,
+                    item: i,
+                    loc: Loc::Bytes {
+                        off,
+                        len: data.len() as u32,
+                    },
+                    col: u16::MAX,
+                }));
+                Some(bank)
+            }
+            Inner::ByBank {
+                record, event_idx, ..
+            } => {
+                let bank_idx = record.bank_index(g, i)?;
+                if !record.has(*event_idx, bank_idx) {
+                    return None;
+                }
+                let stream = record.bank_stream(bank_idx).ok()?;
+                let range = record.bank_byte_range(*event_idx, bank_idx);
+                let bank = Bank::new(schema, &stream[range]).ok()?;
+                self.bank_cache.set(Some(CachedBank {
+                    group: g,
+                    item: i,
+                    loc: Loc::ByBank { bank_idx },
+                    col: u16::MAX,
+                }));
+                Some(bank)
+            }
+        }
+    }
+
+    /// Rebuild a `Bank` from a cached locator (a hit). The bank was present
+    /// when cached and the event is immutable, so no presence re-check is
+    /// needed.
+    fn rebuild<'a>(&'a self, schema: &'a Schema, loc: Loc) -> Option<Bank<'a>> {
+        match (&self.inner, loc) {
+            (
+                Inner::Bytes {
+                    payload,
+                    start,
+                    end,
+                },
+                Loc::Bytes { off, len },
+            ) => {
+                let ev_bytes = &payload[*start as usize..*end as usize];
+                let s = off as usize;
+                let e = s.checked_add(len as usize)?;
+                if e > ev_bytes.len() {
+                    return None;
+                }
+                Bank::new(schema, &ev_bytes[s..e]).ok()
+            }
+            (
+                Inner::ByBank {
+                    record, event_idx, ..
+                },
+                Loc::ByBank { bank_idx },
+            ) => {
+                let stream = record.bank_stream(bank_idx).ok()?;
+                let range = record.bank_byte_range(*event_idx, bank_idx);
+                Bank::new(schema, &stream[range]).ok()
+            }
+            // Inner/Loc kind mismatch can't happen (one event, one backend).
+            _ => None,
+        }
     }
 
     /// Decode the bank for an already-resolved schema reference.
@@ -186,7 +309,39 @@ impl OwnedEvent {
         col: &str,
         row: u32,
     ) -> T {
-        self.bank(bank).map(|b| b.get(col, row)).unwrap_or_default()
+        let Some(b) = self.bank(bank) else {
+            return T::default();
+        };
+        let entries = b.schema().entries();
+        // Column cache: reuse the last column index resolved in this bank.
+        let ci = match self.bank_cache.get() {
+            Some(c)
+                if c.col != u16::MAX
+                    && c.group == b.schema().group()
+                    && c.item == b.schema().item()
+                    && entries
+                        .get(c.col as usize)
+                        .is_some_and(|e| e.name.as_str() == col) =>
+            {
+                c.col
+            }
+            _ => {
+                let Some(ci) = b.schema().column_index(col) else {
+                    return T::default();
+                };
+                let ci = ci as u16;
+                if let Some(mut c) = self.bank_cache.get() {
+                    c.col = ci;
+                    self.bank_cache.set(Some(c));
+                }
+                ci
+            }
+        };
+        let entry = &entries[ci as usize];
+        if entry.ty != T::DATA_TYPE || entry.length != T::LENGTH || row >= b.rows() {
+            return T::default();
+        }
+        b.read_handle_or_default(crate::schema::ColumnHandle::<T>::from_index(ci), row)
     }
 
     /// Borrow column `col` of bank `bank` as `Cow<'_, [T]>` (tied to

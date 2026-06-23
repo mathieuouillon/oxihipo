@@ -11,8 +11,11 @@
 //!   plus an event index. `bank(name)` decompresses *only* the
 //!   requested bank's stream (lazily, cached on the record).
 //!
-//! Both variants are `Copy + Clone` and cheap to pass by value.
+//! Both backends are cheap to copy; the `EventCtx` wrapper adds a small
+//! per-event cache of the last bank resolved by name (see [`EventCtx::bank`]),
+//! so it is `Clone` but not `Copy`.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::event::bank::Bank;
@@ -23,10 +26,15 @@ use crate::schema::{Dict, Schema};
 use crate::wire::by_bank::ByBankRecord;
 
 /// Borrowed event view + reference to the file's schema dictionary.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct EventCtx<'a> {
     backend: Backend<'a>,
     dict: &'a Dict,
+    /// Per-event resolution cache: the last bank resolved by name, plus the
+    /// last column index resolved within it (`u16::MAX` = none). A per-row
+    /// loop over one bank/column (repeated [`Self::get`]) resolves both once
+    /// and then reads through a handle — no per-cell name lookup at all.
+    cache: Cell<Option<(Bank<'a>, u16)>>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -44,6 +52,7 @@ impl<'a> EventCtx<'a> {
         Self {
             backend: Backend::Bytes(event),
             dict,
+            cache: Cell::new(None),
         }
     }
 
@@ -60,6 +69,7 @@ impl<'a> EventCtx<'a> {
         Self {
             backend: Backend::ByBank { record, event_idx },
             dict,
+            cache: Cell::new(None),
         }
     }
 
@@ -119,8 +129,18 @@ impl<'a> EventCtx<'a> {
     /// On `Lz4ByBank` records, only the requested bank's LZ4 stream is
     /// decompressed — other banks in the same record remain compressed.
     pub fn bank(&self, name: &str) -> Option<Bank<'a>> {
+        // Per-event cache: a per-row loop over one bank resolves it once,
+        // not on every call. The cached bank borrows `'a` (not `&self`), so
+        // it survives across calls.
+        if let Some((b, _)) = self.cache.get()
+            && b.schema().name() == name
+        {
+            return Some(b);
+        }
         let schema = self.dict.get(name)?;
-        self.bank_for(schema)
+        let bank = self.bank_for(schema)?;
+        self.cache.set(Some((bank, u16::MAX)));
+        Some(bank)
     }
 
     /// Decode the bank for an already-resolved schema reference.
@@ -154,8 +174,15 @@ impl<'a> EventCtx<'a> {
     ///
     /// Infallible: returns `T::default()` when the bank is absent, the
     /// column is missing, the wire type doesn't match `T`, or `row` is out
-    /// of range. To read several columns per row, prefer a
-    /// [`bank_row!`](crate::bank_row) type with [`Self::rows`].
+    /// of range.
+    ///
+    /// **Performance:** the resolved bank *and* column are cached per event,
+    /// so a per-row loop over one bank/column reads through a pre-resolved
+    /// handle — no name lookup per cell. Repeated same-bank/column `get` is
+    /// as fast as a hoisted `bank.get` (often faster, since `bank.get` looks
+    /// the column up by name on every call). Switching banks or columns
+    /// re-resolves; the typed [`bank_row!`](crate::bank_row) + [`Self::rows`]
+    /// path is the equivalent for reading several columns per row.
     #[inline]
     pub fn get<T: crate::schema::BankColumnType + Default>(
         &self,
@@ -163,7 +190,36 @@ impl<'a> EventCtx<'a> {
         col: &str,
         row: u32,
     ) -> T {
-        self.bank(bank).map(|b| b.get(col, row)).unwrap_or_default()
+        let Some(b) = self.bank(bank) else {
+            return T::default();
+        };
+        let entries = b.schema().entries();
+        // Column cache: reuse the last column index resolved in this bank,
+        // so a per-row loop reads through a handle with no name lookup.
+        let ci = match self.cache.get() {
+            Some((cb, cci))
+                if cci != u16::MAX
+                    && cb.schema().name() == bank
+                    && entries
+                        .get(cci as usize)
+                        .is_some_and(|e| e.name.as_str() == col) =>
+            {
+                cci
+            }
+            _ => {
+                let Some(ci) = b.schema().column_index(col) else {
+                    return T::default();
+                };
+                let ci = ci as u16;
+                self.cache.set(Some((b, ci)));
+                ci
+            }
+        };
+        let entry = &entries[ci as usize];
+        if entry.ty != T::DATA_TYPE || entry.length != T::LENGTH || row >= b.rows() {
+            return T::default();
+        }
+        b.read_handle_or_default(crate::schema::ColumnHandle::<T>::from_index(ci), row)
     }
 
     /// Borrow column `col` of bank `bank` as `Cow<'a, [T]>` in one call.

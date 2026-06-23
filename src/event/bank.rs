@@ -64,7 +64,11 @@ fn cast_cells<T: bytemuck::Pod>(bytes: &[u8], count: usize) -> Cow<'_, [T]> {
 }
 
 /// A read-only bank backed by a borrowed byte slice.
-#[derive(Debug, Clone)]
+///
+/// `Copy` — it's two references plus a row count, so callers (and the
+/// per-event bank cache on [`EventCtx`](crate::event::EventCtx)) can pass it
+/// around freely.
+#[derive(Debug, Clone, Copy)]
 pub struct Bank<'b> {
     schema: &'b Schema,
     /// The bank's data section (excluding the 8-byte structure header).
