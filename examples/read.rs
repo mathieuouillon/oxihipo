@@ -8,10 +8,20 @@
 
 use std::env;
 
-// A ready-made typed row for REC::Particle. Roll your own for any bank in
-// three lines with `oxihipo::bank_row!`.
-use oxihipo::clas12::RecParticle;
 use oxihipo::{Chain, Result};
+
+// A typed row mapping only the REC::Particle columns this example reads —
+// a few lines per bank with `oxihipo::bank_row!`. (For a fuller ready-made
+// REC::* catalog, see the `clas12` example.)
+oxihipo::bank_row! {
+    #[derive(Clone, Copy, Debug)]
+    struct RecParticle for "REC::Particle" @ (300, 31) {
+        pid: i32 => "pid",
+        px: f32 => "px",
+        py: f32 => "py",
+        pz: f32 => "pz",
+    }
+}
 
 fn main() -> Result<()> {
     let path = env::args()

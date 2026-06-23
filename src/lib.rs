@@ -35,7 +35,6 @@ pub mod prelude;
 mod compress;
 mod wire;
 
-pub mod clas12;
 pub mod event;
 pub mod read;
 pub mod schema;
