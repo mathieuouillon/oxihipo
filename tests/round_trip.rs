@@ -9,10 +9,10 @@ fn sample_dict() -> Dict {
         300,
         1,
         [
-            ("pid".into(), DataType::Int),
-            ("px".into(), DataType::Float),
-            ("py".into(), DataType::Float),
-            ("charge".into(), DataType::Byte),
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
+            ("py".into(), DataType::Float, 1),
+            ("charge".into(), DataType::Byte, 1),
         ],
     ));
     d.add(Schema::from_columns(
@@ -20,8 +20,8 @@ fn sample_dict() -> Dict {
         300,
         30,
         [
-            ("evno".into(), DataType::Long),
-            ("beamE".into(), DataType::Float),
+            ("evno".into(), DataType::Long, 1),
+            ("beamE".into(), DataType::Float, 1),
         ],
     ));
     d
@@ -73,7 +73,7 @@ fn write_then_scan_basic() {
 
     let mut total_particles = 0u64;
     let mut events_seen = 0u64;
-    for ev in file.events() {
+    for ev in file.events().map(Result::unwrap) {
         events_seen += 1;
         let particles = ev.bank("REC::Particle").unwrap();
         total_particles += particles.rows() as u64;
@@ -96,7 +96,7 @@ fn write_then_filter_require() {
             "RAW::tag",
             500,
             1,
-            [("v".into(), DataType::Int)],
+            [("v".into(), DataType::Int, 1)],
         ));
         d
     };
@@ -135,7 +135,7 @@ fn write_then_filter_require() {
         .unwrap();
 
     let mut seen = 0u64;
-    for ev in file.events() {
+    for ev in file.events().map(Result::unwrap) {
         assert!(ev.has("RAW::tag"));
         seen += 1;
     }
@@ -216,7 +216,7 @@ fn column_handle_matches_col() {
     let h_px = schema.handle::<f32>("px").unwrap();
     let h_charge = schema.handle::<i8>("charge").unwrap();
 
-    for ev in file.events() {
+    for ev in file.events().map(Result::unwrap) {
         let bank = ev.bank("REC::Particle").unwrap();
         let pid_named = bank.col::<i32>("pid").unwrap();
         let pid_handle = bank.read(h_pid);
@@ -297,9 +297,9 @@ fn chain_scans_multiple_files() {
         w.finish().unwrap();
     }
 
-    let chain = Chain::open_all([&p1, &p2]).unwrap();
+    let chain = Chain::open([&p1, &p2]).unwrap();
     let mut evnos = Vec::new();
-    for ev in chain.events() {
+    for ev in chain.events().map(Result::unwrap) {
         evnos.push(ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0]);
     }
     assert_eq!(evnos, vec![0, 1, 2, 100, 101, 102, 103, 104]);
@@ -336,7 +336,7 @@ fn events_iter_supports_plain_for_loop() {
     let file = Chain::open(&path).unwrap();
     let mut count = 0u64;
     let mut sum = 0_i64;
-    for ev in file.events() {
+    for ev in file.events().map(Result::unwrap) {
         count += 1;
         sum += ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
     }
@@ -355,7 +355,7 @@ fn events_iter_honors_filter() {
         "RAW::tag",
         500,
         1,
-        [("v".into(), DataType::Int)],
+        [("v".into(), DataType::Int, 1)],
     ));
 
     {
@@ -388,7 +388,7 @@ fn events_iter_honors_filter() {
         .with_filter(Filter::require(["RAW::tag"]))
         .unwrap();
     let mut count = 0;
-    for _ev in file.events() {
+    for _ev in file.events().map(Result::unwrap) {
         count += 1;
     }
     // i = 0, 4, 8, 12, 16 → 5 events
@@ -424,7 +424,7 @@ fn events_iter_break_early() {
 
     let file = Chain::open(&path).unwrap();
     let mut count = 0u64;
-    for _ev in file.events() {
+    for _ev in file.events().map(Result::unwrap) {
         count += 1;
         if count == 5 {
             break;
@@ -464,7 +464,7 @@ fn events_iter_counts_all_events() {
     // 500 events across 10 records (max_record_events = 50): the `for`
     // loop must walk every event of every record.
     let file = Chain::open(&path).unwrap();
-    assert_eq!(file.events().count(), 500);
+    assert_eq!(file.events().map(Result::unwrap).count(), 500);
 }
 
 #[test]
@@ -528,7 +528,7 @@ fn write_then_scan_array_columns() {
     assert_eq!(file.event_count(), 50);
 
     let mut seen = 0_i32;
-    for ev in file.events() {
+    for ev in file.events().map(Result::unwrap) {
         let bank = ev.bank("REC::Traj").unwrap();
         assert_eq!(bank.rows(), 3);
         let pids = bank.col::<i32>("pid").unwrap();
@@ -602,7 +602,7 @@ fn write_then_scan_lz4_chunked() {
     assert!(file.record_count() > 1);
 
     let mut seen = 0_i64;
-    for ev in file.events() {
+    for ev in file.events().map(Result::unwrap) {
         let evno = ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
         assert_eq!(evno, seen);
         let p = ev.bank("REC::Particle").unwrap();
@@ -666,7 +666,7 @@ fn write_then_scan_lz4_by_bank() {
     assert!(file.record_count() >= 5);
 
     let mut seen = 0_i64;
-    for ev in file.events() {
+    for ev in file.events().map(Result::unwrap) {
         let evno = ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
         assert_eq!(evno, seen);
 
@@ -733,6 +733,7 @@ fn lz4_by_bank_for_each_matches_iterator() {
     let file = Chain::open(&path).unwrap();
     let seq_sum: i64 = file
         .events()
+        .map(Result::unwrap)
         .map(|ev| ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0])
         .sum();
     assert_eq!(seq_sum, (0..300_i64).sum::<i64>());
@@ -792,7 +793,7 @@ fn lz4_by_bank_skips_unused_banks() {
     {
         let file = Chain::open(&path).unwrap();
         let mut sum: i64 = 0;
-        for ev in file.events() {
+        for ev in file.events().map(Result::unwrap) {
             sum += ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
         }
         assert_eq!(sum, (0..150_i64).sum::<i64>());
@@ -802,7 +803,7 @@ fn lz4_by_bank_skips_unused_banks() {
         let file = Chain::open(&path).unwrap();
         let mut events_total = 0u64;
         let mut particle_total = 0u64;
-        for ev in file.events() {
+        for ev in file.events().map(Result::unwrap) {
             let _ = ev.bank("REC::Event").unwrap();
             particle_total += ev.bank("REC::Particle").unwrap().rows() as u64;
             events_total += 1;
@@ -846,6 +847,7 @@ fn lz4_chunked_for_each_matches_iterator() {
     let file = Chain::open(&path).unwrap();
     let seq_sum: i64 = file
         .events()
+        .map(Result::unwrap)
         .map(|ev| ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0])
         .sum();
 

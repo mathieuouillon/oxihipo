@@ -143,8 +143,9 @@ impl<'a> EventCtx<'a> {
         Some(bank)
     }
 
-    /// Decode the bank for an already-resolved schema reference.
-    pub fn bank_for(&self, schema: &'a Schema) -> Option<Bank<'a>> {
+    /// Decode the bank for an already-resolved schema reference. Internal:
+    /// backs [`Self::bank`] and the typed-row accessors.
+    pub(crate) fn bank_for(&self, schema: &'a Schema) -> Option<Bank<'a>> {
         match self.backend {
             Backend::Bytes(e) => {
                 let (_, data) = e.find(schema.group(), schema.item())?;
@@ -160,13 +161,6 @@ impl<'a> EventCtx<'a> {
                 Bank::new(schema, &stream[range]).ok()
             }
         }
-    }
-
-    /// Decode by `(group, item)` directly — useful when the dict doesn't
-    /// list the bank but you know the wire IDs.
-    pub fn bank_by_id(&self, group: u16, item: u8) -> Option<Bank<'a>> {
-        let schema = self.dict.get_by_id(group, item)?;
-        self.bank_for(schema)
     }
 
     /// Read one cell of bank `bank`, column `col`, at `row` — collapsing
@@ -280,7 +274,7 @@ impl<'a> EventCtx<'a> {
         self.composite_by_id(schema.group(), schema.item())
     }
 
-    pub fn composite_by_id(&self, group: u16, item: u8) -> Option<Composite<'a>> {
+    pub(crate) fn composite_by_id(&self, group: u16, item: u8) -> Option<Composite<'a>> {
         let event = match self.backend {
             Backend::Bytes(e) => e,
             Backend::ByBank { .. } => return None,
@@ -315,29 +309,14 @@ impl<'a> EventCtx<'a> {
 
     // ---- Typed bank rows ------------------------------------------------
 
-    /// Obtain a handle-cached [`BankView`](crate::event::BankView)
-    /// for bank `T::NAME`, or `None` if the event lacks the bank.
-    ///
-    /// The view resolves typed column handles once at construction;
-    /// every subsequent row read (via `BankView::iter`, `iter_for_pindex`,
-    /// `iter_for_index`, or `row`) skips name lookups and goes straight
-    /// to pointer arithmetic. The first `iter_for_pindex` /
-    /// `iter_for_index` call builds an inverted index, so cross-bank
-    /// joins become O(rows) once + O(matches) per query instead of
-    /// O(rows × queries).
-    ///
-    /// ```ignore
-    /// if let Some(particles) = ev.bank_view::<RecParticleRow>() {
-    ///     for p in particles.iter() {
-    ///         if let Some(cal) = ev.bank_view::<RecCalorimeterRow>() {
-    ///             for c in cal.iter_for_pindex(p.row_index as i16) {
-    ///                 // …
-    ///             }
-    ///         }
-    ///     }
-    /// }
-    /// ```
-    pub fn bank_view<T: crate::event::BankRow>(&self) -> Option<crate::event::BankView<'a, T>> {
+    /// Internal: handle-cached [`BankView`](crate::event::BankView) for
+    /// bank `T::NAME`, or `None` if the event lacks the bank. Backs
+    /// [`Self::rows`] / [`Self::rows_for_pindex`] / [`Self::rows_for_index`],
+    /// which resolve typed column handles once and reuse them across the
+    /// rows of a single call.
+    pub(crate) fn bank_view<T: crate::event::BankRow>(
+        &self,
+    ) -> Option<crate::event::BankView<'a, T>> {
         let bank = self.bank_by_id_raw(T::GROUP, T::ITEM)?;
         Some(crate::event::BankView::new(bank))
     }
@@ -345,11 +324,9 @@ impl<'a> EventCtx<'a> {
     /// Iterate every row of bank `T::NAME` decoded as `T`. Empty when
     /// the event lacks the bank.
     ///
-    /// Equivalent to calling [`Self::bank_view`] and iterating the
-    /// returned view — the iterator owns the view internally so handle
-    /// caching is preserved across rows of a single call. For multiple
-    /// independent passes over the same bank in the same event, prefer
-    /// the explicit [`Self::bank_view`] handle to share one resolve.
+    /// Resolves the bank's typed column handles once and reuses them
+    /// across the rows of this call, so each row read is pointer
+    /// arithmetic with no per-cell name lookup.
     pub fn rows<T: crate::event::BankRow>(&self) -> RowsIter<'a, T> {
         RowsIter::new(self.bank_view::<T>())
     }
@@ -370,9 +347,9 @@ impl<'a> EventCtx<'a> {
         RowsForKeyIter::new(self.bank_view::<T>(), Key::Index(key))
     }
 
-    /// Same as [`Self::bank_by_id`] but doesn't require the schema to
-    /// be in the dict — looks up the schema (it must be) and returns
-    /// the [`Bank`](crate::event::Bank) view via the backend.
+    /// Resolve a bank by `(group, item)` via the dict (the schema must be
+    /// present) and return the [`Bank`](crate::event::Bank) view from the
+    /// backend. Internal helper behind the typed-row accessors.
     fn bank_by_id_raw(&self, group: u16, item: u8) -> Option<crate::event::Bank<'a>> {
         // The dict-driven path is the path the rest of the API takes;
         // we just go through it.

@@ -23,11 +23,11 @@ layers are intentionally out of scope.
   A sequential scan of a 100 GB file holds ~one record resident (tens of MB),
   not the file; parallel scans hold one record per worker. Safe under a
   memory-capped batch allocation.
-- **One reader: `Chain`.** Single file, directory, or glob; multi-file
-  chains share a single parsed dictionary and stream records on demand.
-  `chain.events()` is the panic-on-corruption convenience path;
-  `chain.try_events()` yields `Result<OwnedEvent>` for untrusted or
-  possibly-truncated input.
+- **One reader: `Chain`.** `Chain::open` takes a single file, a directory,
+  a glob, or a list of paths; multi-file chains share a single parsed
+  dictionary and stream records on demand. `chain.events()` yields
+  `Result<OwnedEvent>`, so a corrupt or truncated record surfaces as an
+  `Err` (propagate with `?`) rather than panicking.
 - **Data-parallel scans.** `Chain::for_each(threads, f)` fans the work
   across cores out of order (`threads = 0` ⇒ all cores, `1` ⇒ sequential,
   `n` ⇒ exactly `n`); shared state in `f` is atomic or locked.
@@ -58,9 +58,11 @@ use oxihipo::{Chain, Filter};
 let chain = Chain::open("rec.hipo")?
     .with_filter(Filter::require(["REC::Particle"]))?;
 
-// Plain `for` loop. Each `OwnedEvent` is a slice into a shared,
-// ref-counted record buffer — no per-event allocation.
+// Plain `for` loop. Each item is a `Result<OwnedEvent>`; `?` propagates a
+// corrupt record. Each `OwnedEvent` is a slice into a shared, ref-counted
+// record buffer — no per-event allocation.
 for ev in chain.events() {
+    let ev = ev?;
     let p = oxihipo::or_continue!(ev.bank("REC::Particle"));
     for r in 0..p.rows() {
         let pid: i32 = p.get("pid", r);
@@ -77,13 +79,14 @@ Multi-file chains are first-class:
 use oxihipo::Chain;
 
 # fn main() -> oxihipo::Result<()> {
-// `Chain::open_dir` takes a directory; `Chain::open` also accepts a
-// single file or a glob (e.g. "data/*.hipo").
-let chain = Chain::open_dir("/data/cooked/run5042")?;
+// `Chain::open` takes a single file, a directory, a glob (e.g.
+// "data/*.hipo"), or a list of paths.
+let chain = Chain::open("/data/cooked/run5042")?;
 
 // Iterate every event of every file, in input order.
 let mut total_rows: u64 = 0;
 for ev in chain.events() {
+    let ev = ev?;
     total_rows += ev.bank("REC::Particle").map_or(0, |b| b.rows() as u64);
 }
 println!("{total_rows} REC::Particle rows across the chain");
@@ -101,7 +104,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use oxihipo::Chain;
 
 # fn main() -> oxihipo::Result<()> {
-let chain = Chain::open_dir("/data/cooked/run5042")?;
+let chain = Chain::open("/data/cooked/run5042")?;
 
 let total_rows = AtomicU64::new(0);
 chain.for_each(0, |ev| {                          // `0` → all cores; `1` → single-threaded
@@ -154,7 +157,7 @@ write). Inside `src/`:
 - `wire/` (private) — constants, bytes, headers, record decompression
 - `compress.rs` (private) — LZ4/gzip + reusable `ScratchBuf`
 - `schema/` — `Schema`, `Dict`, `DataType`, typed `ColumnHandle<T>`
-- `event/` — `Event` (raw), `EventCtx` (with `&Dict`), `Bank`, `RowView`,
+- `event/` — `Event` (raw), `EventCtx` (with `&Dict`), `Bank`,
   `Composite`, `OwnedEvent`, internal `BankBuilder` / `EventBuilder`
 - `read/` — `Chain` (the sole reader, `Arc<FileInner>`-backed),
   `ChainEventIter`, `Filter`, parallel `for_each`
@@ -178,7 +181,7 @@ cargo run --release --example bench_par -- /path/to/file.hipo 0
 
 - **`Chain` is the only reader.** A chain of one file is the common case;
   multi-file chains share one parsed dictionary and stream records on demand
-  (no whole-file mapping). `Chain::open_all` validates that every file in the
+  (no whole-file mapping). `Chain::open` validates that every file in the
   chain has the same `Dict` — catches mismatched cooking versions at
   construction time.
 - **`Event<'a>` carries only borrowed bytes;** the typical handle is
@@ -298,7 +301,7 @@ w.finish()?;
 # Ok(()) }
 ```
 
-No reader-side API change — `for ev in chain.events() { ev.bank("X") }`
+No reader-side API change — `for ev in chain.events() { let ev = ev?; ev.bank("X"); }`
 "just works". A scan that only ever calls `ev.bank("REC::Event")` will
 **never** inflate `REC::Particle`'s stream; the partial-decompression
 contract is asserted in tests (`wire::by_bank::tests::touching_one_bank_does_not_inflate_others`).

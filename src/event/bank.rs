@@ -38,7 +38,7 @@
 use std::borrow::Cow;
 
 use crate::error::{HipoError, Result};
-use crate::schema::{BankColumnType, ColumnHandle, DataType, Schema};
+use crate::schema::{BankColumnType, ColumnHandle, Schema};
 
 /// Cast `bytes` (exactly `count * size_of::<T>()` bytes) to `&[T]`,
 /// borrowing zero-copy when the source is `T`-aligned and falling back to
@@ -125,8 +125,8 @@ impl<'b> Bank<'b> {
 
     /// Raw bytes of column `col`. Length is
     /// `rows * ty.size() * length` (array columns are stored
-    /// element-major within each row).
-    pub fn col_bytes(&self, col: usize) -> &'b [u8] {
+    /// element-major within each row). Internal: used by `cast_column`.
+    pub(crate) fn col_bytes(&self, col: usize) -> &'b [u8] {
         let entry = &self.schema.entries()[col];
         let start = self.schema.column_byte_offset(col, self.rows) as usize;
         let len = self.rows as usize * entry.ty.size() * entry.length as usize;
@@ -145,11 +145,6 @@ impl<'b> Bank<'b> {
     /// `read_unaligned` — matching the C++ reader's memcpy semantics.
     pub fn col<T: BankColumnType>(&self, name: &str) -> Result<Cow<'b, [T]>> {
         let col = self.schema.require_column(name)?;
-        self.cast_column::<T>(col)
-    }
-
-    /// Same as [`Self::col`] but by column index — saves a name lookup.
-    pub fn col_at<T: BankColumnType>(&self, col: usize) -> Result<Cow<'b, [T]>> {
         self.cast_column::<T>(col)
     }
 
@@ -178,12 +173,6 @@ impl<'b> Bank<'b> {
             "ColumnHandle resolved against a different schema (length)"
         );
         self.cast_column_unchecked::<T>(col)
-    }
-
-    /// Resolve a column handle against this bank's schema. Equivalent to
-    /// `bank.schema().handle::<T>(name)` — kept here for ergonomics.
-    pub fn handle<T: BankColumnType>(&self, name: &str) -> Result<ColumnHandle<T>> {
-        self.schema.handle::<T>(name)
     }
 
     /// Read one cell through a pre-resolved [`ColumnHandle`].
@@ -282,32 +271,6 @@ impl<'b> Bank<'b> {
         Ok(cast_cells::<T>(bytes, len))
     }
 
-    /// Borrow a single row's view.
-    pub fn row(&self, row: u32) -> Option<RowView<'b>> {
-        if row >= self.rows {
-            return None;
-        }
-        Some(RowView {
-            schema: self.schema,
-            data: self.data,
-            rows: self.rows,
-            row,
-        })
-    }
-
-    /// Iterate rows.
-    pub fn rows_iter(&self) -> impl Iterator<Item = RowView<'b>> {
-        let schema = self.schema;
-        let data = self.data;
-        let rows = self.rows;
-        (0..rows).map(move |row| RowView {
-            schema,
-            data,
-            rows,
-            row,
-        })
-    }
-
     /// Check both element type AND per-row length against the typed
     /// view requested by `T`. Length checks ensure that
     /// `bank.col::<f32>(name)` rejects an array column (`length > 1`)
@@ -335,8 +298,8 @@ impl<'b> Bank<'b> {
     }
 
     /// Cast a column's bytes to a typed slice with full type-checking.
-    /// Used by [`Self::col`] / [`Self::col_at`] where the column index
-    /// came from a name lookup.
+    /// Used by [`Self::col`] where the column index came from a name
+    /// lookup.
     #[inline]
     fn cast_column<T: BankColumnType>(&self, col: usize) -> Result<Cow<'b, [T]>> {
         self.check_column::<T>(col)?;
@@ -355,148 +318,6 @@ impl<'b> Bank<'b> {
     }
 }
 
-// ---- RowView --------------------------------------------------------------
-
-use crate::wire::bytes::{read_f32_le, read_f64_le, read_i16_le, read_u32_le, read_u64_le};
-
-/// Single-row view, with lossy/coerced scalar accessors.
-///
-/// Missing columns return a zero default rather than an error — mirroring
-/// the C++ `noexcept` helpers. For strict access use [`Bank::col`] +
-/// indexing.
-#[derive(Debug, Clone, Copy)]
-pub struct RowView<'b> {
-    schema: &'b Schema,
-    data: &'b [u8],
-    rows: u32,
-    row: u32,
-}
-
-impl<'b> RowView<'b> {
-    pub fn schema(&self) -> &'b Schema {
-        self.schema
-    }
-
-    pub fn row(&self) -> u32 {
-        self.row
-    }
-
-    #[inline]
-    fn cell_offset(&self, col: usize) -> usize {
-        self.schema.cell_byte_offset(col, self.row, self.rows) as usize
-    }
-
-    /// Resolve `name` to a scalar column (`length == 1`), returning
-    /// `None` for missing names or array columns. Used by the scalar
-    /// `i32` / `f32` / ... accessors that can't sensibly return a
-    /// multi-element cell.
-    #[inline]
-    fn scalar_column(&self, name: &str) -> Option<usize> {
-        let col = self.schema.column_index(name)?;
-        if self.schema.entries()[col].length != 1 {
-            return None;
-        }
-        Some(col)
-    }
-
-    #[inline]
-    pub fn i32(&self, name: &str) -> Option<i32> {
-        let col = self.scalar_column(name)?;
-        let entry = &self.schema.entries()[col];
-        let off = self.cell_offset(col);
-        Some(match entry.ty {
-            DataType::Byte => self.data[off] as i8 as i32,
-            DataType::Short => read_i16_le(self.data, off) as i32,
-            DataType::Int => read_u32_le(self.data, off) as i32,
-            _ => return None,
-        })
-    }
-
-    #[inline]
-    pub fn i64(&self, name: &str) -> Option<i64> {
-        let col = self.scalar_column(name)?;
-        let entry = &self.schema.entries()[col];
-        let off = self.cell_offset(col);
-        Some(match entry.ty {
-            DataType::Long => read_u64_le(self.data, off) as i64,
-            DataType::Int => read_u32_le(self.data, off) as i32 as i64,
-            DataType::Short => read_i16_le(self.data, off) as i64,
-            DataType::Byte => self.data[off] as i8 as i64,
-            _ => return None,
-        })
-    }
-
-    #[inline]
-    pub fn i16(&self, name: &str) -> Option<i16> {
-        let col = self.scalar_column(name)?;
-        let entry = &self.schema.entries()[col];
-        let off = self.cell_offset(col);
-        Some(match entry.ty {
-            DataType::Byte => self.data[off] as i8 as i16,
-            DataType::Short => read_i16_le(self.data, off),
-            _ => return None,
-        })
-    }
-
-    #[inline]
-    pub fn i8(&self, name: &str) -> Option<i8> {
-        let col = self.scalar_column(name)?;
-        let entry = &self.schema.entries()[col];
-        if !matches!(entry.ty, DataType::Byte) {
-            return None;
-        }
-        Some(self.data[self.cell_offset(col)] as i8)
-    }
-
-    #[inline]
-    pub fn f32(&self, name: &str) -> Option<f32> {
-        let col = self.scalar_column(name)?;
-        let entry = &self.schema.entries()[col];
-        let off = self.cell_offset(col);
-        Some(match entry.ty {
-            DataType::Float => read_f32_le(self.data, off),
-            DataType::Double => read_f64_le(self.data, off) as f32,
-            _ => return None,
-        })
-    }
-
-    #[inline]
-    pub fn f64(&self, name: &str) -> Option<f64> {
-        let col = self.scalar_column(name)?;
-        let entry = &self.schema.entries()[col];
-        let off = self.cell_offset(col);
-        Some(match entry.ty {
-            DataType::Double => read_f64_le(self.data, off),
-            DataType::Float => f64::from(read_f32_le(self.data, off)),
-            _ => return None,
-        })
-    }
-
-    /// Read this row's array bytes for an array column. Returns `None`
-    /// for missing names, scalar columns, or wire-type mismatch. The
-    /// length of the returned slice equals the schema's declared
-    /// `column_length`.
-    ///
-    /// Borrowed when the bank's bytes are aligned for `T` (usual case
-    /// for 4-byte types); falls back to a fresh owned copy for
-    /// misaligned 8-byte types.
-    pub fn array<T: crate::schema::BankScalarType>(
-        &self,
-        name: &str,
-    ) -> Option<std::borrow::Cow<'b, [T]>> {
-        let col = self.schema.column_index(name)?;
-        let entry = &self.schema.entries()[col];
-        if entry.ty != T::DATA_TYPE || entry.length == 1 {
-            return None;
-        }
-        let len = entry.length as usize;
-        let elem = std::mem::size_of::<T>();
-        let off = self.cell_offset(col);
-        let bytes = &self.data[off..off + len * elem];
-        Some(cast_cells::<T>(bytes, len))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,9 +329,9 @@ mod tests {
             300,
             1,
             [
-                ("pid".into(), DataType::Int),
-                ("px".into(), DataType::Float),
-                ("charge".into(), DataType::Byte),
+                ("pid".into(), DataType::Int, 1),
+                ("px".into(), DataType::Float, 1),
+                ("charge".into(), DataType::Byte, 1),
             ],
         );
 
@@ -590,24 +411,6 @@ mod tests {
     }
 
     #[test]
-    fn row_view_scalar() {
-        let (s, data) = make_bank_data(3);
-        let bank = Bank::new(&s, &data).unwrap();
-        let row = bank.row(1).unwrap();
-        assert_eq!(row.i32("pid"), Some(10));
-        assert_eq!(row.f32("px"), Some(1.5));
-        assert_eq!(row.i32("nope"), None);
-    }
-
-    #[test]
-    fn rows_iter_lengths() {
-        let (s, data) = make_bank_data(4);
-        let bank = Bank::new(&s, &data).unwrap();
-        let rows: Vec<u32> = bank.rows_iter().map(|r| r.row()).collect();
-        assert_eq!(rows, vec![0, 1, 2, 3]);
-    }
-
-    #[test]
     fn type_mismatch_errors() {
         let (s, data) = make_bank_data(2);
         let bank = Bank::new(&s, &data).unwrap();
@@ -619,7 +422,7 @@ mod tests {
     /// array-column read tests.
     fn make_array_bank() -> (Schema, Vec<u8>) {
         use crate::wire::bytes::write_u32_le;
-        let s = Schema::from_columns_ext(
+        let s = Schema::from_columns(
             "X",
             1,
             1,
@@ -717,22 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn row_view_array() {
-        let (s, data) = make_array_bank();
-        let bank = Bank::new(&s, &data).unwrap();
-        let row = bank.row(1).unwrap();
-        // Scalar accessor on array column returns None.
-        assert_eq!(row.f32("px"), None);
-        // Array accessor returns the row's array.
-        let pxs = row.array::<f32>("px").unwrap();
-        assert_eq!(&*pxs, &[1.0, 1.1, 1.2]);
-        // Scalar column still works via scalar accessor.
-        assert_eq!(row.i32("pid"), Some(22));
-        // Array accessor on a scalar column → None.
-        assert_eq!(row.array::<i32>("pid"), None);
-    }
-
-    #[test]
     fn corrupt_size_rejected() {
         let (s, mut data) = make_bank_data(3);
         data.push(0);
@@ -742,7 +529,7 @@ mod tests {
 
     #[test]
     fn empty_bank() {
-        let s = Schema::from_columns("X", 1, 1, [("a".into(), DataType::Int)]);
+        let s = Schema::from_columns("X", 1, 1, [("a".into(), DataType::Int, 1)]);
         let bank = Bank::new(&s, &[]).unwrap();
         assert_eq!(bank.rows(), 0);
         assert_eq!(&*bank.col::<i32>("a").unwrap(), &[] as &[i32]);
@@ -755,7 +542,10 @@ mod tests {
             "Y",
             1,
             1,
-            [("tag".into(), DataType::Byte), ("v".into(), DataType::Long)],
+            [
+                ("tag".into(), DataType::Byte, 1),
+                ("v".into(), DataType::Long, 1),
+            ],
         );
         // 2 rows: row_size = 1 + 8 = 9 bytes; column-major: 2 bytes of tag,
         // then 16 bytes of long. The long column starts at byte 2 — not

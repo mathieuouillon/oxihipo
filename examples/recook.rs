@@ -56,6 +56,7 @@ fn main() -> Result<()> {
         let mut written: u64 = 0;
         let mut last_pct = -1i64;
         for ev in chain.events() {
+            let ev = ev?;
             // The OwnedEvent exposes its raw event bytes; we write them
             // through directly so we don't re-parse / re-serialise banks.
             w.append_raw(ev.bytes())?;

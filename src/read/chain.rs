@@ -24,6 +24,7 @@ use crate::event::{Event, EventCtx, OwnedEvent};
 use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
 use crate::read::iter::EventIter;
+use crate::read::source::IntoSources;
 use crate::schema::Dict;
 use crate::wire::by_bank::ByBankRecord;
 use crate::wire::record::{Record, decode_record_into};
@@ -31,10 +32,10 @@ use crate::write::{Compression, WriteSummary, Writer};
 
 /// One or more HIPO files presented as a single iterable event stream.
 ///
-/// Construct via [`Chain::open`] (single file), [`Chain::open_all`]
-/// (explicit list), or [`Chain::open_dir`] (every `*.hipo` in a
-/// directory). All files in a chain must share the same dict — this is
-/// validated at construction.
+/// Construct via [`Chain::open`] — its single argument accepts a file, a
+/// directory, a glob pattern, or an explicit list of paths (see
+/// [`IntoSources`]). All files in a chain must share the same dict — this
+/// is validated at construction.
 pub struct Chain {
     files: Vec<Arc<FileInner>>,
     /// Cumulative event counts. `file_event_offsets[i]` = total events
@@ -70,75 +71,39 @@ impl Default for Chain {
 }
 
 impl Chain {
-    /// Open a HIPO source as a chain: a single `.hipo` file, a directory
-    /// of them, or a glob pattern.
+    /// Open a HIPO source as a chain. The single argument covers every
+    /// input shape — see [`IntoSources`]:
     ///
-    /// - a **directory** ⇒ every `*.hipo` inside it ([`Self::open_dir`]);
-    /// - a path with glob metacharacters (`*`, `?`, `[`) ⇒ every file
-    ///   matching it ([`Self::open_glob`]), e.g. `"data/*.hipo"`;
-    /// - anything else ⇒ that one file, as a chain of length 1.
+    /// - a single `.hipo` **file** ⇒ a chain of length 1;
+    /// - a **directory** ⇒ every `*.hipo` inside it (sorted);
+    /// - a **glob** pattern ⇒ every file matching it, e.g. `"data/*.hipo"`;
+    /// - an explicit **list** of paths (`&[_]` / `Vec<_>` / `[_; N]`) ⇒
+    ///   those files, in order.
     ///
-    /// Reach for [`Self::open_dir`] / [`Self::open_glob`] /
-    /// [`Self::open_all`] directly when you want the intent spelled out
-    /// at the call site — or to open a literal path that contains a `*`.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        if path.is_dir() {
-            return Self::open_dir(path);
-        }
-        if let Some(s) = path.to_str()
-            && s.contains(['*', '?', '['])
-        {
-            return Self::open_glob(s);
-        }
-        Self::open_all([path])
+    /// All files in the resulting chain must share one dictionary; this is
+    /// validated at construction and returns [`HipoError::SchemaParse`] if
+    /// any file's dict differs from the first.
+    ///
+    /// ```no_run
+    /// # use oxihipo::Chain;
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let one  = Chain::open("run.hipo")?;          // single file
+    /// let dir  = Chain::open("/data/run5042")?;     // every *.hipo in a dir
+    /// let glob = Chain::open("/data/*.hipo")?;       // glob pattern
+    /// let list = Chain::open(["a.hipo", "b.hipo"])?; // explicit list
+    /// # Ok(()) }
+    /// ```
+    pub fn open<S: IntoSources>(src: S) -> Result<Self> {
+        Self::from_paths(src.into_sources()?)
     }
 
-    /// Open every path in `paths`, in order, validating that every
-    /// file's dict matches the first file's. Returns
-    /// [`HipoError::SchemaParse`] if any file's dict differs.
-    pub fn open_all<I, P>(paths: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = P>,
-        P: AsRef<Path>,
-    {
-        let mut files: Vec<Arc<FileInner>> = Vec::new();
+    /// Open every resolved path, in order, validating dict equality.
+    fn from_paths(paths: Vec<PathBuf>) -> Result<Self> {
+        let mut files: Vec<Arc<FileInner>> = Vec::with_capacity(paths.len());
         for p in paths {
-            let inner = FileInner::open(p.as_ref().to_path_buf())?;
-            files.push(Arc::new(inner));
+            files.push(Arc::new(FileInner::open(p)?));
         }
         Self::from_inners(files)
-    }
-
-    /// Open every `*.hipo` file in `dir` (case-insensitive, sorted by
-    /// path). Non-recursive.
-    pub fn open_dir(dir: impl AsRef<Path>) -> Result<Self> {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.as_ref())?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("hipo"))
-            })
-            .collect();
-        paths.sort();
-        Self::open_all(paths)
-    }
-
-    /// Open every file matching the glob `pattern` — for example
-    /// `"data/*.hipo"` or `"runs/**/REC_*.hipo"` — sorted by path. All
-    /// matched files must share one dictionary, exactly as for
-    /// [`Self::open_all`]. A pattern that matches nothing yields an empty
-    /// chain; a malformed pattern returns [`HipoError::InvalidGlob`].
-    pub fn open_glob(pattern: &str) -> Result<Self> {
-        let entries = glob::glob(pattern).map_err(|e| HipoError::InvalidGlob {
-            pattern: pattern.to_string(),
-            reason: e.to_string(),
-        })?;
-        let mut paths: Vec<PathBuf> = entries.filter_map(|r| r.ok()).collect();
-        paths.sort();
-        Self::open_all(paths)
     }
 
     fn from_inners(files: Vec<Arc<FileInner>>) -> Result<Self> {
@@ -194,11 +159,6 @@ impl Chain {
         &self.dict
     }
 
-    /// Cheap `Arc::clone` of the shared dict. One atomic increment.
-    pub fn schemas_arc(&self) -> Arc<Dict> {
-        Arc::clone(&self.dict)
-    }
-
     /// Iterate the paths in input order.
     pub fn files(&self) -> impl Iterator<Item = &Path> {
         self.files.iter().map(|f| f.path())
@@ -214,35 +174,6 @@ impl Chain {
     /// header — all files share the same dict by construction.
     pub fn file_header(&self) -> Option<&crate::wire::file_header::FileHeader> {
         self.files.first().map(|f| &f.file_header)
-    }
-
-    /// True iff every data record in every file uses the `Lz4ByBank`
-    /// format. Cheap — peeks the first record header of each file (one
-    /// 56-byte read per file, no decompression). Used by analysis
-    /// frameworks to hint the user to recook for partial-decompression
-    /// performance.
-    ///
-    /// Returns `false` for empty chains.
-    pub fn is_all_lz4_by_bank(&self) -> bool {
-        if self.files.is_empty() {
-            return false;
-        }
-        for inner in &self.files {
-            let records = inner.index.records();
-            // An empty file (no data records) is conservatively treated
-            // as "not ByBank".
-            let Some(first) = records.first() else {
-                return false;
-            };
-            let header = match inner.read_record_header(first.file_offset) {
-                Ok(h) => h,
-                Err(_) => return false,
-            };
-            if !header.compression.is_by_bank() {
-                return false;
-            }
-        }
-        true
     }
 
     // ---- Configuration ---------------------------------------------------
@@ -264,46 +195,32 @@ impl Chain {
         Ok(self)
     }
 
-    pub fn with_record_tags(mut self, tags: impl IntoIterator<Item = u64>) -> Self {
-        let mut existing = self.record_tags.unwrap_or_default();
-        existing.extend(tags);
-        self.record_tags = Some(existing);
-        self
-    }
-
     // ---- Sequential iteration -------------------------------------------
 
     /// The sequential reader — an owning [`Iterator`] for the canonical
     /// `for ev in chain.events()` loop. Walks every event of every file
-    /// in input order, yielding [`OwnedEvent`] (see that type for the
-    /// per-event memory contract: no per-event allocation; the record
-    /// buffer is shared by `Arc` and recycled). Composes with the usual
-    /// iterator adapters — `filter`, `take`, `map`, and friends.
-    pub fn events(&self) -> ChainEventIter {
-        self.make_event_iter()
-    }
-
-    /// The **fallible** sequential reader: like [`Self::events`] but
-    /// yields `Result<OwnedEvent>`, so a corrupt or truncated record
-    /// surfaces as an `Err` (after which iteration ends) instead of
-    /// panicking the process. Reach for this when the input may be
-    /// untrusted or partially written.
+    /// in input order, yielding `Result<OwnedEvent>`: a corrupt or
+    /// truncated record surfaces as an `Err` (after which iteration ends)
+    /// instead of panicking, so untrusted or partially written input is
+    /// safe to stream. Composes with the usual iterator adapters —
+    /// `filter`, `take`, `map`, and friends.
+    ///
+    /// See [`OwnedEvent`] for the per-event memory contract: no per-event
+    /// allocation; the record buffer is shared by `Arc` and recycled.
     ///
     /// ```no_run
     /// use oxihipo::Chain;
     ///
     /// # fn main() -> oxihipo::Result<()> {
     /// let chain = Chain::open("rec.hipo")?;
-    /// for ev in chain.try_events() {
+    /// for ev in chain.events() {
     ///     let ev = ev?;               // propagate corruption as an error
     ///     let _ = ev.bank("REC::Particle");
     /// }
     /// # Ok(()) }
     /// ```
-    pub fn try_events(&self) -> TryChainEventIter {
-        TryChainEventIter {
-            inner: self.make_event_iter(),
-        }
+    pub fn events(&self) -> ChainEventIter {
+        self.make_event_iter()
     }
 
     fn make_event_iter(&self) -> ChainEventIter {
@@ -363,15 +280,6 @@ impl Chain {
         ))
     }
 
-    /// No-op, kept for API compatibility.
-    ///
-    /// The streaming reader `pread`s each record on demand and relies on the
-    /// kernel's per-descriptor readahead, so there is no whole-file mapping
-    /// to pre-fault. Earlier versions mapped the file and primed the page
-    /// cache here — exactly the unbounded-resident-memory behaviour the
-    /// streaming reader exists to avoid on 10–100 GB files.
-    pub fn prefetch(&self) {}
-
     // ---- Skim ------------------------------------------------------------
 
     /// Copy every event that survives the chain's filter into a new HIPO
@@ -383,7 +291,7 @@ impl Chain {
     /// are written. The output carries the same dictionary as the input and
     /// preserves each event's tag; multiple input files merge into one
     /// output. Reading stops and the error is returned on the first corrupt
-    /// record (this uses the fallible [`Self::try_events`] internally).
+    /// record (this uses the fallible [`Self::events`] internally).
     ///
     /// ```no_run
     /// use oxihipo::{Chain, Compression, Filter};
@@ -434,8 +342,8 @@ impl Chain {
             .compression(compression)
             .build()?;
         let mut written = 0u64;
-        for ev in self.try_events() {
-            w.append_owned(&ev?)?;
+        for ev in self.events() {
+            w.append_raw(ev?.bytes())?;
             written += 1;
             progress(written);
         }
@@ -702,9 +610,8 @@ impl ChainEventIter {
         true
     }
 
-    /// Fallible core, shared by the panicking [`Iterator`] impl and the
-    /// recoverable [`TryChainEventIter`]. Yields `Some(Err)` once on the
-    /// first corrupt record (then ends).
+    /// Advance the stream. A corrupt or truncated record surfaces as a
+    /// single `Some(Err)` (after which iteration ends), never a panic.
     fn next_result(&mut self) -> Option<Result<OwnedEvent>> {
         if self.finished {
             return None;
@@ -729,32 +636,10 @@ impl ChainEventIter {
 }
 
 impl Iterator for ChainEventIter {
-    type Item = OwnedEvent;
-
-    fn next(&mut self) -> Option<OwnedEvent> {
-        match self.next_result() {
-            Some(Ok(ev)) => Some(ev),
-            Some(Err(e)) => panic!(
-                "oxihipo: corrupt record during events() iteration: {e}\n  \
-                 (use Chain::try_events() for a recoverable Result<OwnedEvent> stream)"
-            ),
-            None => None,
-        }
-    }
-}
-
-/// The fallible sibling of [`ChainEventIter`]: yields `Result<OwnedEvent>`
-/// so corruption is recoverable. Built by [`Chain::try_events`].
-#[derive(Debug)]
-pub struct TryChainEventIter {
-    inner: ChainEventIter,
-}
-
-impl Iterator for TryChainEventIter {
     type Item = Result<OwnedEvent>;
 
     fn next(&mut self) -> Option<Result<OwnedEvent>> {
-        self.inner.next_result()
+        self.next_result()
     }
 }
 

@@ -143,24 +143,11 @@ impl Schema {
         }
     }
 
-    pub fn from_columns(
-        name: impl Into<String>,
-        group: u16,
-        item: u8,
-        columns: impl IntoIterator<Item = (String, DataType)>,
-    ) -> Self {
-        Self::from_columns_ext(
-            name,
-            group,
-            item,
-            columns.into_iter().map(|(n, t)| (n, t, 1u32)),
-        )
-    }
-
     /// Construct a schema from an iterator of `(name, type, length)`
     /// triples. `length == 1` is a scalar column; `length > 1` is a
-    /// fixed-length array (declared as `name/T#N` in schema text).
-    pub fn from_columns_ext(
+    /// fixed-length array (declared as `name/T#N` in schema text). Pass
+    /// `1` for scalar columns.
+    pub fn from_columns(
         name: impl Into<String>,
         group: u16,
         item: u8,
@@ -232,13 +219,15 @@ impl Schema {
     }
 
     /// Resolve a typed column handle. Returns a zero-cost `(col_index,
-    /// PhantomData<T>)` that callers reuse across events:
+    /// PhantomData<T>)` that callers reuse across events to skip the
+    /// per-event name lookup:
     ///
     /// ```ignore
     /// let h_px = schema.handle::<f32>("px")?;
-    /// while let Some(ev) = cur.next()? {
-    ///     if let Some(b) = ev.bank_for(&schema) {
-    ///         let px = h_px.read(&b)?;
+    /// for ev in chain.events() {
+    ///     let ev = ev?;
+    ///     if let Some(b) = ev.bank("REC::Particle") {
+    ///         let px = b.read(h_px);   // Cow<[f32]>, no name lookup
     ///         // ...
     ///     }
     /// }
@@ -339,10 +328,10 @@ mod tests {
             300,
             1,
             [
-                ("pid".into(), DataType::Int),
-                ("px".into(), DataType::Float),
-                ("py".into(), DataType::Float),
-                ("charge".into(), DataType::Byte),
+                ("pid".into(), DataType::Int, 1),
+                ("px".into(), DataType::Float, 1),
+                ("py".into(), DataType::Float, 1),
+                ("charge".into(), DataType::Byte, 1),
             ],
         );
         assert_eq!(s.row_size(), 4 + 4 + 4 + 1);
@@ -358,7 +347,7 @@ mod tests {
     fn schema_layout_with_array_columns() {
         // a/I (scalar, 4 B), b/F#4 (16 B per row), c/B#2 (2 B per row).
         // row_size = 4 + 16 + 2 = 22 bytes.
-        let s = Schema::from_columns_ext(
+        let s = Schema::from_columns(
             "X",
             1,
             1,
@@ -396,7 +385,7 @@ mod tests {
 
     #[test]
     fn missing_column_error() {
-        let s = Schema::from_columns("X", 1, 1, [("a".into(), DataType::Int)]);
+        let s = Schema::from_columns("X", 1, 1, [("a".into(), DataType::Int, 1)]);
         assert_eq!(s.column_index("a"), Some(0));
         assert!(s.column_index("b").is_none());
         let err = s.require_column("b").unwrap_err();

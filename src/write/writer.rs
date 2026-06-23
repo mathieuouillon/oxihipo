@@ -34,7 +34,6 @@ use std::path::{Path, PathBuf};
 
 use crate::compress::ScratchBuf;
 use crate::error::{HipoError, Result};
-use crate::event::OwnedEvent;
 use crate::schema::{Dict, Schema};
 use crate::wire::bytes::{Endianness, write_u32_le};
 use crate::wire::constants::*;
@@ -43,9 +42,11 @@ use crate::wire::record_header::RecordHeader;
 use crate::write::bank::BankWriter;
 use crate::write::record::{Compression, RecordBuilder, build_record_bytes};
 
-/// Knobs governing record sizing. Defaults match the C++ writer.
+/// Knobs governing record sizing. Defaults match the C++ writer. Set via
+/// the [`WriterBuilder`] methods (`compression`, `max_record_events`,
+/// `max_record_bytes`); not part of the public API itself.
 #[derive(Debug, Clone, Copy)]
-pub struct WriterOptions {
+pub(crate) struct WriterOptions {
     pub compression: Compression,
     pub max_record_events: u32,
     pub max_record_bytes: usize,
@@ -58,23 +59,6 @@ impl Default for WriterOptions {
             max_record_events: 1_000_000,
             max_record_bytes: 8 * 1024 * 1024,
         }
-    }
-}
-
-impl WriterOptions {
-    pub fn with_compression(mut self, c: Compression) -> Self {
-        self.compression = c;
-        self
-    }
-
-    pub fn with_max_record_events(mut self, n: u32) -> Self {
-        self.max_record_events = n;
-        self
-    }
-
-    pub fn with_max_record_bytes(mut self, n: usize) -> Self {
-        self.max_record_bytes = n;
-        self
     }
 }
 
@@ -104,11 +88,6 @@ impl WriterBuilder {
 
     pub fn max_record_bytes(mut self, n: usize) -> Self {
         self.options.max_record_bytes = n;
-        self
-    }
-
-    pub fn options(mut self, o: WriterOptions) -> Self {
-        self.options = o;
         self
     }
 
@@ -177,15 +156,6 @@ impl Writer {
         }
     }
 
-    /// Shortcut: build directly from a `(path, dict, options)` triple.
-    pub fn create_with(
-        path: impl AsRef<Path>,
-        dict: &Dict,
-        options: WriterOptions,
-    ) -> Result<Self> {
-        Self::create(path).schemas(dict).options(options).build()
-    }
-
     fn create_inner(path: PathBuf, dict: Dict, opts: WriterOptions) -> Result<Self> {
         let path_for_err = path.clone();
         Self::create_inner_impl(path, dict, opts).map_err(|e| e.with_path(path_for_err))
@@ -224,10 +194,6 @@ impl Writer {
         &self.dict
     }
 
-    pub fn options(&self) -> &WriterOptions {
-        &self.opts
-    }
-
     /// Build one event via a closure. The closure receives an
     /// [`EventWriter`] it uses to attach banks; on return the assembled
     /// event bytes are appended to the writer.
@@ -253,12 +219,6 @@ impl Writer {
         }
         self.builder.add_event(event_bytes);
         Ok(())
-    }
-
-    /// Append an [`OwnedEvent`]'s bytes. The dict reference is ignored —
-    /// the writer's own schema dictionary is the source of truth.
-    pub fn append_owned(&mut self, event: &OwnedEvent) -> Result<()> {
-        self.append_raw(event.bytes())
     }
 
     /// Flush the current record to disk and reset the builder.
@@ -598,8 +558,8 @@ mod tests {
             300,
             1,
             [
-                ("pid".into(), DataType::Int),
-                ("px".into(), DataType::Float),
+                ("pid".into(), DataType::Int, 1),
+                ("px".into(), DataType::Float, 1),
             ],
         ));
         d

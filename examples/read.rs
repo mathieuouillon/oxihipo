@@ -31,6 +31,7 @@ fn main() -> Result<()> {
     let mut events_seen = 0u64;
     let mut total_particles = 0u64;
     for ev in chain.events() {
+        let ev = ev?;
         events_seen += 1;
 
         // Typed rows: named fields, no per-column name juggling.

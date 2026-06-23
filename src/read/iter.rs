@@ -1,6 +1,6 @@
 //! `EventIter` — owning iterator over a file's events.
 //!
-//! Yields [`OwnedEvent`]s, so the result is a proper
+//! Yields `Result<`[`OwnedEvent`]`>`, so the result is a proper
 //! `std::iter::Iterator` and plays with `for` loops:
 //!
 //! ```no_run
@@ -9,6 +9,7 @@
 //! # fn main() -> oxihipo::Result<()> {
 //! let chain = Chain::open("rec.hipo")?;
 //! for ev in chain.events() {
+//!     let ev = ev?;
 //!     if let Some(p) = ev.bank("REC::Particle") {
 //!         let _ = p.rows();
 //!     }
@@ -30,18 +31,12 @@
 //!
 //! # Error model
 //!
-//! Two flavours of the sequential reader:
-//!
-//! - [`Chain::events`](crate::Chain::events) yields `OwnedEvent` and is
-//!   the convenience path. Internal corruption (truncated record, bad
-//!   LZ4 stream, EOF mid-decompress) **panics** with a clear message —
-//!   suited to the write-once, integrity-checked HIPO files of a
-//!   production pipeline, where mid-file corruption is a bug.
-//! - [`Chain::try_events`](crate::Chain::try_events) yields
-//!   `Result<OwnedEvent>`: the same stream, but corruption is surfaced
-//!   as an `Err` (after which iteration ends) instead of aborting the
-//!   process. Use this when reading untrusted or possibly-truncated
-//!   input.
+//! [`Chain::events`](crate::Chain::events) yields `Result<OwnedEvent>`:
+//! internal corruption (truncated record, bad LZ4 stream, EOF
+//! mid-decompress) is surfaced as an `Err` — after which iteration ends —
+//! instead of aborting the process. Propagate it with `?`, or
+//! `.map(Result::unwrap)` when the input is a write-once, integrity-checked
+//! production file where mid-file corruption would be a bug.
 
 use std::sync::Arc;
 
@@ -257,8 +252,8 @@ impl EventIter {
 
     /// Fallible iteration core: `Some(Ok(ev))` per event, `Some(Err)` once
     /// on the first corrupt record (after which iteration ends), then
-    /// `None`. The panicking [`Iterator`] impl and the recoverable
-    /// `try_events()` stream both funnel through this.
+    /// `None`. The [`Iterator`] impl and
+    /// [`Chain::events`](crate::Chain::events) both funnel through this.
     pub(crate) fn next_result(&mut self) -> Option<Result<OwnedEvent>> {
         if self.finished {
             return None;
@@ -321,16 +316,9 @@ impl EventIter {
 }
 
 impl Iterator for EventIter {
-    type Item = OwnedEvent;
+    type Item = Result<OwnedEvent>;
 
-    fn next(&mut self) -> Option<OwnedEvent> {
-        match self.next_result() {
-            Some(Ok(ev)) => Some(ev),
-            Some(Err(e)) => panic!(
-                "oxihipo: corrupt record during events() iteration: {e}\n  \
-                 (use Chain::try_events() for a recoverable Result<OwnedEvent> stream)"
-            ),
-            None => None,
-        }
+    fn next(&mut self) -> Option<Result<OwnedEvent>> {
+        self.next_result()
     }
 }

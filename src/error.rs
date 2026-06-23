@@ -68,9 +68,6 @@ pub enum HipoError {
     #[error("compression error: {0}")]
     Compression(&'static str),
 
-    #[error("decompression overflow: produced {produced} bytes, buffer holds {capacity}")]
-    DecompressOverflow { produced: usize, capacity: usize },
-
     #[error("decompression underflow: produced {produced} bytes, expected {expected}")]
     DecompressUnderflow { produced: usize, expected: usize },
 

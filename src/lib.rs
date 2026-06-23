@@ -8,8 +8,10 @@
 //!
 //! # fn main() -> oxihipo::Result<()> {
 //! let chain = Chain::open("rec.hipo")?;          // single file
-//! // or: let chain = Chain::open_all(["a.hipo", "b.hipo"])?;
+//! // or a directory, a glob ("data/*.hipo"), or a list:
+//! // let chain = Chain::open(["a.hipo", "b.hipo"])?;
 //! for ev in chain.events() {
+//!     let ev = ev?;
 //!     if let Some(particles) = ev.bank("REC::Particle") {
 //!         if let Ok(px) = particles.col::<f32>("px") {
 //!             for &x in &*px {
@@ -40,10 +42,10 @@ pub mod schema;
 pub mod write;
 
 pub use crate::error::{HipoError, Result};
-pub use crate::event::{Bank, BankRow, BankView, Composite, Event, EventCtx, OwnedEvent, RowView};
-pub use crate::read::{Chain, ChainEventIter, ChainStats, EventIter, Filter, TryChainEventIter};
+pub use crate::event::{Bank, BankRow, Composite, Event, EventCtx, OwnedEvent};
+pub use crate::read::{Chain, ChainEventIter, ChainStats, EventIter, Filter, IntoSources};
 pub use crate::schema::{ColumnHandle, DataType, Dict, Schema, SchemaEntry};
-pub use crate::write::{BankWriter, Compression, RowWriter, WriteSummary, Writer, WriterOptions};
+pub use crate::write::{BankWriter, Compression, RowWriter, WriteSummary, Writer};
 
 /// Unwrap an `Option<T>`; on `None`, `continue` the enclosing loop.
 ///
@@ -94,8 +96,7 @@ macro_rules! or_break {
 
 /// Define a typed row struct for a named bank and derive its
 /// [`BankRow`](crate::event::BankRow) impl — the turn-key path to
-/// [`EventCtx::rows`](crate::event::EventCtx::rows) /
-/// [`EventCtx::bank_view`](crate::event::EventCtx::bank_view), with no
+/// [`EventCtx::rows`](crate::event::EventCtx::rows), with no
 /// hand-written trait impl.
 ///
 /// Each `field: type => "column"` entry maps a struct field to a bank

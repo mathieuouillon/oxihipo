@@ -206,7 +206,7 @@ impl<T: BankScalarType, const N: usize> BankColumnType for [T; N] {
 /// Pre-resolved, typed column index.
 ///
 /// Cheap to copy (it's effectively a `u16`). Construct via
-/// [`Schema::handle`] or [`Bank::handle`](crate::event::Bank::handle).
+/// [`Schema::handle`].
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnHandle<T> {
     col: u16,
@@ -301,9 +301,9 @@ mod tests {
             300,
             1,
             [
-                ("pid".into(), DataType::Int),
-                ("px".into(), DataType::Float),
-                ("charge".into(), DataType::Byte),
+                ("pid".into(), DataType::Int, 1),
+                ("px".into(), DataType::Float, 1),
+                ("charge".into(), DataType::Byte, 1),
             ],
         )
     }

@@ -8,13 +8,13 @@ fn dict() -> Dict {
         "REC::Event",
         300,
         30,
-        [("evno".into(), DataType::Long)],
+        [("evno".into(), DataType::Long, 1)],
     ));
     d.add(Schema::from_columns(
         "RAW::tag",
         500,
         1,
-        [("v".into(), DataType::Int)],
+        [("v".into(), DataType::Int, 1)],
     ));
     d
 }
@@ -68,7 +68,7 @@ fn skim_filters_and_rewrites() {
     let skimmed = Chain::open(&out).unwrap();
     assert_eq!(skimmed.event_count(), 20);
     let mut seen = Vec::new();
-    for ev in skimmed.events() {
+    for ev in skimmed.events().map(Result::unwrap) {
         let tag = ev.bank("RAW::tag").expect("survivor carries RAW::tag");
         seen.push(tag.get::<i32>("v", 0));
     }

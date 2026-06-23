@@ -15,16 +15,13 @@ pub(crate) mod ctx;
 #[allow(clippy::module_inception)]
 pub(crate) mod event;
 pub(crate) mod owned;
-pub(crate) mod row;
 pub(crate) mod row_typed;
 
-pub use bank::{Bank, RowView};
+pub use bank::Bank;
 pub use build::{BankBuilder, EventBuilder};
 pub use composite::{Composite, CompositeField, CompositeFormat};
 pub use ctx::EventCtx;
 pub use event::{Event, StructureHeader, StructureIter};
 pub use owned::OwnedEvent;
-pub use row_typed::{BankRow, BankView};
-
-// `row::RowView` is the same type as `bank::RowView`; we export only the
-// canonical re-export above.
+pub use row_typed::BankRow;
+pub(crate) use row_typed::BankView;

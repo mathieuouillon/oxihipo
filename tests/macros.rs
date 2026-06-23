@@ -25,10 +25,10 @@ fn particle_dict() -> Dict {
         300,
         1,
         [
-            ("pid".into(), DataType::Int),
-            ("px".into(), DataType::Float),
-            ("py".into(), DataType::Float),
-            ("pz".into(), DataType::Float),
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
+            ("py".into(), DataType::Float, 1),
+            ("pz".into(), DataType::Float, 1),
         ],
     ));
     d
@@ -69,7 +69,7 @@ fn bank_row_macro_and_direct_accessors() {
 
     let chain = Chain::open(&path).unwrap();
     let mut total_rows = 0;
-    for (ei, ev) in chain.events().enumerate() {
+    for (ei, ev) in chain.events().map(Result::unwrap).enumerate() {
         let i = ei as i32;
 
         // `bank_row!` + ev.rows::<T>() — typed decode.
@@ -83,9 +83,8 @@ fn bank_row_macro_and_direct_accessors() {
         assert_eq!(rows[0].missing, 0);
         assert_eq!(rows[0].missing_arr, [0.0, 0.0, 0.0]);
 
-        // The handle-cached bank_view path yields the same rows.
-        let view = ev.bank_view::<RecParticle>().unwrap();
-        assert_eq!(view.iter().collect::<Vec<_>>(), rows);
+        // ev.rows::<T>() yields the same typed rows on a second pass.
+        assert_eq!(ev.rows::<RecParticle>().collect::<Vec<_>>(), rows);
 
         // Item 1: direct ev.get / ev.col agree with the typed fields.
         let pid0: i32 = ev.get("REC::Particle", "pid", 0);
@@ -115,13 +114,13 @@ fn bank_cache_correct_across_banks() {
         "REC::Event",
         300,
         30,
-        [("evno".into(), DataType::Int)],
+        [("evno".into(), DataType::Int, 1)],
     ));
     d.add(Schema::from_columns(
         "REC::Particle",
         300,
         31,
-        [("pid".into(), DataType::Int)],
+        [("pid".into(), DataType::Int, 1)],
     ));
     {
         let mut w = Writer::create(&path).schemas(&d).build().unwrap();
@@ -143,7 +142,12 @@ fn bank_cache_correct_across_banks() {
         w.finish().unwrap();
     }
 
-    for (i, ev) in Chain::open(&path).unwrap().events().enumerate() {
+    for (i, ev) in Chain::open(&path)
+        .unwrap()
+        .events()
+        .map(Result::unwrap)
+        .enumerate()
+    {
         let i = i as i32;
         // Interleave the two banks repeatedly: hit, switch (miss), rebuild.
         for _ in 0..3 {
@@ -167,8 +171,8 @@ fn get_column_cache_switches_columns_and_types() {
         300,
         31,
         [
-            ("pid".into(), DataType::Int),
-            ("px".into(), DataType::Float),
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
         ],
     ));
     {
@@ -190,7 +194,12 @@ fn get_column_cache_switches_columns_and_types() {
         w.finish().unwrap();
     }
 
-    for (i, ev) in Chain::open(&path).unwrap().events().enumerate() {
+    for (i, ev) in Chain::open(&path)
+        .unwrap()
+        .events()
+        .map(Result::unwrap)
+        .enumerate()
+    {
         let i = i as i32;
         for _ in 0..3 {
             assert_eq!(ev.get::<i32>("REC::Particle", "pid", 0), 11 + i);

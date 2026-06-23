@@ -12,13 +12,6 @@ use crate::wire::bytes::{Endianness, write_u32_le};
 use crate::wire::constants::*;
 use crate::wire::record_header::RecordHeader;
 
-/// Default events-per-chunk when [`Compression::lz4_chunked`] is used
-/// without an explicit setting. 32 is the documented sweet spot:
-/// large enough that LZ4's back-reference window still helps within a
-/// chunk, small enough that chunk-level parallelism saturates a typical
-/// 8–16 thread machine.
-pub const DEFAULT_EVENTS_PER_CHUNK: u32 = 32;
-
 /// Compression mode for HIPO records.
 ///
 /// This enum is **writer-facing**; it may carry parameters
@@ -64,14 +57,6 @@ pub enum Compression {
 }
 
 impl Compression {
-    /// Convenience constructor for [`Compression::Lz4Chunked`] using
-    /// [`DEFAULT_EVENTS_PER_CHUNK`].
-    pub const fn lz4_chunked() -> Self {
-        Self::Lz4Chunked {
-            events_per_chunk: DEFAULT_EVENTS_PER_CHUNK,
-        }
-    }
-
     /// Wire-level compression tag that gets written into the record
     /// header.
     ///
@@ -91,9 +76,9 @@ impl Compression {
 }
 
 /// Accumulates events into a single record. Flushed via
-/// [`Writer::flush_record`](super::Writer::flush_record).
+/// [`Writer::flush_record`](super::Writer::flush_record). Crate-internal.
 #[derive(Debug, Default)]
-pub struct RecordBuilder {
+pub(crate) struct RecordBuilder {
     event_lengths: Vec<u32>,
     events: ScratchBuf,
     user_word_1: u64,
@@ -107,10 +92,6 @@ impl RecordBuilder {
 
     pub fn event_count(&self) -> u32 {
         self.event_lengths.len() as u32
-    }
-
-    pub fn data_size(&self) -> usize {
-        self.events.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -167,8 +148,8 @@ impl RecordBuilder {
 /// (a [`Writer`](super::Writer) instance) and pass them in.
 ///
 /// `record_number` is written into the record header — the 1-based
-/// position of the record in the output.
-pub fn build_record_bytes(
+/// position of the record in the output. Crate-internal.
+pub(crate) fn build_record_bytes(
     events: &[&[u8]],
     user_word_1: u64,
     user_word_2: u64,

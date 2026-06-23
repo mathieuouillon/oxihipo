@@ -33,6 +33,7 @@ fn main() -> Result<()> {
 
     for _ in 0..iters {
         for ev in file.events() {
+            let ev = ev?;
             events_total += 1;
             if let Some(p) = ev.bank("REC::Particle") {
                 let pid = p.read(h_pid);

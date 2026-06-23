@@ -34,7 +34,7 @@ impl Schema {
         let (head, body) = split_text(text)?;
         let (name, group, item) = parse_head(head)?;
         let columns = parse_columns(body)?;
-        Ok(Self::from_columns_ext(name, group, item, columns))
+        Ok(Self::from_columns(name, group, item, columns))
     }
 
     /// Parse the JSON form.
@@ -46,7 +46,7 @@ impl Schema {
             let (ty, length) = parse_type(&e.ty)?;
             cols.push((e.name, ty, length));
         }
-        Ok(Self::from_columns_ext(
+        Ok(Self::from_columns(
             parsed.name,
             parsed.group,
             parsed.item,

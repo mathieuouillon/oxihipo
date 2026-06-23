@@ -7,7 +7,9 @@ pub mod chain;
 mod filter;
 mod inner;
 mod iter;
+mod source;
 
-pub use chain::{Chain, ChainEventIter, ChainStats, TryChainEventIter};
+pub use chain::{Chain, ChainEventIter, ChainStats};
 pub use filter::Filter;
 pub use iter::EventIter;
+pub use source::IntoSources;

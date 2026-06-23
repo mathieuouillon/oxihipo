@@ -337,9 +337,9 @@ mod tests {
             300,
             1,
             [
-                ("pid".into(), DataType::Int),
-                ("px".into(), DataType::Float),
-                ("charge".into(), DataType::Byte),
+                ("pid".into(), DataType::Int, 1),
+                ("px".into(), DataType::Float, 1),
+                ("charge".into(), DataType::Byte, 1),
             ],
         )
     }
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn bank_builder_with_array_columns() {
         // px/F#3 (3 floats per row), pid/I (scalar).
-        let s = Schema::from_columns_ext(
+        let s = Schema::from_columns(
             "X",
             1,
             1,
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn bank_builder_array_wrong_length_errors() {
-        let s = Schema::from_columns_ext("X", 1, 1, [("px".into(), DataType::Float, 3u32)]);
+        let s = Schema::from_columns("X", 1, 1, [("px".into(), DataType::Float, 3u32)]);
         let mut b = BankBuilder::new(&s);
         b.push_row();
         let err = b.set_array("px", &[0.1f32, 0.2]).unwrap_err(); // need 3, gave 2
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn bank_builder_scalar_set_on_array_column_errors() {
-        let s = Schema::from_columns_ext("X", 1, 1, [("px".into(), DataType::Float, 3u32)]);
+        let s = Schema::from_columns("X", 1, 1, [("px".into(), DataType::Float, 3u32)]);
         let mut b = BankBuilder::new(&s);
         b.push_row();
         // set_f32 is scalar — should be rejected on an F#3 column.
@@ -527,7 +527,7 @@ mod tests {
         // Through the RowWriter::set ergonomic path: set("name", [arr]).
         // Verifies the BankColumnType blanket impl for [T; N] dispatches
         // correctly.
-        let s = Schema::from_columns_ext("X", 1, 1, [("v".into(), DataType::Float, 4u32)]);
+        let s = Schema::from_columns("X", 1, 1, [("v".into(), DataType::Float, 4u32)]);
         let mut b = BankBuilder::new(&s);
         b.push_row();
         // Via the trait method (what RowWriter::set calls under the hood):
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn event_builder_multiple_banks() {
         let s1 = schema();
-        let s2 = Schema::from_columns("REC::Event", 300, 30, [("evno".into(), DataType::Long)]);
+        let s2 = Schema::from_columns("REC::Event", 300, 30, [("evno".into(), DataType::Long, 1)]);
 
         let mut b1 = BankBuilder::new(&s1);
         b1.push_row().set_i32("pid", 1).unwrap();

@@ -20,8 +20,8 @@ fn main() -> Result<()> {
         300,
         30,
         [
-            ("evno".into(), DataType::Long),
-            ("beamE".into(), DataType::Float),
+            ("evno".into(), DataType::Long, 1),
+            ("beamE".into(), DataType::Float, 1),
         ],
     ));
     dict.add(Schema::from_columns(
@@ -29,11 +29,11 @@ fn main() -> Result<()> {
         300,
         1,
         [
-            ("pid".into(), DataType::Int),
-            ("px".into(), DataType::Float),
-            ("py".into(), DataType::Float),
-            ("pz".into(), DataType::Float),
-            ("charge".into(), DataType::Byte),
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
+            ("py".into(), DataType::Float, 1),
+            ("pz".into(), DataType::Float, 1),
+            ("charge".into(), DataType::Byte, 1),
         ],
     ));
 

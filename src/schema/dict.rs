@@ -49,8 +49,9 @@ impl Dict {
     }
 
     /// Look up by `(group, item)`. O(1) via the [`SchemaIndex`] sparse table.
+    /// Crate-internal: backs the typed-row accessors and `EventCtx::bank`.
     #[inline]
-    pub fn get_by_id(&self, group: u16, item: u8) -> Option<&Schema> {
+    pub(crate) fn get_by_id(&self, group: u16, item: u8) -> Option<&Schema> {
         self.by_id
             .get(group, item)
             .map(|i| &self.schemas[i as usize])
@@ -66,10 +67,6 @@ impl Dict {
 
     pub fn iter(&self) -> impl Iterator<Item = &Schema> {
         self.schemas.iter()
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.schemas.iter().map(|s| s.name())
     }
 
     /// Concatenate every schema's compact text form, matching the C++
@@ -143,15 +140,15 @@ mod tests {
             300,
             1,
             [
-                ("pid".into(), DataType::Int),
-                ("px".into(), DataType::Float),
+                ("pid".into(), DataType::Int, 1),
+                ("px".into(), DataType::Float, 1),
             ],
         ));
         f.add(Schema::from_columns(
             "REC::Calorimeter",
             332,
             11,
-            [("energy".into(), DataType::Float)],
+            [("energy".into(), DataType::Float, 1)],
         ));
         f
     }
@@ -191,7 +188,7 @@ mod tests {
             "REC::Particle",
             300,
             1,
-            [("pid".into(), DataType::Int)],
+            [("pid".into(), DataType::Int, 1)],
         ));
         assert_eq!(f.len(), 2);
         assert_eq!(f.get("REC::Particle").unwrap().entries().len(), 1);

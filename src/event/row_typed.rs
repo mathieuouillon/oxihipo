@@ -1,5 +1,6 @@
-//! [`BankRow`] — typed row mapping for a named bank, plus
-//! [`BankView`] — handle-cached bank reader for hot-loop reads.
+//! [`BankRow`] — typed row mapping for a named bank, plus the
+//! crate-internal `BankView` handle-cache that backs the public row
+//! accessors.
 //!
 //! Two layers:
 //!
@@ -9,36 +10,24 @@
 //!   `(GROUP, ITEM)` identity, an associated `Handles` type, and two
 //!   readers: `from_row` (name-lookup per field) and
 //!   `from_row_with_handles` (handle-resolved, pointer arithmetic
-//!   only).
+//!   only). Define one with the [`bank_row!`](crate::bank_row) macro.
 //!
-//! - [`BankView<T>`] is the opt-in hot-loop view obtained from
-//!   [`EventCtx::bank_view`](crate::event::EventCtx::bank_view). It
-//!   pre-resolves the typed
+//! - **`BankView<T>`** (crate-internal) is the handle-cached reader
+//!   that backs [`EventCtx::rows`](crate::event::EventCtx::rows) and the
+//!   `rows_for_*` accessors. It pre-resolves the typed
 //!   [`ColumnHandle`](crate::schema::ColumnHandle)s once per record,
-//!   then reuses them across every row of every iter call — eliminating
-//!   the 12-HashMap-probes-per-row cost that the `EventCtx::rows`
-//!   simple path would otherwise incur.
+//!   then reuses them across every row — eliminating the
+//!   12-HashMap-probes-per-row cost a name-lookup path would incur.
 //!
 //! Both readers are **infallible**: missing or wrong-type columns
 //! yield `T::default()`, matching [`Bank::get`](crate::event::Bank::get).
 //!
-//! # Picking a path
-//!
-//! For one-off reads or small per-event row counts, the simple
-//! [`EventCtx::rows`](crate::event::EventCtx::rows) path is fine —
-//! it resolves columns by name on each call. For hot loops over
-//! every row of every event, prefer:
-//!
 //! ```ignore
-//! if let Some(particles) = ev.bank_view::<RecParticleRow>() {
-//!     let cal = ev.bank_view::<RecCalorimeterRow>();
-//!     for p in particles.iter() {                  // handle-cached
-//!         if let Some(cal) = &cal {
-//!             for c in cal.iter_for_pindex(p.row_index as i16) {
-//!                 // O(1) pindex join after the first call builds
-//!                 // the index for this event.
-//!             }
-//!         }
+//! // Define the row structs once with `bank_row!`, then iterate; the
+//! // handle cache is resolved once per `rows` call and reused per row.
+//! for p in ev.rows::<RecParticle>() {
+//!     for c in ev.rows_for_pindex::<RecCalorimeter>(p.row_index as i16) {
+//!         // O(1) pindex join after the first call builds the index.
 //!     }
 //! }
 //! ```
@@ -61,7 +50,8 @@ pub trait BankRow: Sized {
     type Handles: Copy + std::fmt::Debug;
 
     /// Resolve every field's column handle against the bank's schema.
-    /// Called once per [`BankView`] construction.
+    /// Called once per [`EventCtx::rows`](crate::event::EventCtx::rows)
+    /// call, then reused for every row.
     fn resolve_handles(schema: &Schema) -> Self::Handles;
 
     /// Decode bank row `row` into `Self` using pre-resolved handles.
@@ -71,8 +61,9 @@ pub trait BankRow: Sized {
 
     /// Decode bank row `row` into `Self` (one-shot path). Looks up
     /// every field's column index by name; suitable for occasional
-    /// reads or warm-up code. For hot loops, use [`BankView::iter`]
-    /// which calls [`Self::from_row_with_handles`].
+    /// reads or warm-up code. For hot loops, use
+    /// [`EventCtx::rows`](crate::event::EventCtx::rows), which resolves
+    /// the handles once and calls [`Self::from_row_with_handles`] per row.
     ///
     /// Default implementation forwards to the handle path with a fresh
     /// per-call resolve.
@@ -82,13 +73,12 @@ pub trait BankRow: Sized {
     }
 }
 
-/// Handle-cached typed bank reader.
+/// Handle-cached typed bank reader (crate-internal).
 ///
-/// Constructed via
-/// [`EventCtx::bank_view`](crate::event::EventCtx::bank_view); holds
-/// the borrowed [`Bank`] and a one-shot [`BankRow::Handles`]. Re-use
-/// the same view across every iteration in an event: each row read
-/// becomes a pointer-cast through the cached handles.
+/// Backs [`EventCtx::rows`](crate::event::EventCtx::rows) and the
+/// `rows_for_*` accessors; holds the borrowed [`Bank`] and a one-shot
+/// [`BankRow::Handles`], reused across every row of one accessor call so
+/// each row read becomes a pointer-cast through the cached handles.
 #[derive(Debug)]
 pub struct BankView<'a, T: BankRow> {
     bank: Bank<'a>,
@@ -113,21 +103,10 @@ impl<'a, T: BankRow> BankView<'a, T> {
         }
     }
 
-    /// The underlying borrowed [`Bank`].
-    #[inline]
-    pub fn bank(&self) -> &Bank<'a> {
-        &self.bank
-    }
-
     /// Row count.
     #[inline]
     pub fn rows(&self) -> u32 {
         self.bank.rows()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.bank.is_empty()
     }
 
     /// Decode row `row` using cached handles. Caller is responsible
@@ -135,38 +114,6 @@ impl<'a, T: BankRow> BankView<'a, T> {
     #[inline]
     pub fn row(&self, row: u32) -> T {
         T::from_row_with_handles(&self.bank, row, &self.handles)
-    }
-
-    /// Iterate every row using cached handles. Replaces
-    /// [`EventCtx::rows`](crate::event::EventCtx::rows)'s per-row
-    /// name lookups with pointer arithmetic.
-    #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = T> + use<'_, 'a, T> {
-        let bank = &self.bank;
-        let handles = &self.handles;
-        (0..bank.rows()).map(move |r| T::from_row_with_handles(bank, r, handles))
-    }
-
-    /// Iterate the rows whose `pindex` column equals `pindex`.
-    /// O(rows) on the first call (builds the inverted index); O(1)
-    /// per subsequent query.
-    pub fn iter_for_pindex(&self, pindex: i16) -> impl Iterator<Item = T> + use<'_, 'a, T> {
-        let bank = &self.bank;
-        let handles = &self.handles;
-        let rows = self.pindex_rows(pindex);
-        rows.iter()
-            .copied()
-            .map(move |r| T::from_row_with_handles(bank, r, handles))
-    }
-
-    /// Iterate the rows whose `index` column equals `key`.
-    pub fn iter_for_index(&self, key: i16) -> impl Iterator<Item = T> + use<'_, 'a, T> {
-        let bank = &self.bank;
-        let handles = &self.handles;
-        let rows = self.index_rows(key);
-        rows.iter()
-            .copied()
-            .map(move |r| T::from_row_with_handles(bank, r, handles))
     }
 
     /// Borrow the row indices whose `pindex` column equals `pindex`,
@@ -185,21 +132,16 @@ impl<'a, T: BankRow> BankView<'a, T> {
             .get_or_init(|| PindexIndex::build_from_column(&self.bank, "index"));
         idx.as_ref().map_or(&[][..], |i| i.rows_for(key))
     }
-
-    /// Cached column handles. Useful when constructing a custom row
-    /// reader on top of [`BankRow::from_row_with_handles`].
-    #[inline]
-    pub fn handles(&self) -> &T::Handles {
-        &self.handles
-    }
 }
 
 /// Inverted `column-value → [row indices]` index for a bank.
 ///
-/// Built lazily on first request from [`BankView::iter_for_pindex`] /
-/// `iter_for_index`. Construction is one O(rows) pass; lookups are
-/// O(1) into a small hash table. Bank values are `i16` in CLAS12
-/// (`pindex` / `index` are `S` in the schema).
+/// Built lazily on first request from
+/// [`EventCtx::rows_for_pindex`](crate::event::EventCtx::rows_for_pindex) /
+/// [`rows_for_index`](crate::event::EventCtx::rows_for_index).
+/// Construction is one O(rows) pass; lookups are O(1) into a small hash
+/// table. Bank values are `i16` in CLAS12 (`pindex` / `index` are `S` in
+/// the schema).
 #[derive(Debug)]
 pub struct PindexIndex {
     table: std::collections::HashMap<i16, Vec<u32>>,

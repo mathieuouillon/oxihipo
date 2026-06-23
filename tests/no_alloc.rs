@@ -57,8 +57,8 @@ fn build_fixture(path: &std::path::Path, events: i32, max_record_events: u32) {
         300,
         30,
         [
-            ("evno".into(), DataType::Long),
-            ("beamE".into(), DataType::Float),
+            ("evno".into(), DataType::Long, 1),
+            ("beamE".into(), DataType::Float, 1),
         ],
     ));
     let mut w = Writer::create(path)
@@ -108,7 +108,7 @@ fn iter_alloc_contract() {
     // size), the inner loop must do zero heap allocations.
     {
         let file = Chain::open(&small).unwrap();
-        let mut iter = file.events();
+        let mut iter = file.events().map(Result::unwrap);
         for _ in 0..200 {
             let _ = iter.next(); // warmup
         }
@@ -132,18 +132,18 @@ fn iter_alloc_contract() {
     // rate must be O(records), not O(events).
     let small_file = Chain::open(&small).unwrap();
     let big_file = Chain::open(&big).unwrap();
-    let _: Vec<_> = small_file.events().take(50).collect(); // warmup
-    let _: Vec<_> = big_file.events().take(50).collect();
+    let _: Vec<_> = small_file.events().map(Result::unwrap).take(50).collect(); // warmup
+    let _: Vec<_> = big_file.events().map(Result::unwrap).take(50).collect();
 
     let mut collected_small = Vec::with_capacity(1000);
     let allocs_small = count_allocs(|| {
-        for ev in small_file.events() {
+        for ev in small_file.events().map(Result::unwrap) {
             collected_small.push(ev);
         }
     });
     let mut collected_big = Vec::with_capacity(5000);
     let allocs_big = count_allocs(|| {
-        for ev in big_file.events() {
+        for ev in big_file.events().map(Result::unwrap) {
             collected_big.push(ev);
         }
     });

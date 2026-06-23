@@ -138,7 +138,7 @@ fn recook_one(input: &Path, output: &Path, quiet: bool, compression: Compression
         // tqdm-style bar over the scan; `disable = quiet` silences it in
         // batch mode, where the caller shows a per-file bar instead.
         for ev in tqdm!(
-            chain.events(),
+            chain.events().map(Result::unwrap),
             total = total_events as usize,
             desc = "recook",
             unit = "ev",
@@ -275,11 +275,11 @@ fn recook_batch(
 
 /// Open `inputs` as a single `Chain` and write every event to `merged`
 /// as `Lz4ByBank`. All inputs must share the same dict (enforced by
-/// `Chain::open_all`, which is the natural guarantee when they came
+/// `Chain::open`, which is the natural guarantee when they came
 /// from the same upstream slice-set).
 fn merge_into(inputs: &[PathBuf], merged: &Path, compression: Compression) -> Result<()> {
     eprintln!("merge: {} file(s) → {}", inputs.len(), merged.display());
-    let chain = Chain::open_all(inputs)?;
+    let chain = Chain::open(inputs)?;
     let dict = chain.schemas().clone();
     let total_events = chain.event_count();
     let start = Instant::now();
@@ -289,7 +289,7 @@ fn merge_into(inputs: &[PathBuf], merged: &Path, compression: Compression) -> Re
             .compression(compression)
             .build()?;
         for ev in tqdm!(
-            chain.events(),
+            chain.events().map(Result::unwrap),
             total = total_events as usize,
             desc = "merge",
             unit = "ev",

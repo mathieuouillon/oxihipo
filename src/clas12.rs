@@ -5,6 +5,7 @@
 //! use oxihipo::clas12::RecParticle;
 //!
 //! for ev in chain.events() {
+//!     let ev = ev?;
 //!     for p in ev.rows::<RecParticle>() {
 //!         if p.pid == 11 { /* electron */ }
 //!     }

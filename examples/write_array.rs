@@ -71,6 +71,7 @@ fn main() -> Result<()> {
 
     let mut events_seen = 0u64;
     for ev in chain.events() {
+        let ev = ev?;
         events_seen += 1;
         let bank = ev.bank("REC::Traj").expect("REC::Traj present");
 

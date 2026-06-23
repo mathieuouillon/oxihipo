@@ -10,15 +10,15 @@ fn dict() -> Dict {
         300,
         30,
         [
-            ("evno".into(), DataType::Long),
-            ("beamE".into(), DataType::Float),
+            ("evno".into(), DataType::Long, 1),
+            ("beamE".into(), DataType::Float, 1),
         ],
     ));
     d.add(Schema::from_columns(
         "REC::Particle",
         300,
         1,
-        [("pid".into(), DataType::Int)],
+        [("pid".into(), DataType::Int, 1)],
     ));
     d
 }
@@ -55,12 +55,12 @@ fn write_file(path: &std::path::Path, dict: &Dict, evno_start: i64, count: i32) 
 }
 
 #[test]
-fn chain_open_single_file_matches_open_all() {
+fn chain_open_single_file_matches_open_list() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("one.hipo");
     write_file(&p, &dict(), 0, 50);
     let a = Chain::open(&p).unwrap();
-    let b = Chain::open_all([&p]).unwrap();
+    let b = Chain::open([&p]).unwrap();
     assert_eq!(a.event_count(), b.event_count());
     assert_eq!(a.file_count(), 1);
     assert_eq!(b.file_count(), 1);
@@ -80,7 +80,7 @@ fn chain_open_validates_dict_match() {
             "OTHER::Thing",
             1,
             1,
-            [("v".into(), DataType::Int)],
+            [("v".into(), DataType::Int, 1)],
         ));
         let mut w = Writer::create(&p2).schemas(&d2).build().unwrap();
         for i in 0..5_i32 {
@@ -95,7 +95,7 @@ fn chain_open_validates_dict_match() {
         }
         w.finish().unwrap();
     }
-    let err = Chain::open_all([&p1, &p2]).unwrap_err();
+    let err = Chain::open([&p1, &p2]).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("different dictionary"),
@@ -113,7 +113,7 @@ fn chain_event_count_sums_across_files() {
     write_file(&p1, &d, 0, 100);
     write_file(&p2, &d, 1000, 200);
     write_file(&p3, &d, 5000, 500);
-    let chain = Chain::open_all([&p1, &p2, &p3]).unwrap();
+    let chain = Chain::open([&p1, &p2, &p3]).unwrap();
     assert_eq!(chain.file_count(), 3);
     assert_eq!(chain.event_count(), 800);
 }
@@ -126,7 +126,7 @@ fn chain_event_random_access_crosses_files() {
     let d = dict();
     write_file(&p1, &d, 0, 100); // global 0..99   → evno 0..99
     write_file(&p2, &d, 1000, 200); // global 100..299 → evno 1000..1199
-    let chain = Chain::open_all([&p1, &p2]).unwrap();
+    let chain = Chain::open([&p1, &p2]).unwrap();
 
     let ev_5 = chain.event(5).unwrap();
     assert_eq!(
@@ -164,9 +164,9 @@ fn chain_events_iter_concat_in_order() {
     let d = dict();
     write_file(&p1, &d, 0, 30);
     write_file(&p2, &d, 1000, 20);
-    let chain = Chain::open_all([&p1, &p2]).unwrap();
+    let chain = Chain::open([&p1, &p2]).unwrap();
     let mut evnos: Vec<i64> = Vec::new();
-    for ev in chain.events() {
+    for ev in chain.events().map(Result::unwrap) {
         let v = ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
         evnos.push(v);
     }
@@ -175,14 +175,13 @@ fn chain_events_iter_concat_in_order() {
 }
 
 #[test]
-fn chain_open_dispatches_directory_to_open_dir() {
+fn chain_open_dispatches_directory() {
     let dir = tempfile::tempdir().unwrap();
     let d = dict();
     write_file(&dir.path().join("a.hipo"), &d, 0, 30);
     write_file(&dir.path().join("b.hipo"), &d, 1000, 20);
 
-    // `Chain::open` on a directory opens every *.hipo inside it,
-    // exactly like `Chain::open_dir`.
+    // `Chain::open` on a directory opens every *.hipo inside it.
     let chain = Chain::open(dir.path()).unwrap();
     assert_eq!(chain.file_count(), 2);
     assert_eq!(chain.event_count(), 50);

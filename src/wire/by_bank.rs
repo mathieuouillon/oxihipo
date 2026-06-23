@@ -560,7 +560,7 @@ mod tests {
         let refs: Vec<&[u8]> = evs.iter().map(|v| v.as_slice()).collect();
         let mut payload_buf = Vec::new();
         let mut compress_buf = Vec::new();
-        let raw = crate::write::build_record_bytes(
+        let raw = crate::write::record::build_record_bytes(
             &refs,
             0,
             0,
@@ -593,7 +593,7 @@ mod tests {
         let refs: Vec<&[u8]> = evs.iter().map(|v| v.as_slice()).collect();
         let mut payload_buf = Vec::new();
         let mut compress_buf = Vec::new();
-        let raw = crate::write::build_record_bytes(
+        let raw = crate::write::record::build_record_bytes(
             &refs,
             0,
             0,
@@ -643,7 +643,7 @@ mod tests {
         let refs: Vec<&[u8]> = evs.iter().map(|v| v.as_slice()).collect();
         let mut payload_buf = Vec::new();
         let mut compress_buf = Vec::new();
-        let raw = crate::write::build_record_bytes(
+        let raw = crate::write::record::build_record_bytes(
             &refs,
             0,
             0,
@@ -679,7 +679,7 @@ mod tests {
     fn build_raw(events: &[&[u8]], compression: crate::write::Compression) -> Vec<u8> {
         let mut payload_buf = Vec::new();
         let mut compress_buf = Vec::new();
-        crate::write::build_record_bytes(
+        crate::write::record::build_record_bytes(
             events,
             0,
             0,

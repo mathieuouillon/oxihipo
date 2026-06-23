@@ -143,13 +143,13 @@ mod tests {
             "REC::Particle",
             300,
             1,
-            [("pid".into(), DataType::Int)],
+            [("pid".into(), DataType::Int, 1)],
         ));
         d.add(Schema::from_columns(
             "REC::Calorimeter",
             332,
             11,
-            [("e".into(), DataType::Float)],
+            [("e".into(), DataType::Float, 1)],
         ));
         d
     }

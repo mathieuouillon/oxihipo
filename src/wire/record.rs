@@ -621,7 +621,7 @@ mod tests {
         // events_per_chunk = 3 → 3 chunks (3 / 3 / 1).
         let mut payload_buf = Vec::new();
         let mut compress_buf = Vec::new();
-        let raw = crate::write::build_record_bytes(
+        let raw = crate::write::record::build_record_bytes(
             &refs,
             0,
             0,
@@ -674,7 +674,7 @@ mod tests {
 
         let mut payload_buf = Vec::new();
         let mut compress_buf = Vec::new();
-        let raw = crate::write::build_record_bytes(
+        let raw = crate::write::record::build_record_bytes(
             &refs,
             0,
             0,

@@ -552,7 +552,7 @@ mod tests {
             let refs: Vec<&[u8]> = events.iter().map(|e| e.as_slice()).collect();
             let mut payload_buf = Vec::new();
             let mut compress_buf = Vec::new();
-            let raw = crate::write::build_record_bytes(
+            let raw = crate::write::record::build_record_bytes(
                 &refs,
                 0,
                 0,

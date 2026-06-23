@@ -1,6 +1,6 @@
-//! Corruption handling: `try_events()` must surface a record-level
-//! corruption as a recoverable `Err`, while `events()` (the convenience
-//! path) is allowed to panic on the same input. Neither may abort/UB.
+//! Corruption handling: `events()` must surface a record-level corruption
+//! as a recoverable `Err` (the iterator yields `Result<OwnedEvent>`);
+//! calling `.unwrap()` on that `Err` is what panics. Neither may abort/UB.
 
 use oxihipo::{Chain, Compression, Dict, Schema, Writer};
 
@@ -61,7 +61,7 @@ fn write_small_lz4(path: &std::path::Path, n_events: i32) {
 }
 
 #[test]
-fn try_events_surfaces_corruption_as_err() {
+fn events_surfaces_corruption_as_err() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("corrupt.hipo");
     write_small_lz4(&path, 6);
@@ -69,7 +69,7 @@ fn try_events_surfaces_corruption_as_err() {
     // Clean read works through both paths.
     {
         let chain = Chain::open(&path).unwrap();
-        let all: oxihipo::Result<Vec<_>> = chain.try_events().collect();
+        let all: oxihipo::Result<Vec<_>> = chain.events().collect();
         assert_eq!(all.unwrap().len() as u64, chain.event_count());
         let chain = Chain::open(&path).unwrap();
         assert_eq!(chain.events().count() as u64, chain.event_count());
@@ -99,25 +99,27 @@ fn try_events_surfaces_corruption_as_err() {
     // open() still succeeds (data payloads aren't decoded at open).
     let chain = Chain::open(&path).unwrap();
 
-    // try_events() surfaces the corruption as an Err — no panic, no UB.
+    // events() surfaces the corruption as an Err — no panic, no UB.
     let mut saw_err = false;
-    for r in chain.try_events() {
+    for r in chain.events() {
         if r.is_err() {
             saw_err = true;
             break;
         }
     }
-    assert!(
-        saw_err,
-        "try_events() must yield an Err on the corrupt record"
-    );
+    assert!(saw_err, "events() must yield an Err on the corrupt record");
 
-    // events() (the panicking convenience) aborts iteration on the same
-    // input — caught here so the corruption can't take down the test binary.
+    // Unwrapping the yielded Result aborts iteration on the same input —
+    // caught here so the corruption can't take down the test binary.
     let chain2 = Chain::open(&path).unwrap();
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        chain2.events().for_each(|_| {});
+        chain2.events().for_each(|r| {
+            r.unwrap();
+        });
     }))
     .is_err();
-    assert!(panicked, "events() must panic on the corrupt record");
+    assert!(
+        panicked,
+        "events() + unwrap must panic on the corrupt record"
+    );
 }

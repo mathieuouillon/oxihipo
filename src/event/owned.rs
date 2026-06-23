@@ -275,8 +275,9 @@ impl OwnedEvent {
         }
     }
 
-    /// Decode the bank for an already-resolved schema reference.
-    pub fn bank_for<'a>(&'a self, schema: &'a Schema) -> Option<Bank<'a>> {
+    /// Decode the bank for an already-resolved schema reference. Internal:
+    /// backs [`Self::bank`] and the typed-row accessors.
+    pub(crate) fn bank_for<'a>(&'a self, schema: &'a Schema) -> Option<Bank<'a>> {
         match &self.inner {
             Inner::Bytes { .. } => self.ctx().bank_for(schema),
             Inner::ByBank {
@@ -291,13 +292,6 @@ impl OwnedEvent {
                 Bank::new(schema, &stream[range]).ok()
             }
         }
-    }
-
-    /// Decode by `(group, item)` directly — useful when the dict doesn't
-    /// list the bank but you know the wire IDs.
-    pub fn bank_by_id(&self, group: u16, item: u8) -> Option<Bank<'_>> {
-        let schema = self.dict.get_by_id(group, item)?;
-        self.bank_for(schema)
     }
 
     /// Read one cell of bank `bank`, column `col`, at `row`. Infallible;
@@ -385,10 +379,11 @@ impl OwnedEvent {
         self.ctx().composite(name)
     }
 
-    /// Obtain a handle-cached [`BankView`](crate::event::BankView)
-    /// for bank `T::NAME`. See
-    /// [`EventCtx::bank_view`](crate::event::EventCtx::bank_view).
-    pub fn bank_view<T: crate::event::BankRow>(&self) -> Option<crate::event::BankView<'_, T>> {
+    /// Internal: handle-cached [`BankView`](crate::event::BankView) for
+    /// bank `T::NAME`. Backs [`Self::rows`] and the `rows_for_*` accessors.
+    pub(crate) fn bank_view<T: crate::event::BankRow>(
+        &self,
+    ) -> Option<crate::event::BankView<'_, T>> {
         let schema = self.dict.get_by_id(T::GROUP, T::ITEM)?;
         let bank = self.bank_for(schema)?;
         Some(crate::event::BankView::new(bank))
@@ -505,7 +500,7 @@ mod tests {
     #[test]
     fn owned_event_round_trip() {
         let mut dict = Dict::new();
-        let schema = Schema::from_columns("X", 1, 1, [("pid".into(), DataType::Int)]);
+        let schema = Schema::from_columns("X", 1, 1, [("pid".into(), DataType::Int, 1)]);
         dict.add(schema.clone());
         let bytes = build_event_bytes(&schema, 42);
         let owned = OwnedEvent::new(bytes, Arc::new(dict));
@@ -524,7 +519,7 @@ mod tests {
     #[test]
     fn cross_thread_round_trip() {
         let mut dict = Dict::new();
-        let schema = Schema::from_columns("X", 1, 1, [("pid".into(), DataType::Int)]);
+        let schema = Schema::from_columns("X", 1, 1, [("pid".into(), DataType::Int, 1)]);
         dict.add(schema.clone());
         let bytes = build_event_bytes(&schema, 99);
         let owned = OwnedEvent::new(bytes, Arc::new(dict));
@@ -538,7 +533,7 @@ mod tests {
     #[test]
     fn slice_constructor_shares_buffer() {
         let mut dict = Dict::new();
-        let schema = Schema::from_columns("X", 1, 1, [("pid".into(), DataType::Int)]);
+        let schema = Schema::from_columns("X", 1, 1, [("pid".into(), DataType::Int, 1)]);
         dict.add(schema.clone());
         let bytes = build_event_bytes(&schema, 7);
         let len = bytes.len() as u32;

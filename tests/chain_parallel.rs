@@ -13,15 +13,15 @@ fn dict() -> Dict {
         300,
         30,
         [
-            ("evno".into(), DataType::Long),
-            ("beamE".into(), DataType::Float),
+            ("evno".into(), DataType::Long, 1),
+            ("beamE".into(), DataType::Float, 1),
         ],
     ));
     d.add(Schema::from_columns(
         "REC::Particle",
         300,
         1,
-        [("pid".into(), DataType::Int)],
+        [("pid".into(), DataType::Int, 1)],
     ));
     d
 }
@@ -67,7 +67,7 @@ fn for_each_single_and_parallel_agree() {
     write_file(&p1, &d, 0, 100);
     write_file(&p2, &d, 1000, 200);
     write_file(&p3, &d, 5000, 500);
-    let chain = Chain::open_all([&p1, &p2, &p3]).unwrap();
+    let chain = Chain::open([&p1, &p2, &p3]).unwrap();
 
     // The only difference between the runs is the `threads` argument.
     for threads in [1usize, 0, 2] {
@@ -92,12 +92,12 @@ fn for_each_single_matches_iterator() {
     let d = dict();
     write_file(&p1, &d, 0, 100);
     write_file(&p2, &d, 1000, 200);
-    let chain = Chain::open_all([&p1, &p2]).unwrap();
+    let chain = Chain::open([&p1, &p2]).unwrap();
 
     // The `events()` iterator and a single-threaded `for_each(1)` must
     // visit the exact same data; a parallel `for_each(0)` the same total.
     let mut iter_total: u64 = 0;
-    for ev in chain.events() {
+    for ev in chain.events().map(Result::unwrap) {
         iter_total += ev.bank("REC::Particle").map_or(0, |b| b.rows() as u64);
     }
 
@@ -131,7 +131,7 @@ fn for_each_respects_filter() {
         "RAW::tag",
         500,
         1,
-        [("v".into(), DataType::Int)],
+        [("v".into(), DataType::Int, 1)],
     ));
     // Write files where only every 5th event has RAW::tag.
     let mk = |path: &std::path::Path, evno_start: i64, count: i32| {
@@ -166,7 +166,7 @@ fn for_each_respects_filter() {
     mk(&p1, 0, 100); // 20 tagged
     mk(&p2, 1000, 50); // 10 tagged
 
-    let chain = Chain::open_all([&p1, &p2])
+    let chain = Chain::open([&p1, &p2])
         .unwrap()
         .with_filter(Filter::require(["RAW::tag"]))
         .unwrap();
@@ -221,7 +221,7 @@ fn for_each_total_matches_event_count() {
     write_file(&p1, &d, 0, 100);
     write_file(&p2, &d, 1000, 200);
     write_file(&p3, &d, 5000, 500);
-    let chain = Chain::open_all([&p1, &p2, &p3]).unwrap();
+    let chain = Chain::open([&p1, &p2, &p3]).unwrap();
     let stats = chain.for_each(2, |_ev| {}).unwrap();
     assert_eq!(stats.events_in, chain.event_count());
 }
