@@ -26,6 +26,9 @@ fixtures/large/
 # Analysis / example output artifacts
 /out
 
+# Generated docs (build from the .typ source with `typst compile`)
+/docs/*.pdf
+
 # Local env / secrets
 .env
 .env.local

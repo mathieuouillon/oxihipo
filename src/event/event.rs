@@ -5,6 +5,7 @@
 //! Most user code touches [`EventCtx`](crate::event::EventCtx) instead, which
 //! pairs an `Event` with the schema dictionary.
 
+use crate::wire::by_bank::ByBankRecord;
 use crate::wire::bytes::read_u32_le;
 use crate::wire::constants::*;
 
@@ -101,7 +102,7 @@ impl<'a> Event<'a> {
     pub fn iter_structures(&self) -> StructureIter<'a> {
         let size = self.size() as usize;
         let cap = std::cmp::min(size, self.buf.len());
-        StructureIter {
+        StructureIter::Bytes {
             buf: self.buf,
             pos: EVENT_HEADER_SIZE,
             end: cap,
@@ -136,12 +137,38 @@ impl<'a> Event<'a> {
     }
 }
 
-/// Iterator over structures in an event.
+/// Iterator over the structures of an event, polymorphic over the two
+/// event backends. Both variants yield `(StructureHeader, &[u8])`.
+///
+/// - [`Self::Bytes`] walks a contiguous event buffer (zero-copy) — the
+///   classic path.
+/// - [`Self::ByBank`] gathers an `Lz4ByBank` event's banks straight from
+///   their per-bank decompressed (lazily cached) streams, **without**
+///   synthesising a contiguous event blob first. This is what keeps
+///   `ev.structures()` from paying the full per-event synthesis cost.
 #[derive(Debug, Clone)]
-pub struct StructureIter<'a> {
-    buf: &'a [u8],
-    pos: usize,
-    end: usize,
+pub enum StructureIter<'a> {
+    Bytes {
+        buf: &'a [u8],
+        pos: usize,
+        end: usize,
+    },
+    ByBank {
+        record: &'a ByBankRecord,
+        event_idx: u32,
+        next_bank: u32,
+    },
+}
+
+impl<'a> StructureIter<'a> {
+    /// Construct a ByBank structure iterator over one event of a record.
+    pub(crate) fn new_by_bank(record: &'a ByBankRecord, event_idx: u32) -> Self {
+        StructureIter::ByBank {
+            record,
+            event_idx,
+            next_bank: 0,
+        }
+    }
 }
 
 impl<'a> Iterator for StructureIter<'a> {
@@ -149,18 +176,59 @@ impl<'a> Iterator for StructureIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.pos + BANK_STRUCTURE_SIZE > self.end {
-            return None;
+        match self {
+            StructureIter::Bytes { buf, pos, end } => {
+                if *pos + BANK_STRUCTURE_SIZE > *end {
+                    return None;
+                }
+                let hdr = StructureHeader::parse(&buf[*pos..])?;
+                let data_start = *pos + BANK_STRUCTURE_SIZE;
+                let data_end = data_start + hdr.data_size as usize;
+                if data_end > *end || data_end > buf.len() {
+                    return None;
+                }
+                let data = &buf[data_start..data_end];
+                *pos = data_end;
+                Some((hdr, data))
+            }
+            // Walk banks in directory order, skipping ones this event
+            // lacks; each payload borrows directly from the bank's
+            // decompressed (lazily cached) stream — no blob synthesis.
+            StructureIter::ByBank {
+                record,
+                event_idx,
+                next_bank,
+            } => {
+                let rec: &'a ByBankRecord = record;
+                let e = *event_idx;
+                let n = rec.num_banks() as u32;
+                while *next_bank < n {
+                    let b = *next_bank;
+                    *next_bank += 1;
+                    if !rec.has(e, b) {
+                        continue;
+                    }
+                    let (group, item, ty) = rec.descriptor(b);
+                    let data_size = rec.bank_size(e, b);
+                    let hdr = StructureHeader {
+                        group,
+                        item,
+                        ty,
+                        data_size,
+                        header_size: 0,
+                    };
+                    if data_size == 0 {
+                        return Some((hdr, &[]));
+                    }
+                    // A decompression error here is corruption the iterator
+                    // construction already ruled out; treat it as the end.
+                    let stream = rec.bank_stream(b).ok()?;
+                    let range = rec.bank_byte_range(e, b);
+                    return Some((hdr, &stream[range]));
+                }
+                None
+            }
         }
-        let hdr = StructureHeader::parse(&self.buf[self.pos..])?;
-        let data_start = self.pos + BANK_STRUCTURE_SIZE;
-        let data_end = data_start + hdr.data_size as usize;
-        if data_end > self.end || data_end > self.buf.len() {
-            return None;
-        }
-        let data = &self.buf[data_start..data_end];
-        self.pos = data_end;
-        Some((hdr, data))
     }
 }
 

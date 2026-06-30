@@ -368,10 +368,11 @@ impl OwnedEvent {
         }
     }
 
-    /// Iterate structure headers + payloads. For `ByBank` events this
-    /// triggers full synthesis (decompresses every bank in the event).
+    /// Iterate structure headers + payloads. For `ByBank` events the
+    /// banks are gathered straight from their decompressed (lazily
+    /// cached) streams — no event-blob synthesis. See [`StructureIter`].
     pub fn structures(&self) -> StructureIter<'_> {
-        self.as_event().iter_structures()
+        self.ctx().structures()
     }
 
     /// Decode a composite structure by name.

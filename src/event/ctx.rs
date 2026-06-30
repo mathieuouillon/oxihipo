@@ -250,16 +250,19 @@ impl<'a> EventCtx<'a> {
         }
     }
 
-    /// Iterate structure headers + payloads, raw — for tools like `dump`
-    /// and `stats` that want to see everything.
+    /// Iterate structure headers + payloads — for tools like `dump` and
+    /// `stats`, and for any "touch every bank" pass.
     ///
-    /// **Empty for `Lz4ByBank` backends**: those don't carry raw event
-    /// bytes. If you need to enumerate every bank in a ByBank event, use
-    /// [`OwnedEvent::structures`] which synthesises bytes lazily.
+    /// Works for **both** backends: `Lz4ByBank` events gather their banks
+    /// straight from the per-bank decompressed (lazily cached) streams
+    /// with no event-blob synthesis, so this is the cheap way to read
+    /// every bank of a ByBank event.
     pub fn structures(&self) -> crate::event::event::StructureIter<'a> {
         match self.backend {
             Backend::Bytes(e) => e.iter_structures(),
-            Backend::ByBank { .. } => Event::new(&[]).iter_structures(),
+            Backend::ByBank { record, event_idx } => {
+                crate::event::event::StructureIter::new_by_bank(record, event_idx)
+            }
         }
     }
 

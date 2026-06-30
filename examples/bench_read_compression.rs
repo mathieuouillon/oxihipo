@@ -1,0 +1,388 @@
+//! Read-throughput benchmark across every `Compression` variant.
+//!
+//! Re-encodes one identical set of events into each compression format,
+//! then measures **single-thread read speed** scanning each file two ways:
+//!
+//! - **full**: read `REC::Particle` (pid/px/py/pz) + `REC::Event` — the
+//!   "touch the main bank" pattern.
+//! - **select**: read only the narrow `REC::Event` bank, skipping
+//!   `REC::Particle` entirely — this is where `Lz4ByBank`'s partial
+//!   decompression (inflate only the touched bank) should pull ahead, since
+//!   the `Bytes`-backed formats (None/Lz4/Lz4Best/Gzip/Lz4Chunked) inflate
+//!   the whole record regardless of what you read.
+//!
+//! Reports best-of-`iters` per pass (min = least noise). Numbers are
+//! single-thread, warm-cache, on the running machine — relative throughput
+//! between formats is the point, not absolute MB/s.
+//!
+//! ```sh
+//! # synthetic data (default 100k events, 5 iters):
+//! cargo run --release --example bench_read_compression
+//! cargo run --release --example bench_read_compression -- 200000 7
+//! # or measure a real file:
+//! cargo run --release --example bench_read_compression -- /path/to/rec.hipo 5
+//! ```
+
+use std::collections::{BTreeSet, HashMap};
+use std::env;
+use std::hint::black_box;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use oxihipo::{Chain, Compression, DataType, Dict, Result, Schema, Writer};
+
+const PIDS: [i32; 5] = [11, 211, -211, 2212, 22];
+
+fn build_dict() -> Dict {
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Event",
+        300,
+        30,
+        [
+            ("category".into(), DataType::Long, 1),
+            ("topology".into(), DataType::Long, 1),
+            ("beamCharge".into(), DataType::Float, 1),
+            ("liveTime".into(), DataType::Double, 1),
+            ("startTime".into(), DataType::Float, 1),
+            ("helicity".into(), DataType::Byte, 1),
+        ],
+    ));
+    d.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        31,
+        [
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
+            ("py".into(), DataType::Float, 1),
+            ("pz".into(), DataType::Float, 1),
+            ("vx".into(), DataType::Float, 1),
+            ("vy".into(), DataType::Float, 1),
+            ("vz".into(), DataType::Float, 1),
+            ("vt".into(), DataType::Float, 1),
+            ("charge".into(), DataType::Byte, 1),
+            ("beta".into(), DataType::Float, 1),
+            ("chi2pid".into(), DataType::Float, 1),
+            ("status".into(), DataType::Short, 1),
+        ],
+    ));
+    d
+}
+
+/// Write `n_events` of semi-realistic, compressible CLAS12-shaped data.
+/// Values are coarsely quantized so LZ4/gzip see real redundancy (random
+/// floats would make every codec look identical and useless).
+fn generate(path: &Path, n_events: u64) -> Result<()> {
+    let dict = build_dict();
+    let mut w = Writer::create(path)
+        .schemas(&dict)
+        .compression(Compression::Lz4)
+        .build()?;
+    for ev_i in 0..n_events {
+        let n_parts = 4 + (ev_i % 9) as usize; // 4..=12 particles
+        w.event(|ev| {
+            ev.bank("REC::Event", |b| {
+                b.row(|r| {
+                    r.set("category", (ev_i % 16) as i64)?;
+                    r.set("topology", ((ev_i / 16) % 256) as i64)?;
+                    r.set("beamCharge", (ev_i % 100) as f32 * 0.01)?;
+                    r.set("liveTime", 0.95_f64)?;
+                    r.set("startTime", (ev_i % 1024) as f32 * 0.1)?;
+                    r.set("helicity", if ev_i % 2 == 0 { 1i8 } else { -1i8 })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })?;
+            ev.bank("REC::Particle", |b| {
+                for k in 0..n_parts {
+                    let idx = ev_i as usize + k;
+                    let pid = PIDS[idx % PIDS.len()];
+                    let q = (idx % 64) as f32 * 0.03125;
+                    b.row(|r| {
+                        r.set("pid", pid)?;
+                        r.set("px", q - 1.0)?;
+                        r.set("py", q * 0.5)?;
+                        r.set("pz", 2.0 + q)?;
+                        r.set("vx", 0.0_f32)?;
+                        r.set("vy", 0.0_f32)?;
+                        r.set("vz", q - 5.0)?;
+                        r.set("vt", 0.0_f32)?;
+                        r.set("charge", pid.signum() as i8)?;
+                        r.set("beta", 0.9_f32 + q * 0.001)?;
+                        r.set("chi2pid", q - 0.5)?;
+                        r.set("status", ((ev_i + k as u64) % 4000) as i16)?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })?;
+    }
+    w.finish()?;
+    Ok(())
+}
+
+struct Stats {
+    file_bytes: u64,
+    events: u64,
+    full: Duration,
+    select: Duration,
+    all: Duration,
+    all_bank: Duration,
+}
+
+/// Warm up once, then time `iters` passes; return the fastest (min noise).
+fn best_of(iters: usize, mut pass: impl FnMut() -> Result<u64>) -> Result<Duration> {
+    black_box(pass()?); // warm-up
+    let mut best = Duration::MAX;
+    for _ in 0..iters {
+        let t = Instant::now();
+        let sink = pass()?;
+        let d = t.elapsed();
+        black_box(sink);
+        best = best.min(d);
+    }
+    Ok(best)
+}
+
+fn bench_one(path: &Path, iters: usize) -> Result<Stats> {
+    let chain = Chain::open(path)?;
+    let events = chain.event_count();
+    let file_bytes = std::fs::metadata(path)?.len();
+
+    // Pre-resolve REC::Particle column handles (pid/px/py/pz are Int/Float
+    // in every CLAS12 reconstruction dictionary) — the hot-loop read path.
+    let part = chain.schemas().require("REC::Particle")?;
+    let h_pid = part.handle::<i32>("pid")?;
+    let h_px = part.handle::<f32>("px")?;
+    let h_py = part.handle::<f32>("py")?;
+    let h_pz = part.handle::<f32>("pz")?;
+
+    // Populated bank names (sampled once, untimed) — the "read every bank"
+    // mode probes these via ev.bank(name), which avoids the per-event blob
+    // that ev.bytes() builds on the ByBank path.
+    let bank_names: Vec<String> = {
+        let id2name: HashMap<u32, String> = chain
+            .schemas()
+            .iter()
+            .map(|s| {
+                (
+                    (u32::from(s.group()) << 8) | u32::from(s.item()),
+                    s.name().to_string(),
+                )
+            })
+            .collect();
+        let mut set = BTreeSet::new();
+        for ev in chain.events().take(8000) {
+            let ev = ev?;
+            for (h, _) in ev.structures() {
+                if let Some(n) = id2name.get(&((u32::from(h.group) << 8) | u32::from(h.item))) {
+                    set.insert(n.clone());
+                }
+            }
+        }
+        set.into_iter().collect()
+    };
+
+    // full: read REC::Particle (pid/px/py/pz) and touch REC::Event — the
+    // "decode the main bank" pattern.
+    let full = best_of(iters, || {
+        let mut sink = 0u64;
+        for ev in chain.events() {
+            let ev = ev?;
+            if let Some(p) = ev.bank("REC::Particle") {
+                let (pid, px, py, pz) = (p.read(h_pid), p.read(h_px), p.read(h_py), p.read(h_pz));
+                for i in 0..pid.len() {
+                    sink = sink
+                        .wrapping_add(pid[i] as u64)
+                        .wrapping_add(px[i].to_bits() as u64)
+                        .wrapping_add(py[i].to_bits() as u64)
+                        .wrapping_add(pz[i].to_bits() as u64);
+                }
+            }
+            if let Some(e) = ev.bank("REC::Event") {
+                sink = sink.wrapping_add(u64::from(e.rows()));
+            }
+        }
+        Ok(sink)
+    })?;
+
+    // select: touch ONLY the narrow REC::Event bank (skip REC::Particle).
+    // On ByBank this inflates only REC::Event's stream; the Bytes formats
+    // inflated the whole record up front, so they can't skip the work.
+    let select = best_of(iters, || {
+        let mut sink = 0u64;
+        for ev in chain.events() {
+            let ev = ev?;
+            if let Some(e) = ev.bank("REC::Event") {
+                sink = sink.wrapping_add(u64::from(e.rows()));
+            }
+        }
+        Ok(sink)
+    })?;
+
+    // all: touch EVERY populated bank in the event (walk all structures). On
+    // ByBank this inflates every bank stream and gathers each event's banks
+    // straight from them (no blob synthesis) — the case where its
+    // partial-decompression advantage disappears and per-bank overhead shows;
+    // the Bytes formats already inflated the whole record up front.
+    let all = best_of(iters, || {
+        let mut sink = 0u64;
+        for ev in chain.events() {
+            let ev = ev?;
+            for (_, data) in ev.structures() {
+                sink = sink.wrapping_add(data.len() as u64);
+            }
+        }
+        Ok(sink)
+    })?;
+
+    // all_bank: read EVERY populated bank via ev.bank(name) — the realistic
+    // "analysis reads all banks" path. On ByBank this inflates every bank
+    // stream once per record (cached); like `all` it builds no event blob, but
+    // it pays a per-bank name lookup that the `all` structure-walk skips.
+    let all_bank = best_of(iters, || {
+        let mut sink = 0u64;
+        for ev in chain.events() {
+            let ev = ev?;
+            for name in &bank_names {
+                if let Some(b) = ev.bank(name) {
+                    sink = sink.wrapping_add(u64::from(b.rows()));
+                }
+            }
+        }
+        Ok(sink)
+    })?;
+
+    Ok(Stats {
+        file_bytes,
+        events,
+        full,
+        select,
+        all,
+        all_bank,
+    })
+}
+
+/// Copy the first `cap` events of `src` into `dst` as `Lz4` — a bounded,
+/// representative subset. (Re-encoding an 8 GB file seven ways would not fit
+/// on disk; capping keeps each variant a few hundred MB.) Reads only as many
+/// records as needed to reach `cap`, so it does not scan the whole file.
+fn cap_copy(src: &Path, dst: &Path, cap: u64) -> Result<()> {
+    let chain = Chain::open(src)?;
+    let dict = chain.schemas().clone();
+    let mut w = Writer::create(dst)
+        .schemas(&dict)
+        .compression(Compression::Lz4)
+        .build()?;
+    for (n, ev) in chain.events().enumerate() {
+        if n as u64 >= cap {
+            break;
+        }
+        w.append_raw(ev?.bytes())?;
+    }
+    w.finish()?;
+    Ok(())
+}
+
+/// Print a one-line `name/letter` schema summary for `bank` if present.
+fn print_schema(chain: &Chain, bank: &str) {
+    if let Some(s) = chain.schemas().get(bank) {
+        let cols: Vec<String> = s
+            .entries()
+            .iter()
+            .map(|e| format!("{}/{}", e.name, e.ty.letter()))
+            .collect();
+        eprintln!("  {bank}: {} cols  [{}]", cols.len(), cols.join(" "));
+    }
+}
+
+fn main() -> Result<()> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let dir = tempfile::tempdir()?;
+    let dpath = dir.path();
+    let base_path = dpath.join("base.hipo");
+    let iters: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
+
+    // `<file.hipo> [iters] [cap]`  → benchmark the first `cap` events of a real file.
+    // `[events] [iters]`           → benchmark synthetic data.
+    match args.first() {
+        Some(a) if Path::new(a).is_file() => {
+            let cap: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(500_000);
+            let total = Chain::open(a)?.event_count();
+            eprintln!(
+                "input: {a}\n  {total} events in file; re-encoding first {} into each format…",
+                cap.min(total)
+            );
+            cap_copy(Path::new(a), &base_path, cap)?;
+        }
+        other => {
+            let n: u64 = other.and_then(|s| s.parse().ok()).unwrap_or(100_000);
+            eprintln!("generating {n} synthetic events…");
+            generate(&base_path, n)?;
+        }
+    }
+
+    let base = Chain::open(&base_path)?;
+    eprintln!(
+        "base: {} events, {} schemas; {iters} timed passes/format (best-of)",
+        base.event_count(),
+        base.schemas().len()
+    );
+    print_schema(&base, "REC::Particle");
+    print_schema(&base, "REC::Event");
+    eprintln!();
+
+    let variants: [(&str, Compression); 7] = [
+        ("None", Compression::None),
+        ("Lz4", Compression::Lz4),
+        ("Lz4Best", Compression::Lz4Best),
+        ("Gzip", Compression::Gzip),
+        (
+            "Lz4Chunked",
+            Compression::Lz4Chunked {
+                events_per_chunk: 32,
+            },
+        ),
+        ("Lz4ByBank", Compression::Lz4ByBank),
+        ("Lz4ByBankV2", Compression::Lz4ByBankV2),
+    ];
+
+    // Re-encode the base into every format.
+    for (name, comp) in &variants {
+        base.skim(dpath.join(format!("{name}.hipo")), *comp)?;
+    }
+
+    println!(
+        "{:<12} {:>8} {:>9} {:>9} {:>12} {:>12} {:>11}",
+        "format", "size MB", "sel ms", "full ms", "all ms", "all ms", "all Mevt/s"
+    );
+    println!(
+        "{:<12} {:>8} {:>9} {:>9} {:>12} {:>12} {:>11}",
+        "", "", "(1)", "(2)", "(struct)", "(ev.bank)", "(ev.bank)"
+    );
+    println!("{}", "-".repeat(78));
+    for (name, _) in &variants {
+        let st = bench_one(&dpath.join(format!("{name}.hipo")), iters)?;
+        let allb_s = st.all_bank.as_secs_f64();
+        println!(
+            "{:<12} {:>8.1} {:>9.1} {:>9.1} {:>12.1} {:>12.1} {:>11.2}",
+            name,
+            st.file_bytes as f64 / 1e6,
+            st.select.as_secs_f64() * 1e3,
+            st.full.as_secs_f64() * 1e3,
+            st.all.as_secs_f64() * 1e3,
+            allb_s * 1e3,
+            st.events as f64 / allb_s / 1e6,
+        );
+    }
+    println!(
+        "\nnote: single-thread, best-of-{iters}, warm cache, ms for the whole 100k pass. Reading ALL\n\
+         banks two ways: 'all (struct)' via ev.structures() (ByBank yields each bank straight from\n\
+         its decompressed stream — no event-blob synthesis); 'all (ev.bank)' via ev.bank(name) per\n\
+         populated bank. The gap between the two ByBank columns is ev.bank's per-bank name lookup."
+    );
+    Ok(())
+}

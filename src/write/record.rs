@@ -46,13 +46,16 @@ pub enum Compression {
     },
     /// Store each bank type as its own LZ4 stream within the record,
     /// plus an event×bank presence table. Readers decompress only the
-    /// bank streams they actually touch.
+    /// bank streams they actually touch. Fast to write (default LZ4); see
+    /// [`Self::Lz4ByBankV2`] for a smaller, slower-to-write variant.
     Lz4ByBank,
-    /// Version 2 of [`Self::Lz4ByBank`]: identical bank streams, but the
-    /// directory is prefixed with an extension-format-version byte and is
-    /// itself LZ4-compressed (the per-event size matrix is highly
-    /// redundant), shrinking the on-disk directory on skim-like data.
-    /// The reader handles both v1 and v2 transparently.
+    /// Version 2 of [`Self::Lz4ByBank`], tuned for the best ratio: each bank
+    /// stream is LZ4-HC compressed — per-bank grouping plus HC compounds to
+    /// beat whole-record [`Self::Lz4Best`] — and the directory is prefixed
+    /// with an extension-format-version byte and itself LZ4-compressed (the
+    /// per-event size matrix is highly redundant). Selective reads stay as
+    /// fast as v1; writes are slower (HC). The reader handles both v1 and v2
+    /// transparently.
     Lz4ByBankV2,
 }
 
@@ -446,7 +449,7 @@ fn build_by_bank_record_bytes(
         presence,
         bytes_per_row,
         sizes,
-    } = build_by_bank_parts(events, compress_buf)?;
+    } = build_by_bank_parts(events, compress_buf, false)?;
 
     // ---- 5. Assemble the payload section. -----------------------------
     let directory_bytes = 8                       // num_banks + event_count
@@ -552,9 +555,14 @@ struct ByBankParts {
 }
 
 /// Steps 1–4 shared by both by-bank builders: walk events into per-bank
-/// tables, sort banks for determinism, LZ4 each bank stream, pack the
-/// presence matrix.
-fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<ByBankParts> {
+/// tables, sort banks for determinism, compress each bank stream, pack the
+/// presence matrix. With `high_compression` the streams are LZ4-HC
+/// (`Lz4ByBankV2`, best ratio); otherwise fast default LZ4 (`Lz4ByBank` v1).
+fn build_by_bank_parts(
+    events: &[&[u8]],
+    compress_buf: &mut Vec<u8>,
+    high_compression: bool,
+) -> Result<ByBankParts> {
     let event_count = events.len() as u32;
     let e_count = events.len();
 
@@ -613,7 +621,16 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
             continue;
         }
         compress_buf.clear();
-        let n = compress(CompressionType::Lz4, stream, compress_buf)?;
+        // `Lz4ByBankV2` HC-compresses each bank stream for a better ratio:
+        // per-bank grouping plus LZ4-HC compounds to beat whole-record
+        // `Lz4Best`. The output is still a plain LZ4 block, so the reader is
+        // unchanged. `Lz4ByBank` (v1) uses fast default LZ4 for quick writes.
+        let stream_codec = if high_compression {
+            CompressionType::Lz4Best
+        } else {
+            CompressionType::Lz4
+        };
+        let n = compress(stream_codec, stream, compress_buf)?;
         compressed_sizes.push(n as u32);
         compressed_streams.push(compress_buf[..n].to_vec());
     }
@@ -694,7 +711,7 @@ fn build_by_bank_v2_record_bytes(
         presence,
         bytes_per_row,
         sizes,
-    } = build_by_bank_parts(events, compress_buf)?;
+    } = build_by_bank_parts(events, compress_buf, true)?;
 
     // ---- Build the directory body (uncompressed). ---------------------
     let dir_len = 4 * num_banks            // descriptors
