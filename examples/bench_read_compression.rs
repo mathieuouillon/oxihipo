@@ -1,15 +1,17 @@
 //! Read-throughput benchmark across every `Compression` variant.
 //!
-//! Re-encodes one identical set of events into each compression format,
-//! then measures **single-thread read speed** scanning each file two ways:
+//! Re-encodes one identical set of events into each compression format, then
+//! measures **single-thread read speed** at growing *scope* — each scope
+//! reads *every value of every column* of that many banks, for every event:
 //!
-//! - **full**: read `REC::Particle` (pid/px/py/pz) + `REC::Event` — the
-//!   "touch the main bank" pattern.
-//! - **select**: read only the narrow `REC::Event` bank, skipping
-//!   `REC::Particle` entirely — this is where `Lz4ByBank`'s partial
-//!   decompression (inflate only the touched bank) should pull ahead, since
-//!   the `Bytes`-backed formats (None/Lz4/Lz4Best/Gzip/Lz4Chunked) inflate
-//!   the whole record regardless of what you read.
+//! - **sel** — `REC::Event` only (1 bank).
+//! - **full** — `REC::Particle` + `REC::Event` (2 banks, all their columns).
+//! - **10 / 20 / 40 bk** — the first 10 / 20 / 40 populated banks.
+//! - **all** — every populated bank (≈ 73 on real CLAS12 data).
+//!
+//! The per-bank / per-column formats decode only the banks — and, for
+//! `Lz4PerColumn`, the columns — each scope names; the `Bytes`-backed formats
+//! (None/Lz4/Lz4Best/Gzip/Lz4Chunked) inflate the whole record regardless.
 //!
 //! Reports best-of-`iters` per pass (min = least noise). Numbers are
 //! single-thread, warm-cache, on the running machine — relative throughput
@@ -19,17 +21,17 @@
 //! # synthetic data (default 100k events, 5 iters):
 //! cargo run --release --example bench_read_compression
 //! cargo run --release --example bench_read_compression -- 200000 7
-//! # or measure a real file:
-//! cargo run --release --example bench_read_compression -- /path/to/rec.hipo 5
+//! # or a real file (first `cap` events, `iters` passes):
+//! cargo run --release --example bench_read_compression -- /path/to/rec.hipo 5 100000
 //! ```
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::env;
 use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use oxihipo::{Chain, Compression, DataType, Dict, Result, Schema, Writer};
+use oxihipo::{Bank, Chain, Compression, DataType, Dict, Result, Schema, Writer};
 
 const PIDS: [i32; 5] = [11, 211, -211, 2212, 22];
 
@@ -126,11 +128,12 @@ fn generate(path: &Path, n_events: u64) -> Result<()> {
 
 struct Stats {
     file_bytes: u64,
-    events: u64,
+    sel: Duration,
     full: Duration,
-    select: Duration,
+    b10: Duration,
+    b20: Duration,
+    b40: Duration,
     all: Duration,
-    all_bank: Duration,
 }
 
 /// Warm up once, then time `iters` passes; return the fastest (min noise).
@@ -147,122 +150,105 @@ fn best_of(iters: usize, mut pass: impl FnMut() -> Result<u64>) -> Result<Durati
     Ok(best)
 }
 
+/// Read (and sum) *every value of every column* of `b` — forces the bank's
+/// columns to decompress. Scalar columns are read whole; array columns
+/// (`length > 1`) are read row-by-row.
+fn read_bank_values(b: &Bank, sink: &mut u64) {
+    for e in b.schema().entries() {
+        let name = &e.name;
+        if e.length == 1 {
+            match e.ty {
+                DataType::Byte => sum(b.col::<i8>(name).ok(), sink, |v| v as u64),
+                DataType::Short => sum(b.col::<i16>(name).ok(), sink, |v| v as u64),
+                DataType::Int => sum(b.col::<i32>(name).ok(), sink, |v| v as u64),
+                DataType::Long => sum(b.col::<i64>(name).ok(), sink, |v| v as u64),
+                DataType::Float => sum(b.col::<f32>(name).ok(), sink, |v| v.to_bits() as u64),
+                DataType::Double => sum(b.col::<f64>(name).ok(), sink, |v| v.to_bits()),
+            }
+        } else {
+            for r in 0..b.rows() {
+                match e.ty {
+                    DataType::Byte => sum(b.array_at::<i8>(name, r).ok(), sink, |v| v as u64),
+                    DataType::Short => sum(b.array_at::<i16>(name, r).ok(), sink, |v| v as u64),
+                    DataType::Int => sum(b.array_at::<i32>(name, r).ok(), sink, |v| v as u64),
+                    DataType::Long => sum(b.array_at::<i64>(name, r).ok(), sink, |v| v as u64),
+                    DataType::Float => sum(b.array_at::<f32>(name, r).ok(), sink, |v| {
+                        v.to_bits() as u64
+                    }),
+                    DataType::Double => sum(b.array_at::<f64>(name, r).ok(), sink, |v| v.to_bits()),
+                }
+            }
+        }
+    }
+}
+
+/// Fold a column/array slice into `sink` with a per-element projection.
+fn sum<T: Copy>(vals: Option<std::borrow::Cow<'_, [T]>>, sink: &mut u64, f: impl Fn(T) -> u64) {
+    if let Some(c) = vals {
+        for &v in &*c {
+            *sink = sink.wrapping_add(f(v));
+        }
+    }
+}
+
+/// Best-of `iters` timing of reading every value of every bank in `names`,
+/// for every event in the chain.
+fn bench_banks(chain: &Chain, iters: usize, names: &[String]) -> Result<Duration> {
+    best_of(iters, || {
+        let mut sink = 0u64;
+        for ev in chain.events() {
+            let ev = ev?;
+            for name in names {
+                if let Some(b) = ev.bank(name) {
+                    read_bank_values(&b, &mut sink);
+                }
+            }
+        }
+        Ok(sink)
+    })
+}
+
 fn bench_one(path: &Path, iters: usize) -> Result<Stats> {
     let chain = Chain::open(path)?;
-    let events = chain.event_count();
     let file_bytes = std::fs::metadata(path)?.len();
 
-    // Pre-resolve REC::Particle column handles (pid/px/py/pz are Int/Float
-    // in every CLAS12 reconstruction dictionary) — the hot-loop read path.
-    let part = chain.schemas().require("REC::Particle")?;
-    let h_pid = part.handle::<i32>("pid")?;
-    let h_px = part.handle::<f32>("px")?;
-    let h_py = part.handle::<f32>("py")?;
-    let h_pz = part.handle::<f32>("pz")?;
-
-    // Populated bank names (sampled once, untimed) — the "read every bank"
-    // mode probes these via ev.bank(name), which avoids the per-event blob
-    // that ev.bytes() builds on the ByBank path.
+    // Populated bank names, sorted (deterministic), sampled from the first
+    // events (untimed). The 10/20/40-bank scopes are the first N of this list.
     let bank_names: Vec<String> = {
-        let id2name: HashMap<u32, String> = chain
-            .schemas()
-            .iter()
-            .map(|s| {
-                (
-                    (u32::from(s.group()) << 8) | u32::from(s.item()),
-                    s.name().to_string(),
-                )
-            })
-            .collect();
         let mut set = BTreeSet::new();
         for ev in chain.events().take(8000) {
             let ev = ev?;
-            for (h, _) in ev.structures() {
-                if let Some(n) = id2name.get(&((u32::from(h.group) << 8) | u32::from(h.item))) {
-                    set.insert(n.clone());
+            for s in chain.schemas().iter() {
+                if ev.has(s.name()) {
+                    set.insert(s.name().to_string());
                 }
             }
         }
         set.into_iter().collect()
     };
+    let take = |k: usize| bank_names[..k.min(bank_names.len())].to_vec();
 
-    // full: read REC::Particle (pid/px/py/pz) and touch REC::Event — the
-    // "decode the main bank" pattern.
-    let full = best_of(iters, || {
-        let mut sink = 0u64;
-        for ev in chain.events() {
-            let ev = ev?;
-            if let Some(p) = ev.bank("REC::Particle") {
-                let (pid, px, py, pz) = (p.read(h_pid), p.read(h_px), p.read(h_py), p.read(h_pz));
-                for i in 0..pid.len() {
-                    sink = sink
-                        .wrapping_add(pid[i] as u64)
-                        .wrapping_add(px[i].to_bits() as u64)
-                        .wrapping_add(py[i].to_bits() as u64)
-                        .wrapping_add(pz[i].to_bits() as u64);
-                }
-            }
-            if let Some(e) = ev.bank("REC::Event") {
-                sink = sink.wrapping_add(u64::from(e.rows()));
-            }
-        }
-        Ok(sink)
-    })?;
-
-    // select: touch ONLY the narrow REC::Event bank (skip REC::Particle).
-    // On ByBank this inflates only REC::Event's stream; the Bytes formats
-    // inflated the whole record up front, so they can't skip the work.
-    let select = best_of(iters, || {
-        let mut sink = 0u64;
-        for ev in chain.events() {
-            let ev = ev?;
-            if let Some(e) = ev.bank("REC::Event") {
-                sink = sink.wrapping_add(u64::from(e.rows()));
-            }
-        }
-        Ok(sink)
-    })?;
-
-    // all: touch EVERY populated bank in the event (walk all structures). On
-    // ByBank this inflates every bank stream and gathers each event's banks
-    // straight from them (no blob synthesis) — the case where its
-    // partial-decompression advantage disappears and per-bank overhead shows;
-    // the Bytes formats already inflated the whole record up front.
-    let all = best_of(iters, || {
-        let mut sink = 0u64;
-        for ev in chain.events() {
-            let ev = ev?;
-            for (_, data) in ev.structures() {
-                sink = sink.wrapping_add(data.len() as u64);
-            }
-        }
-        Ok(sink)
-    })?;
-
-    // all_bank: read EVERY populated bank via ev.bank(name) — the realistic
-    // "analysis reads all banks" path. On ByBank this inflates every bank
-    // stream once per record (cached); like `all` it builds no event blob, but
-    // it pays a per-bank name lookup that the `all` structure-walk skips.
-    let all_bank = best_of(iters, || {
-        let mut sink = 0u64;
-        for ev in chain.events() {
-            let ev = ev?;
-            for name in &bank_names {
-                if let Some(b) = ev.bank(name) {
-                    sink = sink.wrapping_add(u64::from(b.rows()));
-                }
-            }
-        }
-        Ok(sink)
-    })?;
+    // Read scope grows: 1 bank → 2 banks → 10 → 20 → 40 → all. Each reads
+    // *every value of every column* of the named banks, for every event.
+    let sel = bench_banks(&chain, iters, &["REC::Event".to_string()])?;
+    let full = bench_banks(
+        &chain,
+        iters,
+        &["REC::Particle".to_string(), "REC::Event".to_string()],
+    )?;
+    let b10 = bench_banks(&chain, iters, &take(10))?;
+    let b20 = bench_banks(&chain, iters, &take(20))?;
+    let b40 = bench_banks(&chain, iters, &take(40))?;
+    let all = bench_banks(&chain, iters, &bank_names)?;
 
     Ok(Stats {
         file_bytes,
-        events,
+        sel,
         full,
-        select,
+        b10,
+        b20,
+        b40,
         all,
-        all_bank,
     })
 }
 
@@ -357,33 +343,31 @@ fn main() -> Result<()> {
     }
 
     println!(
-        "{:<12} {:>8} {:>9} {:>9} {:>12} {:>12} {:>11}",
-        "format", "size MB", "sel ms", "full ms", "all ms", "all ms", "all Mevt/s"
+        "{:<12} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "format", "size MB", "sel", "full", "10 bk", "20 bk", "40 bk", "all"
     );
-    println!(
-        "{:<12} {:>8} {:>9} {:>9} {:>12} {:>12} {:>11}",
-        "", "", "(1)", "(2)", "(struct)", "(ev.bank)", "(ev.bank)"
-    );
-    println!("{}", "-".repeat(78));
+    println!("{}", "-".repeat(76));
     for (name, _) in &variants {
         let st = bench_one(&dpath.join(format!("{name}.hipo")), iters)?;
-        let allb_s = st.all_bank.as_secs_f64();
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
         println!(
-            "{:<12} {:>8.1} {:>9.1} {:>9.1} {:>12.1} {:>12.1} {:>11.2}",
+            "{:<12} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1}",
             name,
             st.file_bytes as f64 / 1e6,
-            st.select.as_secs_f64() * 1e3,
-            st.full.as_secs_f64() * 1e3,
-            st.all.as_secs_f64() * 1e3,
-            allb_s * 1e3,
-            st.events as f64 / allb_s / 1e6,
+            ms(st.sel),
+            ms(st.full),
+            ms(st.b10),
+            ms(st.b20),
+            ms(st.b40),
+            ms(st.all),
         );
     }
     println!(
-        "\nnote: single-thread, best-of-{iters}, warm cache, ms for the whole 100k pass. Reading ALL\n\
-         banks two ways: 'all (struct)' via ev.structures() (ByBank yields each bank straight from\n\
-         its decompressed stream — no event-blob synthesis); 'all (ev.bank)' via ev.bank(name) per\n\
-         populated bank. The gap between the two ByBank columns is ev.bank's per-bank name lookup."
+        "\nnote: single-thread, best-of-{iters}, warm cache; ms to read *every value of every\n\
+         column* of that many banks, for every event. sel = REC::Event (1 bank); full =\n\
+         REC::Particle + REC::Event (2, all their columns); then the first 10 / 20 / 40 populated\n\
+         banks; then all of them. Per-bank/column formats pay only for banks/columns touched;\n\
+         whole-record formats inflate the whole record regardless of scope."
     );
     Ok(())
 }
