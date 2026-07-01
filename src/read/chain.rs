@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use crate::error::{HipoError, Result};
+use crate::event::bank::Bank;
 use crate::event::{Event, EventCtx, OwnedEvent};
 use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
@@ -27,6 +28,7 @@ use crate::read::iter::EventIter;
 use crate::read::source::IntoSources;
 use crate::schema::Dict;
 use crate::wire::by_bank::ByBankRecord;
+use crate::wire::per_column::PerColumnRecord;
 use crate::wire::record::{Record, decode_record_into};
 use crate::write::{Compression, WriteSummary, Writer};
 
@@ -263,6 +265,17 @@ impl Chain {
                 Arc::clone(&self.dict),
             ));
         }
+        if header.compression.is_per_column() {
+            let per_column = PerColumnRecord::parse(&raw).ok()?;
+            if ev_local >= per_column.event_count() {
+                return None;
+            }
+            return Some(OwnedEvent::per_column(
+                per_column,
+                ev_local,
+                Arc::clone(&self.dict),
+            ));
+        }
         let mut payload = Vec::new();
         let mut offsets = Vec::new();
         let decoded = decode_record_into(&raw, &mut payload, &mut offsets)
@@ -278,6 +291,100 @@ impl Chain {
             end,
             Arc::clone(&self.dict),
         ))
+    }
+
+    // ---- Column-major scan -----------------------------------------------
+
+    /// Visit every value of `bank`.`column` across the whole chain, as
+    /// contiguous chunks of `T` — the *column-major* full read.
+    ///
+    /// - For `Lz4PerColumn` inputs this decompresses only that one column's
+    ///   stream per record and hands you **all its values at once** — no
+    ///   per-event work and no whole-event reassembly. It is the fastest way
+    ///   to sweep a single column across a file (histogramming, column
+    ///   statistics) and sidesteps the row-major [`OwnedEvent::structures`]
+    ///   reassembly cost entirely.
+    /// - For any other format it falls back to reading the column per event.
+    ///
+    /// `visit` is called one or more times with chunks of values; chunk
+    /// boundaries are unspecified (per-record for `Lz4PerColumn`, per-event
+    /// otherwise), so use it for order-independent work. Errors if
+    /// `bank`/`column` is absent from the dictionary or `T` doesn't match
+    /// the column's wire type and per-row length.
+    pub fn for_each_column<T, F>(&self, bank: &str, column: &str, mut visit: F) -> Result<()>
+    where
+        T: crate::schema::BankColumnType,
+        F: FnMut(&[T]),
+    {
+        let schema = self.dict.require(bank)?;
+        // Validates the element type *and* per-row length against the column.
+        let handle = schema.handle::<T>(column)?;
+        let col_idx = handle.column_index();
+        let (group, item) = (schema.group(), schema.item());
+        let elem = std::mem::size_of::<T>();
+
+        let mut raw = Vec::new();
+        let mut payload = Vec::new();
+        let mut offsets = Vec::new();
+        let mut scratch: Vec<T> = Vec::new();
+        for inner in &self.files {
+            for span in inner.index.records() {
+                let header = inner.read_record_into(span.file_offset, &mut raw)?;
+                if header.compression.is_per_column() {
+                    let rec = PerColumnRecord::parse(&raw)?;
+                    let Some(b) = rec.bank_index(group, item) else {
+                        continue;
+                    };
+                    if rec.is_opaque(b) {
+                        // Opaque bank: read the column per event out of the
+                        // whole-bank stream.
+                        let stream = rec.column_stream(b, 0)?;
+                        for e in 0..rec.event_count() {
+                            if rec.has(e, b) {
+                                let r = rec.bank_byte_range(e, b);
+                                if let Ok(bk) = Bank::new(schema, &stream[r]) {
+                                    visit(&bk.read(handle));
+                                }
+                            }
+                        }
+                    } else if (col_idx as u16) < rec.num_columns(b) {
+                        // Columnar: the whole column, all events, in one slice.
+                        let stream = rec.column_stream(b, col_idx as u16)?;
+                        if elem > 0 && stream.len() >= elem {
+                            let n = stream.len() / elem;
+                            let bytes = &stream[..n * elem];
+                            match bytemuck::try_cast_slice::<u8, T>(bytes) {
+                                Ok(s) => visit(s),
+                                Err(_) => {
+                                    scratch.clear();
+                                    scratch.extend((0..n).map(|i| {
+                                        bytemuck::pod_read_unaligned::<T>(
+                                            &bytes[i * elem..i * elem + elem],
+                                        )
+                                    }));
+                                    visit(&scratch);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // Fallback (Bytes / ByBank / chunked): decode + per-event read.
+                payload.clear();
+                offsets.clear();
+                let decoded = decode_record_into(&raw, &mut payload, &mut offsets)?;
+                for w in offsets.windows(2) {
+                    let s = (decoded.data_start + w[0]) as usize;
+                    let e = (decoded.data_start + w[1]) as usize;
+                    if let Some((_, data)) = Event::new(&payload[s..e]).find(group, item)
+                        && let Ok(bk) = Bank::new(schema, data)
+                    {
+                        visit(&bk.read(handle));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     // ---- Skim ------------------------------------------------------------
@@ -524,6 +631,20 @@ where
                 continue;
             }
             f(&EventCtx::new_by_bank(&by_bank, ev_idx, &inner.dict));
+            local_out += 1;
+        }
+    } else if header.compression.is_per_column() {
+        // Lazy per-column decompression — `f` only inflates columns it reads.
+        let per_column = PerColumnRecord::parse(read_buf)?;
+        for ev_idx in 0..per_column.event_count() {
+            local_in += 1;
+            if filter_active
+                && let Some(filt) = filter
+                && !filt.check_per_column(&per_column, ev_idx)
+            {
+                continue;
+            }
+            f(&EventCtx::new_per_column(&per_column, ev_idx, &inner.dict));
             local_out += 1;
         }
     } else {

@@ -24,6 +24,7 @@ use crate::event::event::Event;
 use crate::event::owned::OwnedEvent;
 use crate::schema::{Dict, Schema};
 use crate::wire::by_bank::ByBankRecord;
+use crate::wire::per_column::PerColumnRecord;
 
 /// Borrowed event view + reference to the file's schema dictionary.
 #[derive(Debug, Clone)]
@@ -42,6 +43,10 @@ enum Backend<'a> {
     Bytes(Event<'a>),
     ByBank {
         record: &'a Arc<ByBankRecord>,
+        event_idx: u32,
+    },
+    PerColumn {
+        record: &'a Arc<PerColumnRecord>,
         event_idx: u32,
     },
 }
@@ -73,6 +78,20 @@ impl<'a> EventCtx<'a> {
         }
     }
 
+    /// Construct over an `Lz4PerColumn` record + an event index. Column
+    /// streams stay compressed until a column is actually read.
+    pub(crate) fn new_per_column(
+        record: &'a Arc<PerColumnRecord>,
+        event_idx: u32,
+        dict: &'a Dict,
+    ) -> Self {
+        Self {
+            backend: Backend::PerColumn { record, event_idx },
+            dict,
+            cache: Cell::new(None),
+        }
+    }
+
     /// The underlying borrowed event bytes.
     ///
     /// Returns an empty `Event<'a>` for `Lz4ByBank` backends — those
@@ -82,7 +101,7 @@ impl<'a> EventCtx<'a> {
     pub fn event(&self) -> Event<'a> {
         match self.backend {
             Backend::Bytes(e) => e,
-            Backend::ByBank { .. } => Event::new(&[]),
+            Backend::ByBank { .. } | Backend::PerColumn { .. } => Event::new(&[]),
         }
     }
 
@@ -95,7 +114,7 @@ impl<'a> EventCtx<'a> {
     pub fn raw(&self) -> &'a [u8] {
         match self.backend {
             Backend::Bytes(e) => e.raw(),
-            Backend::ByBank { .. } => &[],
+            Backend::ByBank { .. } | Backend::PerColumn { .. } => &[],
         }
     }
 
@@ -103,6 +122,7 @@ impl<'a> EventCtx<'a> {
         match self.backend {
             Backend::Bytes(e) => e.tag(),
             Backend::ByBank { record, event_idx } => record.event_tag(event_idx),
+            Backend::PerColumn { record, event_idx } => record.event_tag(event_idx),
         }
     }
 
@@ -111,6 +131,16 @@ impl<'a> EventCtx<'a> {
             Backend::Bytes(e) => e.size(),
             Backend::ByBank { record, event_idx } => {
                 // Synthetic size: EventHeader + bank structures present.
+                let mut total = crate::wire::constants::EVENT_HEADER_SIZE as u32;
+                for b in 0..record.num_banks() as u32 {
+                    if record.has(event_idx, b) {
+                        total += crate::wire::constants::BANK_STRUCTURE_SIZE as u32
+                            + record.bank_size(event_idx, b);
+                    }
+                }
+                total
+            }
+            Backend::PerColumn { record, event_idx } => {
                 let mut total = crate::wire::constants::EVENT_HEADER_SIZE as u32;
                 for b in 0..record.num_banks() as u32 {
                     if record.has(event_idx, b) {
@@ -159,6 +189,20 @@ impl<'a> EventCtx<'a> {
                 let stream = record.bank_stream(bank_idx).ok()?;
                 let range = record.bank_byte_range(event_idx, bank_idx);
                 Bank::new(schema, &stream[range]).ok()
+            }
+            Backend::PerColumn { record, event_idx } => {
+                let bank_idx = record.bank_index(schema.group(), schema.item())?;
+                if !record.has(event_idx, bank_idx) {
+                    return None;
+                }
+                if record.is_opaque(bank_idx) {
+                    // Opaque bank: one whole-bank stream, served contiguously.
+                    let stream = record.column_stream(bank_idx, 0).ok()?;
+                    let range = record.bank_byte_range(event_idx, bank_idx);
+                    Bank::new(schema, &stream[range]).ok()
+                } else {
+                    Some(Bank::new_per_column(schema, record, bank_idx, event_idx))
+                }
             }
         }
     }
@@ -247,22 +291,31 @@ impl<'a> EventCtx<'a> {
                 };
                 record.has(event_idx, bank_idx)
             }
+            Backend::PerColumn { record, event_idx } => {
+                let Some(bank_idx) = record.bank_index(schema.group(), schema.item()) else {
+                    return false;
+                };
+                record.has(event_idx, bank_idx)
+            }
         }
     }
 
     /// Iterate structure headers + payloads — for tools like `dump` and
     /// `stats`, and for any "touch every bank" pass.
     ///
-    /// Works for **both** backends: `Lz4ByBank` events gather their banks
-    /// straight from the per-bank decompressed (lazily cached) streams
-    /// with no event-blob synthesis, so this is the cheap way to read
-    /// every bank of a ByBank event.
+    /// Works for the `Bytes` and `Lz4ByBank` backends: `Lz4ByBank` events
+    /// gather their banks straight from the per-bank decompressed (lazily
+    /// cached) streams with no event-blob synthesis. **Empty for
+    /// `Lz4PerColumn`** — those carry no contiguous bytes here; use
+    /// [`OwnedEvent::structures`], which reassembles each bank from its
+    /// columns lazily.
     pub fn structures(&self) -> crate::event::event::StructureIter<'a> {
         match self.backend {
             Backend::Bytes(e) => e.iter_structures(),
             Backend::ByBank { record, event_idx } => {
                 crate::event::event::StructureIter::new_by_bank(record, event_idx)
             }
+            Backend::PerColumn { .. } => Event::new(&[]).iter_structures(),
         }
     }
 
@@ -280,7 +333,7 @@ impl<'a> EventCtx<'a> {
     pub(crate) fn composite_by_id(&self, group: u16, item: u8) -> Option<Composite<'a>> {
         let event = match self.backend {
             Backend::Bytes(e) => e,
-            Backend::ByBank { .. } => return None,
+            Backend::ByBank { .. } | Backend::PerColumn { .. } => return None,
         };
         for (pos, hdr, data) in event.iter_structures_with_offset() {
             if hdr.group == group && hdr.item == item && hdr.header_size > 0 {
@@ -306,6 +359,9 @@ impl<'a> EventCtx<'a> {
             Backend::Bytes(e) => OwnedEvent::new(e.raw().to_vec(), dict),
             Backend::ByBank { record, event_idx } => {
                 OwnedEvent::by_bank(Arc::clone(record), event_idx, dict)
+            }
+            Backend::PerColumn { record, event_idx } => {
+                OwnedEvent::per_column(Arc::clone(record), event_idx, dict)
             }
         }
     }

@@ -46,6 +46,7 @@ use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
 use crate::schema::Dict;
 use crate::wire::by_bank::ByBankRecord;
+use crate::wire::per_column::PerColumnRecord;
 use crate::wire::record::decode_record_into;
 
 pub struct EventIter {
@@ -95,6 +96,10 @@ enum CurrentRecord {
         /// `event_count` for the by-bank record (cached locally).
         event_count: u32,
     },
+    PerColumn {
+        record: Arc<PerColumnRecord>,
+        event_count: u32,
+    },
 }
 
 impl CurrentRecord {
@@ -103,6 +108,7 @@ impl CurrentRecord {
             Self::None => 0,
             Self::Bytes { event_offsets, .. } => event_offsets.len().saturating_sub(1) as u32,
             Self::ByBank { event_count, .. } => *event_count,
+            Self::PerColumn { event_count, .. } => *event_count,
         }
     }
 }
@@ -234,6 +240,33 @@ impl EventIter {
                 return Ok(true);
             }
 
+            if header.compression.is_per_column() {
+                // PerColumn: like ByBank, parse the directory eagerly and
+                // leave every column stream compressed until it is read.
+                let prev = std::mem::replace(&mut self.cur, CurrentRecord::None);
+                if let CurrentRecord::Bytes {
+                    payload,
+                    event_offsets,
+                    ..
+                } = prev
+                {
+                    self.offsets_scratch = event_offsets;
+                    self.offsets_scratch.clear();
+                    if let Ok(v) = Arc::try_unwrap(payload) {
+                        self.scratch = v;
+                    }
+                }
+                let per_column = PerColumnRecord::parse(&read_buf)?;
+                self.read_buf = read_buf;
+                let event_count = per_column.event_count();
+                self.cur = CurrentRecord::PerColumn {
+                    record: per_column,
+                    event_count,
+                };
+                self.next_event = 0;
+                return Ok(true);
+            }
+
             // Bytes-backed path. Reclaim the decompression buffers, then
             // decode the streamed record into them.
             let (mut buf, mut event_offsets) = self.take_bytes_buffers();
@@ -305,6 +338,18 @@ impl EventIter {
                         continue;
                     }
                     return Some(Ok(OwnedEvent::by_bank(
+                        Arc::clone(record),
+                        i,
+                        Arc::clone(&self.dict),
+                    )));
+                }
+                CurrentRecord::PerColumn { record, .. } => {
+                    if let Some(filter) = &self.filter
+                        && !filter.check_per_column(record, i)
+                    {
+                        continue;
+                    }
+                    return Some(Ok(OwnedEvent::per_column(
                         Arc::clone(record),
                         i,
                         Arc::clone(&self.dict),

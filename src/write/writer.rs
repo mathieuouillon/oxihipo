@@ -68,6 +68,11 @@ pub struct WriterBuilder {
     path: PathBuf,
     dict: Option<Dict>,
     options: WriterOptions,
+    /// Whether the caller set `max_record_bytes` explicitly. When they
+    /// didn't, [`Self::build`] picks a per-compression default (larger
+    /// records for the column/bank formats — better ratio + amortised
+    /// directory).
+    record_bytes_explicit: bool,
 }
 
 impl WriterBuilder {
@@ -88,6 +93,7 @@ impl WriterBuilder {
 
     pub fn max_record_bytes(mut self, n: usize) -> Self {
         self.options.max_record_bytes = n;
+        self.record_bytes_explicit = true;
         self
     }
 
@@ -95,10 +101,35 @@ impl WriterBuilder {
         let Self {
             path,
             dict,
-            options,
+            mut options,
+            record_bytes_explicit,
         } = self;
+        if !record_bytes_explicit {
+            options.max_record_bytes = default_max_record_bytes(options.compression);
+        }
         let dict = dict.unwrap_or_default();
         Writer::create_inner(path, dict, options)
+    }
+}
+
+/// Uncompressed-payload target that triggers a record flush, chosen per
+/// compression when the caller didn't set one. `Lz4ByBankV2` and
+/// `Lz4PerColumn` use 32 MB.
+///
+/// A record-size sweep on real CLAS12 data (8/16/32/64/128 MB) showed the
+/// tradeoff for `Lz4PerColumn`: **ratio rises monotonically** with size
+/// (2.04× → 2.18×), **`sel`/`full` reads degrade** past ~32 MB (a bigger
+/// stream must inflate to reach one column), and the **whole-event
+/// (`structures`) read is flat** across 8–64 MB — it is reassembly-bound,
+/// not decompress-call-bound, so record size doesn't move it. 128 MB
+/// regresses every read. 32 MB sits at the ratio/read knee; callers who
+/// favour read latency can drop to 16 MB (≈ 2 % larger, marginally faster
+/// `sel`/`full`) or, for maximum ratio, raise it, via
+/// [`WriterBuilder::max_record_bytes`].
+const fn default_max_record_bytes(compression: Compression) -> usize {
+    match compression {
+        Compression::Lz4ByBankV2 | Compression::Lz4PerColumn => 32 * 1024 * 1024,
+        _ => 8 * 1024 * 1024,
     }
 }
 
@@ -153,6 +184,7 @@ impl Writer {
             path: path.as_ref().to_path_buf(),
             dict: None,
             options: WriterOptions::default(),
+            record_bytes_explicit: false,
         }
     }
 
@@ -230,6 +262,7 @@ impl Writer {
         let event_slices: Vec<&[u8]> = self.builder.event_slices().collect();
         let record_bytes = build_record_bytes(
             &event_slices,
+            &self.dict,
             self.builder.user_word_1(),
             self.builder.user_word_2(),
             self.opts.compression,
@@ -412,6 +445,7 @@ fn build_dictionary_record(dict: &Dict) -> Result<Vec<u8>> {
     let mut compress_buf = Vec::new();
     build_record_bytes(
         &event_refs,
+        dict,
         0,
         0,
         Compression::None,
@@ -482,6 +516,7 @@ fn build_trailer_record(entries: &[IndexEntry]) -> Result<Vec<u8>> {
     let mut compress_buf = Vec::new();
     build_record_bytes(
         &[event.as_slice()],
+        &Dict::default(),
         0,
         0,
         Compression::None,

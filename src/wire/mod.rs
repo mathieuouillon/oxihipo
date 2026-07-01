@@ -12,5 +12,6 @@ pub mod bytes;
 pub mod constants;
 pub mod event_index;
 pub mod file_header;
+pub mod per_column;
 pub mod record;
 pub mod record_header;

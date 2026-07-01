@@ -335,7 +335,7 @@ fn main() -> Result<()> {
     print_schema(&base, "REC::Event");
     eprintln!();
 
-    let variants: [(&str, Compression); 7] = [
+    let variants: [(&str, Compression); 8] = [
         ("None", Compression::None),
         ("Lz4", Compression::Lz4),
         ("Lz4Best", Compression::Lz4Best),
@@ -348,6 +348,7 @@ fn main() -> Result<()> {
         ),
         ("Lz4ByBank", Compression::Lz4ByBank),
         ("Lz4ByBankV2", Compression::Lz4ByBankV2),
+        ("Lz4PerColumn", Compression::Lz4PerColumn),
     ];
 
     // Re-encode the base into every format.

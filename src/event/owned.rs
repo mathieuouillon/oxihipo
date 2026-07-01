@@ -26,6 +26,7 @@ use crate::event::event::{Event, StructureIter};
 use crate::schema::{Dict, Schema};
 use crate::wire::by_bank::ByBankRecord;
 use crate::wire::constants::{BANK_STRUCTURE_SIZE, EH_SIZE, EVENT_HEADER_SIZE};
+use crate::wire::per_column::{BankLayout, PerColumnRecord};
 
 /// An event that owns its byte buffer (via `Arc`) and shares the schema
 /// dictionary. Cloning is two atomic increments.
@@ -60,6 +61,8 @@ enum Loc {
     Bytes { off: u32, len: u32 },
     /// Resolved bank index into the `ByBankRecord` (present this event).
     ByBank { bank_idx: u32 },
+    /// Resolved bank index into the `PerColumnRecord` (present this event).
+    PerColumn { bank_idx: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +77,13 @@ enum Inner {
         event_idx: u32,
         /// Lazy synthetic event-bytes blob — built only if `bytes()` /
         /// `structures()` / similar full-event APIs are called.
+        synth: Arc<std::sync::OnceLock<Vec<u8>>>,
+    },
+    PerColumn {
+        record: Arc<PerColumnRecord>,
+        event_idx: u32,
+        /// Lazy synthetic event-bytes blob — built (by reassembling each
+        /// bank from its columns) only if a full-event API is called.
         synth: Arc<std::sync::OnceLock<Vec<u8>>>,
     },
 }
@@ -125,6 +135,25 @@ impl OwnedEvent {
         }
     }
 
+    /// Construct from a shared `Lz4PerColumn` record + an event index.
+    /// Columns decompress lazily on first access.
+    #[inline]
+    pub(crate) fn per_column(
+        record: Arc<PerColumnRecord>,
+        event_idx: u32,
+        dict: Arc<Dict>,
+    ) -> Self {
+        Self {
+            inner: Inner::PerColumn {
+                record,
+                event_idx,
+                synth: Arc::new(std::sync::OnceLock::new()),
+            },
+            dict,
+            bank_cache: Cell::new(None),
+        }
+    }
+
     /// Return the event's serialised bytes (EventHeader + bank
     /// structures). For `Bytes`-backed events this is zero-copy. For
     /// `ByBank`-backed events the bytes are **synthesised on first
@@ -143,6 +172,12 @@ impl OwnedEvent {
                 event_idx,
                 synth,
             } => synth.get_or_init(|| synthesize_event_bytes(record, *event_idx)),
+            Inner::PerColumn {
+                record,
+                event_idx,
+                synth,
+            } => synth
+                .get_or_init(|| synthesize_per_column_event_bytes(record, *event_idx, &self.dict)),
         }
     }
 
@@ -156,25 +191,31 @@ impl OwnedEvent {
             Inner::ByBank {
                 record, event_idx, ..
             } => record.event_tag(*event_idx),
+            Inner::PerColumn {
+                record, event_idx, ..
+            } => record.event_tag(*event_idx),
         }
     }
 
     pub fn size(&self) -> u32 {
         match &self.inner {
             Inner::Bytes { start, end, .. } => end - start,
-            Inner::ByBank { .. } => self.bytes().len() as u32,
+            Inner::ByBank { .. } | Inner::PerColumn { .. } => self.bytes().len() as u32,
         }
     }
 
-    /// Borrow as an `EventCtx<'_>`. For `ByBank` events this is **O(1)**
-    /// — the returned `EventCtx` carries the same lazy bank cache and
-    /// `ctx.bank(name)` will only decompress the requested bank.
+    /// Borrow as an `EventCtx<'_>`. For `ByBank` / `PerColumn` events this
+    /// is **O(1)** — the returned `EventCtx` carries the same lazy cache
+    /// and only decompresses what `ctx.bank(name)` / a column read touches.
     pub fn ctx(&self) -> EventCtx<'_> {
         match &self.inner {
             Inner::Bytes { .. } => EventCtx::new(self.as_event(), &self.dict),
             Inner::ByBank {
                 record, event_idx, ..
             } => EventCtx::new_by_bank(record, *event_idx, &self.dict),
+            Inner::PerColumn {
+                record, event_idx, ..
+            } => EventCtx::new_per_column(record, *event_idx, &self.dict),
         }
     }
 
@@ -236,6 +277,28 @@ impl OwnedEvent {
                 }));
                 Some(bank)
             }
+            Inner::PerColumn {
+                record, event_idx, ..
+            } => {
+                let bank_idx = record.bank_index(g, i)?;
+                if !record.has(*event_idx, bank_idx) {
+                    return None;
+                }
+                let bank = if record.is_opaque(bank_idx) {
+                    let stream = record.column_stream(bank_idx, 0).ok()?;
+                    let range = record.bank_byte_range(*event_idx, bank_idx);
+                    Bank::new(schema, &stream[range]).ok()?
+                } else {
+                    Bank::new_per_column(schema, record, bank_idx, *event_idx)
+                };
+                self.bank_cache.set(Some(CachedBank {
+                    group: g,
+                    item: i,
+                    loc: Loc::PerColumn { bank_idx },
+                    col: u16::MAX,
+                }));
+                Some(bank)
+            }
         }
     }
 
@@ -270,6 +333,12 @@ impl OwnedEvent {
                 let range = record.bank_byte_range(*event_idx, bank_idx);
                 Bank::new(schema, &stream[range]).ok()
             }
+            (
+                Inner::PerColumn {
+                    record, event_idx, ..
+                },
+                Loc::PerColumn { bank_idx },
+            ) => per_column_bank(record, schema, bank_idx, *event_idx),
             // Inner/Loc kind mismatch can't happen (one event, one backend).
             _ => None,
         }
@@ -290,6 +359,15 @@ impl OwnedEvent {
                 let stream = record.bank_stream(bank_idx).ok()?;
                 let range = record.bank_byte_range(*event_idx, bank_idx);
                 Bank::new(schema, &stream[range]).ok()
+            }
+            Inner::PerColumn {
+                record, event_idx, ..
+            } => {
+                let bank_idx = record.bank_index(schema.group(), schema.item())?;
+                if !record.has(*event_idx, bank_idx) {
+                    return None;
+                }
+                per_column_bank(record, schema, bank_idx, *event_idx)
             }
         }
     }
@@ -365,14 +443,27 @@ impl OwnedEvent {
                 };
                 record.has(*event_idx, bank_idx)
             }
+            Inner::PerColumn {
+                record, event_idx, ..
+            } => {
+                let Some(bank_idx) = record.bank_index(schema.group(), schema.item()) else {
+                    return false;
+                };
+                record.has(*event_idx, bank_idx)
+            }
         }
     }
 
-    /// Iterate structure headers + payloads. For `ByBank` events the
-    /// banks are gathered straight from their decompressed (lazily
-    /// cached) streams — no event-blob synthesis. See [`StructureIter`].
+    /// Iterate structure headers + payloads. For `ByBank` events the banks
+    /// are gathered straight from their decompressed (lazily cached)
+    /// streams — no event-blob synthesis. For `PerColumn` events each
+    /// bank is reassembled from its columns via a one-time synthesised
+    /// blob (cached), so this is the whole-event ("touch everything") path.
     pub fn structures(&self) -> StructureIter<'_> {
-        self.ctx().structures()
+        match &self.inner {
+            Inner::PerColumn { .. } => Event::new(self.bytes()).iter_structures(),
+            _ => self.ctx().structures(),
+        }
     }
 
     /// Decode a composite structure by name.
@@ -474,6 +565,138 @@ fn synthesize_event_bytes(record: &ByBankRecord, event_idx: u32) -> Vec<u8> {
     let total = out.len() as u32;
     crate::wire::bytes::write_u32_le(&mut out, EH_SIZE, total);
     out
+}
+
+/// Build a [`Bank`] for one event of a per-column record. Opaque banks are
+/// served contiguously from their single stream; columnar banks get a
+/// per-column view that decompresses each column on first read.
+fn per_column_bank<'a>(
+    record: &'a PerColumnRecord,
+    schema: &'a Schema,
+    bank_idx: u32,
+    event_idx: u32,
+) -> Option<Bank<'a>> {
+    if record.is_opaque(bank_idx) {
+        let stream = record.column_stream(bank_idx, 0).ok()?;
+        let range = record.bank_byte_range(event_idx, bank_idx);
+        Bank::new(schema, stream.get(range)?).ok()
+    } else {
+        Some(Bank::new_per_column(schema, record, bank_idx, event_idx))
+    }
+}
+
+/// Reassemble one event of an `Lz4PerColumn` record into a canonical
+/// EventHeader + BankStructure blob — the per-column analogue of
+/// [`synthesize_event_bytes`]. Columnar banks are rebuilt column-major
+/// from their separate streams; opaque banks are copied from their single
+/// stream. Used only by full-event APIs (`bytes()` / `structures()`).
+fn synthesize_per_column_event_bytes(
+    record: &PerColumnRecord,
+    event_idx: u32,
+    dict: &Dict,
+) -> Vec<u8> {
+    // Resolve every bank's column geometry once per record (cached on the
+    // shared `PerColumnRecord`), so a full-record pass doesn't re-hash the
+    // dict for each bank of each event.
+    let layouts = record.column_layout(|| build_per_column_layouts(record, dict));
+
+    let mut total = EVENT_HEADER_SIZE;
+    for b in 0..record.num_banks() as u32 {
+        if record.has(event_idx, b) {
+            total += BANK_STRUCTURE_SIZE + record.bank_size(event_idx, b) as usize;
+        }
+    }
+    let mut out = vec![0u8; EVENT_HEADER_SIZE];
+    out[0..4].copy_from_slice(b"EVNT");
+    crate::wire::bytes::write_u32_le(
+        &mut out,
+        crate::wire::constants::EH_TAG,
+        record.event_tag(event_idx),
+    );
+    out.reserve(total - EVENT_HEADER_SIZE);
+    for b in 0..record.num_banks() as u32 {
+        if !record.has(event_idx, b) {
+            continue;
+        }
+        let (group, item, data_type) = record.descriptor(b);
+        let size = record.bank_size(event_idx, b);
+        out.extend_from_slice(&group.to_le_bytes());
+        out.push(item);
+        out.push(data_type);
+        out.extend_from_slice(&size.to_le_bytes());
+        if size == 0 {
+            continue;
+        }
+        // Reserve the data region (zero-filled) and fill it in place, so a
+        // decompression error or dict mismatch leaves zeros rather than a
+        // length-inconsistent event.
+        let data_start = out.len();
+        out.resize(data_start + size as usize, 0);
+        if record.is_opaque(b) {
+            if let Ok(stream) = record.column_stream(b, 0)
+                && let Some(d) = stream.get(record.bank_byte_range(event_idx, b))
+            {
+                out[data_start..data_start + d.len()].copy_from_slice(d);
+            }
+            continue;
+        }
+        let layout = &layouts[b as usize];
+        if layout.cols.is_empty() {
+            continue;
+        }
+        let row_size = layout.row_size.max(1) as usize;
+        let rows = size as usize / row_size;
+        let cum_rows = record.bank_byte_offset(event_idx, b) as usize / row_size;
+        for (c, &(row_offset, col_width)) in layout.cols.iter().enumerate() {
+            let col_width = col_width as usize;
+            let col_len = rows * col_width;
+            if col_len == 0 {
+                continue;
+            }
+            let s = cum_rows * col_width;
+            if let Ok(stream) = record.column_stream(b, c as u16)
+                && let Some(src) = stream.get(s..s + col_len)
+            {
+                let dst = data_start + rows * row_offset as usize;
+                out[dst..dst + col_len].copy_from_slice(src);
+            }
+        }
+    }
+    let final_len = out.len() as u32;
+    crate::wire::bytes::write_u32_le(&mut out, EH_SIZE, final_len);
+    out
+}
+
+/// Resolve each bank's column geometry `(row_size, [(row_offset, width)])`
+/// from the dict — invoked once per record by
+/// [`PerColumnRecord::column_layout`]. Opaque / schema-less banks get an
+/// empty layout.
+fn build_per_column_layouts(record: &PerColumnRecord, dict: &Dict) -> Vec<BankLayout> {
+    (0..record.num_banks() as u32)
+        .map(|b| {
+            if record.is_opaque(b) {
+                return BankLayout {
+                    row_size: 0,
+                    cols: Vec::new(),
+                };
+            }
+            let (g, i, _) = record.descriptor(b);
+            match dict.get_by_id(g, i) {
+                Some(s) => BankLayout {
+                    row_size: s.row_size(),
+                    cols: s
+                        .entries()
+                        .iter()
+                        .map(|e| (e.row_offset, e.ty.size() as u32 * e.length))
+                        .collect(),
+                },
+                None => BankLayout {
+                    row_size: 0,
+                    cols: Vec::new(),
+                },
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

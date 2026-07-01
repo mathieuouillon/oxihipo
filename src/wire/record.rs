@@ -623,6 +623,7 @@ mod tests {
         let mut compress_buf = Vec::new();
         let raw = crate::write::record::build_record_bytes(
             &refs,
+            &crate::schema::Dict::default(),
             0,
             0,
             crate::write::Compression::Lz4Chunked {
@@ -676,6 +677,7 @@ mod tests {
         let mut compress_buf = Vec::new();
         let raw = crate::write::record::build_record_bytes(
             &refs,
+            &crate::schema::Dict::default(),
             0,
             0,
             crate::write::Compression::Lz4Chunked {

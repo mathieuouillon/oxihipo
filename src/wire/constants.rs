@@ -142,6 +142,13 @@ pub enum CompressionType {
     /// directory. Bank streams are unchanged. Layout in `wire/by_bank.rs`.
     /// **Not readable by the C++ `hipo4` reader.**
     Lz4ByBankV2 = 6,
+    /// Per-*column* layout: one LZ4-HC stream per `(bank, column)`, laid
+    /// out cross-event contiguous (all events' `px`, then all `py`, …).
+    /// Reading one column inflates only that column's stream; homogeneous
+    /// columns also compress better than a bank's interleaved bytes.
+    /// Layout in `wire/per_column.rs`. **Not readable by the C++ `hipo4`
+    /// reader.**
+    Lz4PerColumn = 7,
 }
 
 impl CompressionType {
@@ -154,6 +161,7 @@ impl CompressionType {
             4 => Some(Self::Lz4Chunked),
             5 => Some(Self::Lz4ByBank),
             6 => Some(Self::Lz4ByBankV2),
+            7 => Some(Self::Lz4PerColumn),
             _ => None,
         }
     }
@@ -162,5 +170,11 @@ impl CompressionType {
     /// reader treats them identically except for directory decoding.
     pub const fn is_by_bank(self) -> bool {
         matches!(self, Self::Lz4ByBank | Self::Lz4ByBankV2)
+    }
+
+    /// True for the per-column format (tag 7), which the reader decodes
+    /// through its own `PerColumnRecord` path.
+    pub const fn is_per_column(self) -> bool {
+        matches!(self, Self::Lz4PerColumn)
     }
 }

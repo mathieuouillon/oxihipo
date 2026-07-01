@@ -130,6 +130,25 @@ impl Filter {
         }
         true
     }
+
+    /// Presence-only filter check against a per-column record — the
+    /// analogue of [`Self::check_by_bank`].
+    #[inline]
+    pub(crate) fn check_per_column(
+        &self,
+        record: &crate::wire::per_column::PerColumnRecord,
+        event_idx: u32,
+    ) -> bool {
+        for &(g, i) in &self.require_ids {
+            let Some(b) = record.bank_index(g, i) else {
+                return false;
+            };
+            if !record.has(event_idx, b) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[cfg(test)]

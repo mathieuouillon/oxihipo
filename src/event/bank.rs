@@ -39,6 +39,7 @@ use std::borrow::Cow;
 
 use crate::error::{HipoError, Result};
 use crate::schema::{BankColumnType, ColumnHandle, Schema};
+use crate::wire::per_column::PerColumnRecord;
 
 /// Cast `bytes` (exactly `count * size_of::<T>()` bytes) to `&[T]`,
 /// borrowing zero-copy when the source is `T`-aligned and falling back to
@@ -63,16 +64,34 @@ fn cast_cells<T: bytemuck::Pod>(bytes: &[u8], count: usize) -> Cow<'_, [T]> {
     }
 }
 
-/// A read-only bank backed by a borrowed byte slice.
+/// Where a bank's column bytes live.
 ///
-/// `Copy` — it's two references plus a row count, so callers (and the
+/// - `Contiguous` — one column-major buffer (the classic path): column
+///   `c` is a slice at `column_byte_offset(c, rows)`.
+/// - `PerColumn` — the `Lz4PerColumn` path: each column is a separate
+///   (lazily decompressed) stream in the record, so reading one column
+///   never touches the others.
+#[derive(Debug, Clone, Copy)]
+enum BankData<'b> {
+    Contiguous(&'b [u8]),
+    PerColumn {
+        record: &'b PerColumnRecord,
+        bank_idx: u32,
+        event_idx: u32,
+    },
+}
+
+/// A read-only bank backed by a borrowed byte slice (or per-column
+/// streams).
+///
+/// `Copy` — a couple of references plus a row count, so callers (and the
 /// per-event bank cache on [`EventCtx`](crate::event::EventCtx)) can pass it
 /// around freely.
 #[derive(Debug, Clone, Copy)]
 pub struct Bank<'b> {
     schema: &'b Schema,
-    /// The bank's data section (excluding the 8-byte structure header).
-    data: &'b [u8],
+    /// Where the bank's column bytes live.
+    data: BankData<'b>,
     rows: u32,
 }
 
@@ -84,7 +103,7 @@ impl<'b> Bank<'b> {
         if row_size == 0 {
             return Ok(Self {
                 schema,
-                data,
+                data: BankData::Contiguous(data),
                 rows: 0,
             });
         }
@@ -95,7 +114,11 @@ impl<'b> Bank<'b> {
             });
         }
         let rows = (data.len() as u32) / row_size;
-        Ok(Self { schema, data, rows })
+        Ok(Self {
+            schema,
+            data: BankData::Contiguous(data),
+            rows,
+        })
     }
 
     /// Construct without checking `data.len()` divisibility — useful when
@@ -106,7 +129,32 @@ impl<'b> Bank<'b> {
         let rows = (data.len() / row_size) as u32;
         Self {
             schema,
-            data: &data[..rows as usize * row_size],
+            data: BankData::Contiguous(&data[..rows as usize * row_size]),
+            rows,
+        }
+    }
+
+    /// Build a bank whose columns live in a per-column record's separate
+    /// streams (`Lz4PerColumn`). Reading a column decompresses only that
+    /// column's stream. `rows` is derived from the record's stored
+    /// per-event bank size.
+    pub(crate) fn new_per_column(
+        schema: &'b Schema,
+        record: &'b PerColumnRecord,
+        bank_idx: u32,
+        event_idx: u32,
+    ) -> Self {
+        let rows = record
+            .bank_size(event_idx, bank_idx)
+            .checked_div(schema.row_size())
+            .unwrap_or(0);
+        Self {
+            schema,
+            data: BankData::PerColumn {
+                record,
+                bank_idx,
+                event_idx,
+            },
             rows,
         }
     }
@@ -128,9 +176,39 @@ impl<'b> Bank<'b> {
     /// element-major within each row). Internal: used by `cast_column`.
     pub(crate) fn col_bytes(&self, col: usize) -> &'b [u8] {
         let entry = &self.schema.entries()[col];
-        let start = self.schema.column_byte_offset(col, self.rows) as usize;
-        let len = self.rows as usize * entry.ty.size() * entry.length as usize;
-        &self.data[start..start + len]
+        let col_width = entry.ty.size() * entry.length as usize;
+        let col_len = self.rows as usize * col_width;
+        match self.data {
+            BankData::Contiguous(data) => {
+                let start = self.schema.column_byte_offset(col, self.rows) as usize;
+                &data[start..start + col_len]
+            }
+            BankData::PerColumn {
+                record,
+                bank_idx,
+                event_idx,
+            } => {
+                if col_len == 0 {
+                    return &[];
+                }
+                let row_size = self.schema.row_size() as usize;
+                if row_size == 0 {
+                    return &[];
+                }
+                // The column stream is cross-event contiguous; this event's
+                // slice starts after all earlier events' rows of this column.
+                let cum_rows = record.bank_byte_offset(event_idx, bank_idx) as usize / row_size;
+                let start = cum_rows * col_width;
+                match record.column_stream(bank_idx, col as u16) {
+                    Ok(stream) if start + col_len <= stream.len() => {
+                        &stream[start..start + col_len]
+                    }
+                    // Decompression failure or an inconsistent directory:
+                    // degrade to an empty column (reads return defaults).
+                    _ => &[],
+                }
+            }
+        }
     }
 
     /// Borrow column `name` as `Cow<[T]>`. Generic over the bank-column-type
@@ -192,13 +270,16 @@ impl<'b> Bank<'b> {
         if handle.is_placeholder() || row >= self.rows {
             return T::default();
         }
-        let offset = self
-            .schema
-            .cell_byte_offset(handle.column_index(), row, self.rows) as usize;
-        // Safe unaligned read: the handle was resolved against this
-        // schema and `row < self.rows`, so the cell is in bounds.
         let size = std::mem::size_of::<T>();
-        bytemuck::pod_read_unaligned::<T>(&self.data[offset..offset + size])
+        // Within the column, cell `row` starts at `row * size` (the column
+        // is row-major over `size`-byte cells). `col_bytes` dispatches to
+        // the contiguous buffer or the per-column stream transparently.
+        let cbytes = self.col_bytes(handle.column_index());
+        let off = row as usize * size;
+        if off + size > cbytes.len() {
+            return T::default();
+        }
+        bytemuck::pod_read_unaligned::<T>(&cbytes[off..off + size])
     }
 
     /// Read one cell as `T`. Infallible: returns `T::default()` if the
@@ -224,14 +305,16 @@ impl<'b> Bank<'b> {
         if entry.ty != T::DATA_TYPE || entry.length != T::LENGTH || row >= self.rows {
             return T::default();
         }
-        let offset = self.schema.cell_byte_offset(col, row, self.rows) as usize;
-        // Safe unaligned read: `col` came from `column_index`, `row <
-        // self.rows`, and the type/length checks above guarantee the
-        // `size_of::<T>()` bytes at `offset` lie within the cell. For
-        // `T = [U; N]` this reads `N * size_of::<U>()` bytes — exactly
-        // the row's array.
         let size = std::mem::size_of::<T>();
-        bytemuck::pod_read_unaligned::<T>(&self.data[offset..offset + size])
+        // Cell `row` of column `col` is `size` bytes at `row * size` within
+        // the column's bytes. For `T = [U; N]`, `size = N * size_of::<U>()`
+        // — exactly the row's array.
+        let cbytes = self.col_bytes(col);
+        let off = row as usize * size;
+        if off + size > cbytes.len() {
+            return T::default();
+        }
+        bytemuck::pod_read_unaligned::<T>(&cbytes[off..off + size])
     }
 
     /// Read one row's array bytes for an array column with runtime
@@ -266,9 +349,15 @@ impl<'b> Bank<'b> {
         }
         let len = entry.length as usize;
         let elem = std::mem::size_of::<T>();
-        let offset = self.schema.cell_byte_offset(col, row, self.rows) as usize;
-        let bytes = &self.data[offset..offset + len * elem];
-        Ok(cast_cells::<T>(bytes, len))
+        let cbytes = self.col_bytes(col);
+        let off = row as usize * len * elem;
+        if off + len * elem > cbytes.len() {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Bank::array_at: column data truncated",
+            });
+        }
+        Ok(cast_cells::<T>(&cbytes[off..off + len * elem], len))
     }
 
     /// Check both element type AND per-row length against the typed

@@ -90,7 +90,8 @@ pub fn decompress(
         | CompressionType::Lz4Best
         | CompressionType::Lz4Chunked
         | CompressionType::Lz4ByBank
-        | CompressionType::Lz4ByBankV2 => {
+        | CompressionType::Lz4ByBankV2
+        | CompressionType::Lz4PerColumn => {
             // `Lz4Chunked` / `Lz4ByBank` reach this point only when their
             // record decoders hand us a single inner LZ4 block; their
             // record-level wrappers always pass `Lz4` explicitly. Routing
@@ -236,7 +237,8 @@ pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) 
         | CompressionType::Lz4Best
         | CompressionType::Lz4Chunked
         | CompressionType::Lz4ByBank
-        | CompressionType::Lz4ByBankV2 => {
+        | CompressionType::Lz4ByBankV2
+        | CompressionType::Lz4PerColumn => {
             if expected == 0 {
                 return Ok(0);
             }
@@ -319,7 +321,8 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
         | CompressionType::Lz4Best
         | CompressionType::Lz4Chunked
         | CompressionType::Lz4ByBank
-        | CompressionType::Lz4ByBankV2 => {
+        | CompressionType::Lz4ByBankV2
+        | CompressionType::Lz4PerColumn => {
             // `Lz4Chunked` / `Lz4ByBank` are record-level format extensions;
             // their inner compression units still flow through this same
             // code path with `Lz4`. The tags route here to keep the match
@@ -554,6 +557,7 @@ mod tests {
             let mut compress_buf = Vec::new();
             let raw = crate::write::record::build_record_bytes(
                 &refs,
+                &crate::schema::Dict::default(),
                 0,
                 0,
                 crate::write::Compression::Lz4Chunked { events_per_chunk },

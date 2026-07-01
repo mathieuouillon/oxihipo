@@ -26,11 +26,13 @@
 #v(0.6em)
 
 #block(fill: luma(243), inset: 9pt, radius: 4pt, width: 100%)[
-  *Summary.* HIPO records can be stored under seven compression schemes.
+  *Summary.* HIPO records can be stored under eight compression schemes.
   Five are _whole-record_ codecs (`None`, `Lz4`, `Lz4Best`, `Gzip`,
-  `Lz4Chunked`): reading any bank inflates the entire record. Two are
-  _per-bank_ codecs (`Lz4ByBank`, `Lz4ByBankV2`): reading a bank inflates
-  only that bank. On a real CLAS12 reconstruction file (598,738 events; a
+  `Lz4Chunked`): reading any bank inflates the entire record. Three are
+  _per-bank / per-column_ codecs (`Lz4ByBank`, `Lz4ByBankV2`,
+  `Lz4PerColumn`): reading a bank — or, for `Lz4PerColumn`, a single
+  column — inflates only that. On a real CLAS12 reconstruction file
+  (598,738 events; a
   dictionary of 274 schemas of which only *73 are populated*, dominated by
   large raw-detector readout banks) an analysis that reads a handful of
   banks is *#text(weight: "bold")[≈ 5× faster]* with `Lz4ByBank` than with
@@ -78,7 +80,7 @@ The crucial degree of freedom is *how the record payload is compressed*,
 because that decides whether reading one bank requires inflating the whole
 record or just that bank's bytes.
 
-= The seven compression schemes
+= The eight compression schemes
 
 #figure(
   caption: [Compression schemes. "Granularity" is the unit that must be
@@ -98,7 +100,8 @@ record or just that bank's bytes.
     [`Gzip`], [DEFLATE (zlib) over the whole record], [record], [yes],
     [`Lz4Chunked`], [Record split into _N_-event chunks, each its own LZ4 block], [sub-record chunk], [no (Rust-only)],
     [`Lz4ByBank`], [One LZ4 stream _per bank type_ + a presence/size directory; fast default-LZ4 streams], [*per bank*], [no (Rust-only)],
-    [`Lz4ByBankV2`], [`Lz4ByBank` with *LZ4‑HC* bank streams + an LZ4-compressed directory + version byte; best ratio (slower _write_)], [*per bank*], [no (Rust-only)],
+    [`Lz4ByBankV2`], [`Lz4ByBank` with *LZ4‑HC* bank streams + an LZ4-compressed directory + version byte; smaller than `Lz4Best` (slower _write_)], [*per bank*], [no (Rust-only)],
+    [`Lz4PerColumn`], [One *LZ4‑HC* stream per _(bank, column)_, laid out cross-event contiguous; reading one column never touches the others. Smallest on disk.], [*per column*], [no (Rust-only)],
   ),
 )
 
@@ -158,10 +161,12 @@ were re-encoded into each scheme; the read touches *2 banks*
 #figure(
   caption: [Real CLAS12, 100k events. Read *scope* grows left→right:
     `sel` = `REC::Event` only (1 bank), `full` = `REC::Particle`+`REC::Event`
-    (2), `all` = every populated bank (≈ 73). Times are ms for the whole 100k
-    pass; *bold* = fastest in column. Whole-record schemes are flat across
-    scope; `Lz4ByBank` is fastest at 1–2 banks but the *slowest-but-gzip at
-    `all`* — its edge is conditional on reading few banks.],
+    (2), `all` = every populated bank (≈ 73) via `ev.structures()`. Times are
+    ms for the whole 100k pass; *bold* = fastest in column. Whole-record
+    schemes are flat across scope; the per-bank/column schemes are fastest at
+    1–2 banks but *slowest-but-gzip at `all`* (row-major) — their edge is
+    conditional on reading few banks / columns. `Lz4ByBankV2` and
+    `Lz4PerColumn` default to 32 MB records here.],
   table(
     columns: 7,
     align: (left, right, right, right, right, right, right),
@@ -171,13 +176,14 @@ were re-encoded into each scheme; the read touches *2 banks*
       [*Scheme*], [*size MB*], [*ratio*], [*sel* \ (1)],
       [*full* \ (2)], [*all* \ (≈73)], [*all Mevt/s*],
     ),
-    [`None`],        [3469.9], [1.00], [285.8], [307.9], [314.2], [0.32],
-    [`Lz4`],         [2162.9], [1.60], [801.9], [856.2], [828.6], [0.12],
-    [`Lz4Best`],     [1845.1], [1.88], [809.7], [828.8], [811.1], [0.12],
-    [`Gzip`],        [1704.5], [2.04], [6017.2], [5933.4], [6306.3], [0.02],
-    [`Lz4Chunked`],  [2163.9], [1.60], [380.6], [403.0], [380.4], [0.26],
-    [`Lz4ByBank`],   [2099.9], [1.65], [161.6], [179.1], [1040.5], [0.10],
-    [`Lz4ByBankV2`], [1766.6], [1.96], [*141.9*], [*158.1*], [997.4], [0.10],
+    [`None`],        [3469.9], [1.00], [295.3], [316.8], [299.2], [0.33],
+    [`Lz4`],         [2162.9], [1.60], [748.9], [774.3], [744.6], [0.13],
+    [`Lz4Best`],     [1845.1], [1.88], [747.5], [773.6], [745.0], [0.13],
+    [`Gzip`],        [1704.5], [2.04], [5628.8], [5673.5], [5837.4], [0.02],
+    [`Lz4Chunked`],  [2163.9], [1.60], [377.9], [396.7], [379.5], [0.26],
+    [`Lz4ByBank`],   [2099.9], [1.65], [153.9], [173.9], [1000.3], [0.10],
+    [`Lz4ByBankV2`], [1743.4], [1.99], [148.8], [167.9], [1042.6], [0.10],
+    [`Lz4PerColumn`],[1625.2], [2.13], [*138.2*], [*148.1*], [1363.4], [0.07],
   ),
 )
 
@@ -213,62 +219,84 @@ advantage nearly vanishes — isolating that the real-data win comes from
 = Analysis
 
 #block(fill: rgb("#eef6ee"), inset: 9pt, radius: 4pt, width: 100%)[
-  *Headline.* When an analysis reads a *few* banks (the common case),
-  `Lz4ByBankV2` is *5.4×* faster than plain LZ4 (158 ms vs 856 ms at 2 banks)
-  and *≈ 1.9×* faster than uncompressed `None` (308 ms) — while also being the
-  *smallest* read-friendly format (1.96× vs `None`, edging out `Lz4Best`'s
-  1.88×). But the advantage is *conditional on selectivity*: reading _every_
-  bank it is *≈ 1.2× slower than LZ4* (997 ms vs 829 ms). Read speed is set by
-  _how many banks you must inflate_, not by codec speed.
+  *Headline.* When an analysis reads a *few* banks (the common case), the
+  per-bank / per-column schemes are *≈ 5× faster* than plain LZ4
+  (`Lz4PerColumn` 148 ms vs LZ4 774 ms at 2 banks) and *≈ 2×* faster than
+  uncompressed `None` (317 ms). `Lz4PerColumn` is also the *smallest* format
+  on disk — 2.13× vs `None`, beating even `Gzip`'s 2.04× — because a column
+  of homogeneous values compresses far better than a bank's interleaved
+  bytes. But the advantage is *conditional on selectivity*: a row-major pass
+  over _every_ bank is slower than one whole-record block, since it must
+  inflate (and, for `Lz4PerColumn`, _reassemble_) everything. Read speed is
+  set by _how much you must inflate_, not by codec speed.
 ]
 
 + *Per-bank wins big — when you read few banks.* Each record holds the
   populated banks of its events (73 distinct banks file-wide, most present in
   the bulk of events — see Appendix A), dominated by huge raw ADC/TDC/waveform
   tables; the analysis reads 2 small `REC::` banks. The Bytes schemes inflate
-  _all_ of them to reach those 2; ByBank inflates 2. Hence 5.4× — and only a
+  _all_ of them to reach those 2; ByBank inflates 2. Hence ≈ 5× — and only a
   wash (a slight loss, even) on the synthetic control whose events contain
   just the 2 banks read, proving the win comes from _skipped_ banks, not the
   codec.
 
 + *…and loses once you read everything.* In the `all`-banks column `Lz4ByBank`
-  rises to 1040 ms (`Lz4ByBankV2` 997 ms) — *≈ 6× its own 2-bank time* and
-  *≈ 1.25× slower than LZ4* (829 ms). Reading all banks it inflates all 73
+  rises to 1000 ms (`Lz4ByBankV2` 1043 ms) — *≈ 6× its own 2-bank time* and
+  *≈ 1.3× slower than LZ4* (745 ms). Reading all banks it inflates all 73
   streams (nothing skipped) _and_ pays per-stream decode setup plus a
-  per-(event, bank) gather that one whole-record LZ4 block avoids. (An earlier
-  version also re-synthesised a contiguous event blob per event;
-  `ev.structures()` now yields slices straight from the decompressed streams,
-  removing that copy — worth ≈ 8 %, but not the structural gap.) So for
+  per-(event, bank) gather that one whole-record LZ4 block avoids. So for
   full-event work — recook, format conversion, analyses that touch most banks
-  — a whole-record scheme (`Lz4`/`Lz4Best`) is the right choice; ByBank is for
-  bank-sparse reads.
+  — a whole-record scheme (`Lz4`/`Lz4Best`) is the right choice; the per-bank
+  and per-column schemes are for _sparse_ reads.
+
++ *Per-column goes further — smallest file, reads one column.* `Lz4PerColumn`
+  stores each _(bank, column)_ as its own cross-event-contiguous LZ4‑HC
+  stream. Two payoffs: (1) *ratio* — homogeneous columns (`pid`, `status`,
+  `charge`, slowly-varying floats) compress far better than a bank's
+  interleaved column-major bytes, giving the *smallest* file here (1625 MB,
+  2.13×, beating Gzip); (2) *column-granular selectivity* — reading `px`
+  inflates one column, not the whole bank, making it the *fastest* selective
+  format (138 ms). The cost is the mirror of ByBank's, and it only appears
+  when you read a columnar file the *wrong* way: a row-major "read every
+  bank" via `ev.structures()` must _reassemble_ each bank column-major from
+  its separate streams (1363 ms — a per-record schema-layout cache trims the
+  dict lookups; the `O(events × banks × columns)` gather is the floor). The
+  *right* way is column-major: `Chain::for_each_column::<T>(bank, col, …)`
+  sweeps one column's streams straight through — *≈ 140 ms for a full-file
+  column, ~10× faster* than the row-major all-read — and scales with the
+  columns you touch, not the total. Whole-event reassembly is then only for
+  recook / serialization. `Lz4PerColumn` (and `Lz4ByBankV2`) default to
+  *32 MB records* — longer per-column runs compress better and amortise the
+  directory (a record-size sweep put the ratio/read knee there; reads are
+  otherwise flat in record size).
 
 + *Whole-record schemes are flat across scope.* `None`/`Lz4`/`Lz4Best`/`Gzip`/
-  `Lz4Chunked` all show `sel ≈ full ≈ all` (e.g. Lz4 776 / 828 / 772 ms): they
+  `Lz4Chunked` all show `sel ≈ full ≈ all` (e.g. Lz4 749 / 774 / 745 ms): they
   inflate the entire record up front, so the number of banks read barely
-  matters. Only `Lz4ByBank`'s cost tracks what you actually touch.
+  matters. Only the per-bank/column schemes' cost tracks what you touch.
 
-+ *Uncompressed is not fastest.* `None` (308 ms) loses to `Lz4ByBankV2` at 2
-  banks (158 ms): `None` must stream 3.47 GB, while ByBankV2 reads a 1.77 GB
-  file and inflates only 2 banks — strictly less total work. Compression that
-  enables selectivity beats no compression.
++ *Uncompressed is not fastest.* `None` (317 ms) loses to `Lz4PerColumn` at 2
+  banks (148 ms): `None` must stream 3.47 GB, while `Lz4PerColumn` reads a
+  1.63 GB file and inflates only the columns touched — strictly less total
+  work. Compression that enables selectivity beats no compression.
 
-+ *Gzip is disqualifying for reads* — ≈ 5.9 s, *37×* slower than ByBank at
-  2 banks, despite the best ratio (2.04×). Acceptable only for cold archival.
-  `Lz4Best` reads at `Lz4` speed (≈ 810 ms) but is 15 % smaller — LZ4‑HC costs
-  only _write_ time; prefer it for a C++-readable whole-record format.
-  `Lz4Chunked` (403 ms at 2 banks, ≈ 2× faster than `Lz4`) decodes smaller
++ *Gzip is disqualifying for reads* — ≈ 5.7 s, *38×* slower than the sparse
+  schemes at 2 banks, despite a strong ratio (2.04×) that `Lz4PerColumn`
+  nonetheless beats (2.13×). Acceptable only for cold archival. `Lz4Best`
+  reads at `Lz4` speed (≈ 750 ms) but is 15 % smaller — LZ4‑HC costs only
+  _write_ time; prefer it for a C++-readable whole-record format.
+  `Lz4Chunked` (397 ms at 2 banks, ≈ 2× faster than `Lz4`) decodes smaller
   blocks with better cache locality, but its real purpose (parallel decode) is
   moot single-thread.
 
 + *Full reads are decompression-CPU-bound.* Real events cost microseconds
   each versus ≈ 0.18 µs for the tiny synthetic ones; the codec's per-byte
   decode rate dominates wall-clock. The only structural lever is to
-  *decompress fewer bytes* — which `Lz4ByBank` does at bank granularity, and a
-  future per-column layout would do at column granularity. (Merely
-  _re-ordering_ the all-banks read column-major — one decompressed stream
-  swept end-to-end before the next — was measured to *not* help: the cost is
-  the 73 small per-stream decodes plus the per-(event, bank) gather, which
+  *decompress fewer bytes* — which `Lz4ByBank` does at bank granularity and
+  `Lz4PerColumn` now does at *column* granularity. (Merely _re-ordering_ a
+  row-major all-banks read column-major — one decompressed stream swept
+  end-to-end before the next — was measured to *not* help: the cost is the
+  many small per-stream decodes plus the per-(event, bank) gather, which
   order doesn't change. Fewer bytes, not better order, is the lever.)
 
 = Recommendations
@@ -280,11 +308,13 @@ advantage nearly vanishes — isolating that the real-data win comes from
   stroke: 0.5pt + luma(180),
   table.header([*Use case*], [*Recommended scheme*]),
   [Repeated analysis reads (the common case)],
-  [*`Lz4ByBank`* — ≈ 5× faster, faster than uncompressed, 1.65× smaller, fast
-   to write. The `skim` default.],
-  [Same, when smallest on-disk also matters],
-  [*`Lz4ByBankV2`* — identical fast reads, *best ratio* (1.96×, beats
-   `Lz4Best`) via LZ4‑HC bank streams; ≈ 19× slower to _write_.],
+  [*`Lz4ByBank`* — ≈ 5× faster than LZ4, faster than uncompressed, 1.65×
+   smaller, fast to write. The `skim` default.],
+  [Analysis reads *and* smallest on disk],
+  [*`Lz4PerColumn`* — the *smallest* format (2.13×, beats `Gzip`) *and* the
+   fastest selective reads (inflates one column at a time); slower to
+   _write_ (HC), 32 MB records. `Lz4ByBankV2` is the per-bank equivalent
+   (1.99×, HC bank streams).],
   [Must stay C++ `hipo4`-readable],
   [*`Lz4Best`* — same decode speed as `Lz4`, ≈ 15 % smaller.],
   [Cold archival, rarely read],
@@ -293,11 +323,14 @@ advantage nearly vanishes — isolating that the real-data win comes from
   [`None` — no decode, but largest and not actually fastest.],
 )
 
-The corollary for future work: since the lever is _bytes inflated_, the next
-structural gain is pushing selectivity from per-_bank_ to per-_column_ — a
-Rust-only `Lz4ByColumn` (V3) layout storing one LZ4 stream per
-`(bank, column)`, cross-event contiguous, so reading `px` of a 30-column
-bank inflates one column, not thirty, and yields a single SIMD-ready slice.
+That lever — pushing selectivity from per-_bank_ to per-_column_ — is what
+`Lz4PerColumn` realises: one LZ4‑HC stream per `(bank, column)`, cross-event
+contiguous, so reading `px` of a 30-column bank inflates one column, not
+thirty, and yields a single SIMD-ready slice. It is both the smallest and
+the fastest-selective format measured here. The next step in the same
+direction would be per-column codec choice (bit-packing small integers,
+delta + zig-zag for monotone columns) — squeezing the columns further now
+that they are physically separated.
 
 = Reproducing
 
@@ -310,7 +343,7 @@ cargo run --release --example bench_read_compression -- \
 cargo run --release --example bench_read_compression -- 150000 9
 ```
 
-The benchmark re-encodes the (capped) input into all seven schemes in a
+The benchmark re-encodes the (capped) input into all eight schemes in a
 temporary directory and prints the tables above. Cap the event count to fit
 the seven re-encoded copies on disk (an 8 GB file uncapped would need
 ≈ 70 GB).
