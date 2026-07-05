@@ -32,14 +32,6 @@ impl Backing {
     }
 }
 
-/// Counts bank-stream inflate calls. Active under `cfg(test)` or when
-/// the (non-default) `test-instrumentation` feature is enabled —
-/// otherwise zero overhead. Used to prove the partial-decompression
-/// contract from tests.
-#[cfg(test)]
-pub static BANK_INFLATE_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
 /// Shared state attached to every `OwnedEvent` yielded from an
 /// `Lz4ByBank` record. Lifetime: as long as any event from this record
 /// is live. Heap allocations: one per record (this struct), one per
@@ -485,8 +477,6 @@ impl ByBankRecord {
             // Empty stream → empty payload, no decompression needed.
             let _ = self.bank_data[b].set(Box::new([]));
         } else {
-            #[cfg(test)]
-            BANK_INFLATE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut out: Vec<u8> = Vec::with_capacity(expected);
             decompress(CompressionType::Lz4, src, &mut out, expected)?;
             // Trim to expected size (decompress may write the slack).
@@ -572,13 +562,16 @@ mod tests {
         )
         .unwrap();
 
-        let before = BANK_INFLATE_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
         let rec = ByBankRecord::parse(&raw).unwrap();
-        let after_parse = BANK_INFLATE_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(
-            before, after_parse,
-            "parsing the directory must not decompress any bank"
-        );
+        // Parsing reads only the directory — no bank stream is inflated yet.
+        // Checked per-record (not via a shared global counter) so the assertion
+        // holds regardless of other tests inflating banks concurrently.
+        for b in 0..rec.num_banks() as u32 {
+            assert!(
+                !rec.is_bank_inflated(b),
+                "parse must not decompress bank {b}"
+            );
+        }
 
         assert_eq!(rec.event_count(), 10);
         assert_eq!(rec.num_banks(), 2);
@@ -624,18 +617,17 @@ mod tests {
             "particle bank must stay compressed when never requested"
         );
 
-        // Now touch "particle" once — it should inflate exactly once
-        // even across multiple events.
-        let count_before = BANK_INFLATE_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
+        // Now touch "particle" repeatedly. The OnceLock inflates it once and
+        // every later access returns the *same* cached slice — proving we never
+        // re-decompress. Pointer identity is per-record, so this is race-free.
+        let first = rec.bank_stream(particle_b).unwrap().as_ptr();
         for _ in 0..rec.event_count() {
-            let _ = rec.bank_stream(particle_b).unwrap();
+            assert_eq!(
+                rec.bank_stream(particle_b).unwrap().as_ptr(),
+                first,
+                "cached bank stream must not re-decompress"
+            );
         }
-        let count_after = BANK_INFLATE_COUNTER.load(std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(
-            count_after - count_before,
-            1,
-            "OnceLock must inflate exactly once per bank, regardless of access count"
-        );
         assert!(rec.is_bank_inflated(particle_b));
     }
 

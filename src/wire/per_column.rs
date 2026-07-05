@@ -30,12 +30,6 @@ impl Backing {
     }
 }
 
-/// Counts column-stream inflate calls — used by tests to prove the
-/// partial-decompression contract (untouched columns stay compressed).
-#[cfg(test)]
-pub static COLUMN_INFLATE_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
 #[derive(Debug, Clone, Copy)]
 struct BankDescriptor {
     group: u16,
@@ -488,8 +482,6 @@ impl PerColumnRecord {
         if expected == 0 {
             let _ = self.stream_data[s].set(Box::new([]));
         } else {
-            #[cfg(test)]
-            COLUMN_INFLATE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let src = &self.backing.section()[self.compressed_streams[s].clone()];
             let mut out: Vec<u8> = Vec::with_capacity(expected);
             decompress(CompressionType::Lz4, src, &mut out, expected)?;
@@ -523,7 +515,6 @@ impl PerColumnRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering::Relaxed;
 
     const ROW_SIZE: usize = 4 + 4 + 12 + 2; // pid/I + px/F + cov/F#3 + status/S = 22
 
@@ -597,18 +588,20 @@ mod tests {
     fn parses_without_decompressing_and_splits_columns() {
         let evs: Vec<Vec<u8>> = (0..10).map(|s| build_particle_event(3, s)).collect();
         let raw = build(&evs);
-        let before = COLUMN_INFLATE_COUNTER.load(Relaxed);
         let rec = PerColumnRecord::parse(&raw).unwrap();
-        assert_eq!(
-            COLUMN_INFLATE_COUNTER.load(Relaxed),
-            before,
-            "parsing the directory must not inflate any column"
-        );
         assert_eq!(rec.event_count(), 10);
         assert_eq!(rec.num_banks(), 1);
         let b = rec.bank_index(300, 1).unwrap();
         assert!(!rec.is_opaque(b));
         assert_eq!(rec.num_columns(b), 4);
+        // Parsing reads only the directory — no column stream is inflated yet.
+        // Checked per-record so concurrent tests can't perturb the result.
+        for c in 0..rec.num_columns(b) {
+            assert!(
+                !rec.is_column_inflated(b, c),
+                "parse must not inflate column {c}"
+            );
+        }
     }
 
     #[test]
@@ -618,13 +611,10 @@ mod tests {
         let rec = PerColumnRecord::parse(&raw).unwrap();
         let b = rec.bank_index(300, 1).unwrap();
 
-        let before = COLUMN_INFLATE_COUNTER.load(Relaxed);
         let px = rec.column_stream(b, 1).unwrap(); // read only the px column
-        assert_eq!(
-            COLUMN_INFLATE_COUNTER.load(Relaxed) - before,
-            1,
-            "reading one column must inflate exactly one stream"
-        );
+        // Reading px inflates exactly one stream: px is inflated, the other
+        // three columns stay compressed. The per-column booleans below capture
+        // "exactly one" without a shared global counter (which would race).
         assert!(rec.is_column_inflated(b, 1));
         assert!(!rec.is_column_inflated(b, 0), "pid must stay compressed");
         assert!(!rec.is_column_inflated(b, 2), "cov must stay compressed");
