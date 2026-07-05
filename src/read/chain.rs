@@ -99,12 +99,23 @@ impl Chain {
         Self::from_paths(src.into_sources()?)
     }
 
-    /// Open every resolved path, in order, validating dict equality.
+    /// Open every resolved path in parallel, then validate dict equality.
     fn from_paths(paths: Vec<PathBuf>) -> Result<Self> {
-        let mut files: Vec<Arc<FileInner>> = Vec::with_capacity(paths.len());
-        for p in paths {
-            files.push(Arc::new(FileInner::open(p)?));
-        }
+        // Each `FileInner::open` is a latency-bound round-trip — a file open
+        // plus small positioned reads of the header, embedded dictionary, and
+        // trailer index. Opening a long chain (a run is often split into a
+        // hundred-plus files) one at a time on a network filesystem serialises
+        // those round-trips into many seconds of startup before the first event
+        // is read, so fan the opens across rayon's pool. Collecting from an
+        // *indexed* parallel iterator into `Result<Vec<_>>` preserves input
+        // order — leaving file order, and thus global event offsets, unchanged —
+        // and short-circuits on the first error (dropping any files already
+        // opened). Concurrency is bounded by the rayon pool, so this never
+        // opens more than a poolful of descriptors at once.
+        let files: Vec<Arc<FileInner>> = paths
+            .into_par_iter()
+            .map(|p| FileInner::open(p).map(Arc::new))
+            .collect::<Result<Vec<_>>>()?;
         Self::from_inners(files)
     }
 

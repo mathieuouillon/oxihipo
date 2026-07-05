@@ -175,6 +175,38 @@ fn chain_events_iter_concat_in_order() {
 }
 
 #[test]
+fn chain_open_many_files_preserves_order() {
+    // `Chain::open` resolves the files in parallel; a larger chain stresses
+    // that the parallel collect keeps input order — events must concatenate
+    // file-by-file exactly as a serial open would produce them.
+    let dir = tempfile::tempdir().unwrap();
+    let d = dict();
+    let n = 8usize;
+    let per = 40i32;
+    let paths: Vec<std::path::PathBuf> = (0..n)
+        .map(|k| {
+            let p = dir.path().join(format!("f{k}.hipo"));
+            write_file(&p, &d, k as i64 * 1000, per);
+            p
+        })
+        .collect();
+
+    let chain = Chain::open(paths.as_slice()).unwrap();
+    assert_eq!(chain.file_count(), n);
+    assert_eq!(chain.event_count(), n as u64 * per as u64);
+
+    let expected: Vec<i64> = (0..n)
+        .flat_map(|k| (0..per).map(move |i| k as i64 * 1000 + i as i64))
+        .collect();
+    let got: Vec<i64> = chain
+        .events()
+        .map(Result::unwrap)
+        .map(|ev| ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0])
+        .collect();
+    assert_eq!(got, expected, "parallel open must preserve file order");
+}
+
+#[test]
 fn chain_open_dispatches_directory() {
     let dir = tempfile::tempdir().unwrap();
     let d = dict();
