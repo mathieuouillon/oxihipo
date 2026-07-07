@@ -1,0 +1,142 @@
+name: wheels
+
+# Build (and, on a tag, publish) the `oxihipo` Python wheels. The extension is
+# abi3 (one wheel per OS/arch works on CPython >= 3.9) and pure-Rust
+# (default-features = false), so the aarch64 / cross builds need no C toolchain.
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Native build + the full pytest suite on each OS — fast confidence that the
+  # binding imports and behaves, before spending time on the cross wheels.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: py
+      - name: Build the extension (native)
+        working-directory: py
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --release --out dist -i python
+      - name: Install wheel + test dependencies
+        run: |
+          python -m pip install numpy awkward pandas pyarrow pytest
+          python -m pip install --no-index --find-links py/dist oxihipo --no-deps
+      - name: Run the binding's test suite
+        run: python -m pytest py/tests -q
+
+  linux:
+    name: wheels linux ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+          sccache: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: py/dist
+
+  macos:
+    name: wheels macos ${{ matrix.target }}
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: py/dist
+
+  windows:
+    name: wheels windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: x64
+          args: --release --out dist
+          sccache: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: py/dist
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: py/dist
+
+  # Publish to PyPI on a version tag. Set the `PYPI_API_TOKEN` repo secret (a
+  # PyPI project token) before pushing a `v*` tag; the job is skipped otherwise.
+  release:
+    name: publish to PyPI
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test, linux, macos, windows, sdist]
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Publish
+        uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        with:
+          command: upload
+          args: --non-interactive --skip-existing wheels-*/*

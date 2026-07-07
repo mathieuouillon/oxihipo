@@ -1,9 +1,0 @@
-# A pyo3 `extension-module` cdylib deliberately leaves the CPython API symbols
-# (`_Py_*`) undefined — they are provided by the host interpreter at import
-# time. maturin passes these linker flags automatically; a bare `cargo build`
-# on macOS needs them here or the link fails with "symbol(s) not found".
-[target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
-
-[target.x86_64-apple-darwin]
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
