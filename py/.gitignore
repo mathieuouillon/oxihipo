@@ -1,0 +1,11 @@
+/target
+# Build artifacts placed next to the Python package for local testing.
+python/oxihipo/*.so
+python/oxihipo/*.pyd
+python/oxihipo/*.dylib
+__pycache__/
+*.py[cod]
+# Wheels / build output
+/dist
+/build
+*.egg-info

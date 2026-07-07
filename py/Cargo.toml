@@ -1,0 +1,30 @@
+[package]
+name = "oxihipo-py"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Python bindings for the oxihipo HIPO reader"
+
+[lib]
+name = "_oxihipo"
+# cdylib: the importable extension module. rlib: lets `cargo check`/doc the
+# pure-Rust parts without an interpreter.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pure-Rust core (lz4_flex decode) — the binding only reads, so it needs no
+# C LZ4 / HC compression path.
+oxihipo = { path = "..", default-features = false }
+pyo3 = { version = "0.23", features = ["abi3-py39", "extension-module"] }
+# rust-numpy tracks pyo3; 0.23 pairs with pyo3 0.23 and exposes the stable
+# `Vec::into_pyarray(py) -> Bound<PyArray>` zero-copy move.
+numpy = "0.23"
+
+# PyO3's trampoline can only *catch* an unwinding panic; a `panic = "abort"`
+# cdylib would abort the whole interpreter. This crate is its own workspace
+# root (the `[workspace]` below) so it does NOT inherit the core's
+# `panic = "abort"` release profile.
+[profile.release]
+panic = "unwind"
+
+[workspace]
