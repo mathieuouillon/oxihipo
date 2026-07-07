@@ -262,6 +262,30 @@ impl PyChain {
         out.set_item("bytes", summary.bytes)?;
         Ok(out)
     }
+
+    /// Per-record positions (no decompression):
+    /// `(file_index, record_index, global_event_start, event_count)`.
+    fn record_spans(&self) -> Vec<(usize, usize, u64, u32)> {
+        self.inner
+            .record_spans()
+            .into_iter()
+            .map(|s| {
+                (
+                    s.file_index,
+                    s.record_index,
+                    s.global_event_start,
+                    s.event_count,
+                )
+            })
+            .collect()
+    }
+
+    /// Decompressed payload bytes per record (same order as `record_spans`) —
+    /// for sizing byte-based streaming batches.
+    fn record_decompressed_sizes(&self, py: Python<'_>) -> PyResult<Vec<u64>> {
+        py.allow_threads(|| self.inner.record_decompressed_sizes())
+            .map_err(to_pyerr)
+    }
 }
 
 /// Map a compression name to the core enum (`Lz4Chunked` needs a parameter and

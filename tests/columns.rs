@@ -436,3 +436,16 @@ fn record_spans_cover_every_event_in_order() {
     }
     assert_eq!(expected_start, chain.event_count());
 }
+
+#[test]
+fn record_decompressed_sizes_are_per_record_and_positive() {
+    let (_dir, p) = tmp("f.hipo");
+    write_file(&p, Compression::Lz4PerColumn, 10); // 4 records
+    let chain = Chain::open(&p).unwrap();
+    let sizes = chain.record_decompressed_sizes().unwrap();
+    assert_eq!(sizes.len(), chain.record_spans().len());
+    assert!(
+        sizes.iter().all(|&s| s > 0),
+        "every record has payload bytes"
+    );
+}

@@ -598,6 +598,21 @@ impl Chain {
         }
         out
     }
+
+    /// Decompressed payload bytes per record, in [`Self::record_spans`] order.
+    /// Reads each record's 56-byte header (small positioned reads, no payload)
+    /// — used to size byte-based streaming batches (`iterate("200 MB")`).
+    /// Errors on a corrupt/truncated header.
+    pub fn record_decompressed_sizes(&self) -> Result<Vec<u64>> {
+        let mut out = Vec::new();
+        for inner in self.files_inner() {
+            for span in inner.index.records() {
+                let header = inner.read_record_header(span.file_offset)?;
+                out.push(header.decompressed_payload_size() as u64);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Concatenate the ordered per-record chunks into one [`ColumnBuffers`] per

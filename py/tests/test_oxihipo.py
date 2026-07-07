@@ -184,3 +184,61 @@ def test_open_glob():
 def test_open_list_verbatim():
     c = oxihipo.open([os.path.join(DATA, "sample.hipo"), os.path.join(DATA, "sample_none.hipo")])
     assert c.file_count == 2 and c.num_entries == 16
+
+
+# --- streaming (bounded-memory iterate) ------------------------------------
+def test_record_spans_and_sizes(chain):
+    spans = chain.record_spans()  # (file_idx, record_idx, global_start, event_count)
+    assert [s[3] for s in spans] == [3, 3, 2]  # max_record_events=3 over 8 events
+    assert sum(s[3] for s in spans) == 8
+    sizes = chain.record_decompressed_sizes()
+    assert len(sizes) == len(spans) and all(s > 0 for s in sizes)
+
+
+def test_iterate_reassembles(chain):
+    ak = pytest.importorskip("awkward")
+    full = chain.arrays("REC::Particle", ["pid"])
+    chunks = list(chain.iterate("REC::Particle", ["pid"], step_size=2))
+    assert len(chunks) == 3  # record-aligned: 3 records
+    assert ak.to_list(ak.concatenate(chunks)) == ak.to_list(full)
+
+
+def test_iterate_byte_step(chain):
+    ak = pytest.importorskip("awkward")
+    full = chain.arrays("REC::Particle", ["pid"])
+    chunks = list(chain.iterate("REC::Particle", ["pid"], step_size="1 KB"))
+    assert ak.to_list(ak.concatenate(chunks)) == ak.to_list(full)
+
+
+def test_iterate_report(chain):
+    pytest.importorskip("awkward")
+    seen = 0
+    for chunk, rep in chain.iterate("REC::Particle", ["pid"], step_size=3, report=True):
+        assert isinstance(rep, oxihipo.Report)
+        assert rep.entry_stop > rep.entry_start
+        assert rep.file_path.endswith(".hipo")
+        seen += len(chunk)
+    assert seen == 8
+
+
+def test_iterate_multifile_is_file_aligned():
+    ak = pytest.importorskip("awkward")
+    cc = oxihipo.open(DATA)  # 2 files
+    report = list(cc.iterate("REC::Event", ["evno"], step_size=1000, report=True))
+    assert len({r.file_path for _, r in report}) == 2  # a chunk never spans files
+    assert sum(len(x) for x, _ in report) == 16
+
+
+def test_module_level_iterate():
+    total = sum(
+        len(x)
+        for x in oxihipo.iterate(os.path.join(DATA, "*.hipo"), "REC::Event", ["evno"], step_size=5)
+    )
+    assert total == 16
+
+
+def test_iterate_bad_step_size(chain):
+    with pytest.raises(ValueError):
+        list(chain.iterate("REC::Particle", step_size="200 furlongs"))
+    with pytest.raises(ValueError):
+        list(chain.iterate("REC::Particle", step_size=0))

@@ -11,11 +11,54 @@ NumPy-only path needs no Awkward import.
 from __future__ import annotations
 
 import fnmatch
+import re
+from dataclasses import dataclass
 from typing import Sequence
 
 from ._oxihipo import Chain as _RustChain, CorruptFileError, OxihipoError, __version__
 
-__all__ = ["Chain", "open", "CorruptFileError", "OxihipoError", "__version__"]
+__all__ = [
+    "Chain",
+    "open",
+    "iterate",
+    "Report",
+    "CorruptFileError",
+    "OxihipoError",
+    "__version__",
+]
+
+
+@dataclass(frozen=True)
+class Report:
+    """Progress info yielded next to each chunk when ``iterate(report=True)``.
+
+    ``entry_start``/``entry_stop`` are global event indices; ``file_path`` is
+    the file the chunk's records came from (chunks are file-aligned)."""
+
+    entry_start: int
+    entry_stop: int
+    file_path: str
+
+
+_STEP_UNITS = {
+    "b": 1, "kb": 10**3, "mb": 10**6, "gb": 10**9, "tb": 10**12,
+    "kib": 2**10, "mib": 2**20, "gib": 2**30, "tib": 2**40,
+}
+
+
+def _parse_step_size(step_size):
+    """``step_size`` → ``("events", n)`` (int) or ``("bytes", n)`` ("200 MB")."""
+    if isinstance(step_size, int):
+        if step_size <= 0:
+            raise ValueError("step_size must be a positive number of events")
+        return ("events", step_size)
+    m = re.fullmatch(r"\s*([0-9.]+)\s*([a-zA-Z]+)\s*", str(step_size))
+    if not m:
+        raise ValueError(f"cannot parse step_size {step_size!r}")
+    num, unit = float(m.group(1)), m.group(2).lower()
+    if unit not in _STEP_UNITS:
+        raise ValueError(f"unknown step_size unit {unit!r}")
+    return ("bytes", max(1, int(num * _STEP_UNITS[unit])))
 
 
 # --------------------------------------------------------------------------
@@ -169,6 +212,9 @@ class Chain:
         """
         selection, single = self._resolve(banks, columns, filter_name)
         res = self._c.read_columns(selection, entry_start, entry_stop)
+        return self._assemble(res, single, library)
+
+    def _assemble(self, res, single, library):
         if library == "ak":
             return self._assemble_ak(res, single)
         if library == "np":
@@ -211,6 +257,67 @@ class Chain:
         }
         return next(iter(frames.values())) if len(frames) == 1 else frames
 
+    # --- bounded-memory streaming -----------------------------------------
+    def iterate(
+        self,
+        banks=None,
+        columns: Sequence[str] | None = None,
+        *,
+        step_size=100_000,
+        filter_name: str | None = None,
+        library: str = "ak",
+        report: bool = False,
+        entry_start=None,
+        entry_stop=None,
+    ):
+        """Stream the chain in bounded-memory chunks.
+
+        Each chunk is a fully materialized array (same shape as
+        :meth:`arrays`) covering a contiguous run of events, yielded then
+        dropped — resident memory stays ≈ one chunk, so 10–100 GB inputs read
+        in constant memory. ``step_size`` is an event count (``int``) or a byte
+        budget (``"200 MB"``, ``"1 GB"``). Chunks are aligned to record and
+        file boundaries. With ``report=True`` each item is ``(chunk, Report)``.
+        """
+        selection, single = self._resolve(banks, columns, filter_name)
+        mode, size = _parse_step_size(step_size)
+        spans = self._c.record_spans()
+        sizes = self._c.record_decompressed_sizes() if mode == "bytes" else None
+        files = self._c.files
+        total = self._c.num_entries
+        lo = 0 if entry_start is None else max(0, entry_start)
+        hi = total if entry_stop is None else min(total, entry_stop)
+        for start, stop, fi in self._iter_batches(spans, sizes, mode, size, lo, hi):
+            res = self._c.read_columns(selection, start, stop)
+            chunk = self._assemble(res, single, library)
+            if report:
+                yield chunk, Report(start, stop, files[fi])
+            else:
+                yield chunk
+
+    @staticmethod
+    def _iter_batches(spans, sizes, mode, size, lo, hi):
+        """Group records into file-aligned batches of ≤ ``size`` (events or
+        bytes), yielding ``(start, stop, file_index)`` clamped to ``[lo, hi)``.
+        A single oversized record is never split across batches."""
+        cur_file = None
+        start = stop = None
+        acc = 0
+        for i, (fi, _ri, gstart, ecount) in enumerate(spans):
+            rstart, rstop = gstart, gstart + ecount
+            if rstop <= lo or rstart >= hi:  # record entirely outside the range
+                continue
+            rsize = int(sizes[i]) if mode == "bytes" else ecount
+            new = start is None or fi != cur_file or (acc > 0 and acc + rsize > size)
+            if new and start is not None:
+                yield max(start, lo), min(stop, hi), cur_file
+            if new:
+                cur_file, start, acc = fi, rstart, 0
+            stop = rstop
+            acc += rsize
+        if start is not None:
+            yield max(start, lo), min(stop, hi), cur_file
+
     # --- selection / write knobs ------------------------------------------
     def filtered(self, require=None, record_tag=None) -> "Chain":
         """A new chain restricted to events carrying every bank in ``require``
@@ -236,3 +343,12 @@ class Chain:
 def open(source) -> Chain:  # noqa: A001  (uproot-style: oxihipo.open(...))
     """Open a HIPO file, directory, glob, or list of paths → :class:`Chain`."""
     return Chain(source)
+
+
+def iterate(source, banks=None, columns=None, **kwargs):
+    """Stream chunks from a file/dir/glob/list without materializing it whole.
+
+    Equivalent to ``open(source).iterate(banks, columns, **kwargs)`` — a
+    generator, so a multi-file chain never opens more than it needs at once.
+    """
+    return open(source).iterate(banks, columns, **kwargs)
