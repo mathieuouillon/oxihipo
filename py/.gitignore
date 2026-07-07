@@ -5,6 +5,9 @@ python/oxihipo/*.pyd
 python/oxihipo/*.dylib
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
 # Wheels / build output
 /dist
 /build

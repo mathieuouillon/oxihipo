@@ -148,6 +148,28 @@ w.finish()?;
   ~257 kev/s. `Chain::for_each` (parallel mode) fans the same scan across cores; measure
   throughput on your hardware with the `bench_par` example.
 
+## Python bindings
+
+A columnar, uproot-shaped Python binding lives in [`py/`](py/): a HIPO bank
+reads like an [Awkward](https://awkward-array.org) jagged branch, with the
+per-event loop running in Rust behind a released GIL and column buffers moved
+into NumPy zero-copy.
+
+```python
+import oxihipo as ox
+
+f = ox.open("run5042.hipo")                        # file | dir | glob | list
+p = f.arrays("REC::Particle", ["pid", "px"])        # ak.Array: N * var * {pid, px}
+
+for chunk in f.iterate("REC::Particle", step_size="200 MB"):   # bounded memory
+    ...                                             # 10-100 GB inputs in ~constant RAM
+```
+
+Build with [maturin](https://www.maturin.rs) (`cd py && maturin develop
+--release`); see [`py/README.md`](py/README.md) and
+[`py/examples/`](py/examples/). Design notes:
+[`docs/python-binding-design.md`](docs/python-binding-design.md).
+
 ## Layout
 
 Single-crate repo (`oxihipo` — error, wire, compress, schema, event, read,
