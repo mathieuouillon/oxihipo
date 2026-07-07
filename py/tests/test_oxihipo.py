@@ -242,3 +242,27 @@ def test_iterate_bad_step_size(chain):
         list(chain.iterate("REC::Particle", step_size="200 furlongs"))
     with pytest.raises(ValueError):
         list(chain.iterate("REC::Particle", step_size=0))
+
+
+# --- threads knob + arrow interop ------------------------------------------
+def test_threads_knob_equivalence(chain):
+    ak = pytest.importorskip("awkward")
+    ref = ak.to_list(chain.arrays("REC::Particle", ["pid", "cov"], threads=0))
+    for t in (1, 2, 4):
+        got = ak.to_list(chain.arrays("REC::Particle", ["pid", "cov"], threads=t))
+        assert got == ref, f"threads={t}"
+
+
+def test_iterate_threads(chain):
+    ak = pytest.importorskip("awkward")
+    full = chain.arrays("REC::Particle", ["pid"])
+    chunks = list(chain.iterate("REC::Particle", ["pid"], step_size=3, threads=2))
+    assert ak.to_list(ak.concatenate(chunks)) == ak.to_list(full)
+
+
+def test_library_arrow(chain):
+    pytest.importorskip("awkward")
+    pytest.importorskip("pyarrow")
+    tbl = chain.arrays("REC::Particle", ["pid", "px"], library="arrow")
+    assert tbl.num_rows == 8  # one row per event; columns are jagged lists
+    assert {"pid", "px"} <= set(tbl.column_names)

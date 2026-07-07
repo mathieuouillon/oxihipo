@@ -172,21 +172,21 @@ class Chain:
         return [(b, []) for b in banks], False
 
     # --- the raw NumPy path (no Awkward needed) ----------------------------
-    def numpy(self, bank: str, column: str, *, entry_start=None, entry_stop=None):
+    def numpy(self, bank: str, column: str, *, entry_start=None, entry_stop=None, threads=0):
         """``(values, offsets, inner_len)`` for one column — plain NumPy."""
         _, offsets, cols = self._c.read_columns(
-            [(bank, [column])], entry_start, entry_stop
+            [(bank, [column])], entry_start, entry_stop, threads
         )[0]
         _, values, inner_len = cols[0]
         return values, offsets, inner_len
 
     # --- the Awkward path --------------------------------------------------
-    def array(self, bank: str, column: str, *, entry_start=None, entry_stop=None):
+    def array(self, bank: str, column: str, *, entry_start=None, entry_stop=None, threads=0):
         """One jagged column as an ``ak.Array`` (type ``N * var * T``)."""
         import awkward as ak
 
         _, offsets, cols = self._c.read_columns(
-            [(bank, [column])], entry_start, entry_stop
+            [(bank, [column])], entry_start, entry_stop, threads
         )[0]
         _, values, inner_len = cols[0]
         return ak.Array(_wrap_column(ak, offsets, values, inner_len))
@@ -200,6 +200,7 @@ class Chain:
         library: str = "ak",
         entry_start=None,
         entry_stop=None,
+        threads=0,
     ):
         """Bank(s) → an array in the requested ``library``.
 
@@ -208,10 +209,13 @@ class Chain:
           ``arrays(filter_name="REC::*")`` → a record with one field per bank.
         - ``library="ak"`` (default) → ``ak.Array``; ``"np"`` → ``dict`` of
           object-dtype ``ndarray``; ``"pd"`` → pandas ``DataFrame`` (one bank)
-          or ``dict`` of frames.
+          or ``dict`` of frames; ``"arrow"`` → a ``pyarrow.Table`` (for
+          polars / duckdb).
+        - ``threads``: ``0`` = all cores (default), ``1`` = sequential, ``n`` =
+          an ``n``-thread pool for the Rust read.
         """
         selection, single = self._resolve(banks, columns, filter_name)
-        res = self._c.read_columns(selection, entry_start, entry_stop)
+        res = self._c.read_columns(selection, entry_start, entry_stop, threads)
         return self._assemble(res, single, library)
 
     def _assemble(self, res, single, library):
@@ -221,7 +225,27 @@ class Chain:
             return self._assemble_np(res)
         if library == "pd":
             return self._assemble_pd(res)
-        raise ValueError(f"unknown library {library!r} (expected 'ak', 'np', or 'pd')")
+        if library == "arrow":
+            return self._assemble_arrow(res)
+        raise ValueError(
+            f"unknown library {library!r} (expected 'ak', 'np', 'pd', or 'arrow')"
+        )
+
+    def _assemble_arrow(self, res):
+        import awkward as ak
+
+        # A pyarrow.Table wants one (list-typed) column per field, i.e. a
+        # top-level *record of lists* — so zip the jagged columns at depth 1
+        # (not the default deep broadcast, which would nest them into one
+        # column). Awkward's Arrow export uses the C Data Interface, so the
+        # NumPy buffers pass through zero-copy (needs pyarrow installed).
+        multi = len(res) > 1
+        fields = {}
+        for bname, offsets, cols in res:
+            for name, values, inner in cols:
+                key = f"{bname}/{name}" if multi else name
+                fields[key] = ak.Array(_wrap_column(ak, offsets, values, inner))
+        return ak.to_arrow_table(ak.zip(fields, depth_limit=1))
 
     def _assemble_ak(self, res, single):
         import awkward as ak
@@ -269,6 +293,7 @@ class Chain:
         report: bool = False,
         entry_start=None,
         entry_stop=None,
+        threads=0,
     ):
         """Stream the chain in bounded-memory chunks.
 
@@ -278,6 +303,7 @@ class Chain:
         in constant memory. ``step_size`` is an event count (``int``) or a byte
         budget (``"200 MB"``, ``"1 GB"``). Chunks are aligned to record and
         file boundaries. With ``report=True`` each item is ``(chunk, Report)``.
+        ``threads`` tunes the per-chunk Rust read (``0`` = all cores).
         """
         selection, single = self._resolve(banks, columns, filter_name)
         mode, size = _parse_step_size(step_size)
@@ -288,7 +314,7 @@ class Chain:
         lo = 0 if entry_start is None else max(0, entry_start)
         hi = total if entry_stop is None else min(total, entry_stop)
         for start, stop, fi in self._iter_batches(spans, sizes, mode, size, lo, hi):
-            res = self._c.read_columns(selection, start, stop)
+            res = self._c.read_columns(selection, start, stop, threads)
             chunk = self._assemble(res, single, library)
             if report:
                 yield chunk, Report(start, stop, files[fi])
