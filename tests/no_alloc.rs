@@ -6,26 +6,40 @@
 //! - Per record: one decompression into a recycled `Vec<u8>` (via
 //!   `Arc::try_unwrap`) and a refill of a recycled event-offsets `Vec<u32>`.
 //!
-//! Implementation note: this binary installs a counting wrapper around
-//! the system allocator. The counter is a *global* (the allocator API
-//! doesn't expose per-call context), so concurrent allocations from any
-//! thread are attributed to whoever owns the counting window. We
-//! therefore combine all measurements into a single `#[test]` function
-//! that runs entirely on the test main thread.
+//! Implementation note: this binary installs a counting wrapper around the
+//! system allocator. Counting is armed by a *thread-local* flag, set only on
+//! the thread running [`count_allocs`], so allocations on background threads —
+//! rayon's global pool (spawned when `Chain::open` fans file opens across
+//! workers) and the test harness — are never attributed to the measurement.
+//! The global `ALLOCS` counter is therefore only ever touched by the measuring
+//! thread.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxihipo::{Chain, DataType, Dict, Schema, Writer};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
-static COUNTING: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// Armed only on the thread inside [`count_allocs`]. `const`-init means
+    /// TLS access allocates nothing, so it is safe to read from within the
+    /// allocator without reentrancy.
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the *current* thread is inside a counting window.
+#[inline]
+fn counting() -> bool {
+    COUNTING.try_with(|c| c.get()).unwrap_or(false)
+}
 
 struct CountingAlloc;
 
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
+        if counting() {
             ALLOCS.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.alloc(layout) }
@@ -34,13 +48,13 @@ unsafe impl GlobalAlloc for CountingAlloc {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
+        if counting() {
             ALLOCS.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
+        if counting() {
             ALLOCS.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -86,9 +100,9 @@ fn build_fixture(path: &std::path::Path, events: i32, max_record_events: u32) {
 /// Run a closure with allocation counting enabled; returns the count.
 fn count_allocs<F: FnOnce()>(f: F) -> usize {
     ALLOCS.store(0, Ordering::Relaxed);
-    COUNTING.store(true, Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
     f();
-    COUNTING.store(false, Ordering::Relaxed);
+    COUNTING.with(|c| c.set(false));
     ALLOCS.load(Ordering::Relaxed)
 }
 
