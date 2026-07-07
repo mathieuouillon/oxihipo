@@ -70,27 +70,35 @@ impl PyChain {
     /// Open a file, directory, glob, or list of paths.
     #[new]
     fn new(py: Python<'_>, source: Bound<'_, PyAny>) -> PyResult<Self> {
-        // Accept a single str/os.PathLike or a sequence of them.
-        let paths: Vec<String> = if let Ok(s) = source.extract::<String>() {
-            vec![s]
+        // A SINGLE path auto-detects (file → itself; dir → its *.hipo; else a
+        // glob), but an explicit LIST is taken verbatim — so the two must reach
+        // different `Chain::open` overloads. `str` is checked before the
+        // sequence branches (a `str` is itself an iterable of 1-char strings).
+        enum Source {
+            One(String),
+            Many(Vec<String>),
+        }
+        let src = if let Ok(s) = source.extract::<String>() {
+            Source::One(s)
         } else if let Ok(list) = source.extract::<Vec<String>>() {
-            list
-        } else {
-            // os.PathLike (single) or a sequence of them → fsdecode via str().
-            match source.try_iter() {
-                Ok(it) => {
-                    let mut v = Vec::new();
-                    for item in it {
-                        v.push(item?.str()?.extract::<String>()?);
-                    }
-                    v
-                }
-                Err(_) => vec![source.str()?.extract::<String>()?],
+            Source::Many(list)
+        } else if let Ok(it) = source.try_iter() {
+            // A sequence of os.PathLike → fsdecode each via str().
+            let mut v = Vec::new();
+            for item in it {
+                v.push(item?.str()?.extract::<String>()?);
             }
+            Source::Many(v)
+        } else {
+            // A single os.PathLike.
+            Source::One(source.str()?.extract::<String>()?)
         };
         // Blocking I/O (open + header + dictionary + trailer) with GIL released.
         let inner = py
-            .allow_threads(|| oxihipo::Chain::open(paths))
+            .allow_threads(|| match src {
+                Source::One(s) => oxihipo::Chain::open(s),
+                Source::Many(v) => oxihipo::Chain::open(v),
+            })
             .map_err(to_pyerr)?;
         Ok(Self { inner })
     }
@@ -211,6 +219,69 @@ impl PyChain {
             })
             .collect())
     }
+
+    /// A new `Chain` restricted to events carrying every bank in `require`
+    /// (and, if given, whose record tag is in `record_tag`). Cheap — clones
+    /// the shared file handles, does not reopen. `KeyError` if a required
+    /// bank isn't in the dictionary.
+    #[pyo3(signature = (require=None, record_tag=None))]
+    fn filtered(
+        &self,
+        require: Option<Vec<String>>,
+        record_tag: Option<Vec<u64>>,
+    ) -> PyResult<PyChain> {
+        let mut filter = oxihipo::Filter::new();
+        if let Some(names) = require {
+            filter = filter.and_require(names);
+        }
+        if let Some(tags) = record_tag {
+            filter = filter.record_tag(tags);
+        }
+        let inner = self.inner.clone().with_filter(filter).map_err(to_pyerr)?;
+        Ok(PyChain { inner })
+    }
+
+    /// Copy the (filtered) chain to `dst`, re-compressing with `compression`
+    /// (`"none"`, `"lz4"`, `"lz4best"`, `"gzip"`, `"lz4bybank"`,
+    /// `"lz4bybankv2"`, `"lz4percolumn"`). Returns
+    /// `{"events", "records", "bytes"}`.
+    #[pyo3(signature = (dst, compression="lz4bybank"))]
+    fn skim<'py>(
+        &self,
+        py: Python<'py>,
+        dst: String,
+        compression: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let comp = parse_compression(compression)?;
+        let summary = py
+            .allow_threads(|| self.inner.skim(&dst, comp))
+            .map_err(to_pyerr)?;
+        let out = PyDict::new(py);
+        out.set_item("events", summary.events)?;
+        out.set_item("records", summary.records)?;
+        out.set_item("bytes", summary.bytes)?;
+        Ok(out)
+    }
+}
+
+/// Map a compression name to the core enum (`Lz4Chunked` needs a parameter and
+/// is intentionally not offered here).
+fn parse_compression(name: &str) -> PyResult<oxihipo::Compression> {
+    use oxihipo::Compression;
+    Ok(match name.to_ascii_lowercase().as_str() {
+        "none" => Compression::None,
+        "lz4" => Compression::Lz4,
+        "lz4best" => Compression::Lz4Best,
+        "gzip" => Compression::Gzip,
+        "lz4bybank" => Compression::Lz4ByBank,
+        "lz4bybankv2" => Compression::Lz4ByBankV2,
+        "lz4percolumn" => Compression::Lz4PerColumn,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown compression {other:?}"
+            )));
+        }
+    })
 }
 
 #[pymodule]
