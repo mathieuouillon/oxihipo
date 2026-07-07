@@ -38,6 +38,7 @@ use crate::write::{Compression, WriteSummary, Writer};
 /// directory, a glob pattern, or an explicit list of paths (see
 /// [`IntoSources`]). All files in a chain must share the same dict — this
 /// is validated at construction.
+#[derive(Clone)]
 pub struct Chain {
     files: Vec<Arc<FileInner>>,
     /// Cumulative event counts. `file_event_offsets[i]` = total events
@@ -581,9 +582,28 @@ impl Chain {
         })
     }
 
+    /// Borrow the opened files in input order. The column materializer
+    /// indexes `files_inner()[fi]` for a `(file_idx, record_idx)` task.
+    pub(crate) fn files_inner(&self) -> &[Arc<FileInner>] {
+        &self.files
+    }
+
+    /// Cumulative per-file event offsets: `event_offsets()[fi]` is the global
+    /// index of file `fi`'s first event, so local event `e` of record span
+    /// `span` in file `fi` has global index `event_offsets()[fi] +
+    /// span.first_event + e`.
+    pub(crate) fn event_offsets(&self) -> &[u64] {
+        &self.file_event_offsets
+    }
+
+    /// The bound event filter, if any.
+    pub(crate) fn filter_ref(&self) -> Option<&Filter> {
+        self.filter.as_ref()
+    }
+
     /// Build a flat `(file_idx, record_idx)` task list, after record-tag
     /// pushdown (reads each record header only; no decompression).
-    fn build_tasks(&self) -> Vec<(usize, usize)> {
+    pub(crate) fn build_tasks(&self) -> Vec<(usize, usize)> {
         let mut tasks = Vec::new();
         for (fi, inner) in self.files.iter().enumerate() {
             let records = inner.index.records();
