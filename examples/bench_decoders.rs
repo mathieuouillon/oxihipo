@@ -22,9 +22,8 @@ use std::time::Instant;
 
 // Internal modules are private, so we re-parse record headers ourselves
 // using the small public surface exposed by the crate. We can't reach
-// `decode_record_into` from outside the crate, but we can mmap the file
-// and walk records by their headers.
-use memmap2::MmapOptions;
+// `decode_record_into` from outside the crate, but we can read the file
+// into memory and walk records by their headers.
 
 // ----- Apple libcompression FFI ---------------------------------------------
 #[cfg(target_os = "macos")]
@@ -68,17 +67,16 @@ struct RecordSample {
 }
 
 fn extract_records(path: &str, max: usize) -> Vec<RecordSample> {
-    let file = std::fs::File::open(path).unwrap();
-    let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
+    let data = std::fs::read(path).unwrap();
 
     // File header → header_length + user_header_length → first data record.
-    let file_header_words = read_u32(&mmap, FH_HEADER_LENGTH);
-    let user_header_bytes = read_u32(&mmap, FH_USER_HEADER_LEN);
+    let file_header_words = read_u32(&data, FH_HEADER_LENGTH);
+    let user_header_bytes = read_u32(&data, FH_USER_HEADER_LEN);
     let mut off = (file_header_words as usize * 4) + user_header_bytes as usize;
 
     let mut out = Vec::new();
-    while off + RECORD_HEADER_SIZE <= mmap.len() && out.len() < max {
-        let header = &mmap[off..off + RECORD_HEADER_SIZE];
+    while off + RECORD_HEADER_SIZE <= data.len() && out.len() < max {
+        let header = &data[off..off + RECORD_HEADER_SIZE];
         let record_length_words = read_u32(header, RH_RECORD_LENGTH);
         let header_length_words = read_u32(header, RH_HEADER_LENGTH);
         let bit_info = read_u32(header, RH_BIT_INFO);
@@ -102,10 +100,10 @@ fn extract_records(path: &str, max: usize) -> Vec<RecordSample> {
             // Apple's) will keep consuming the zeros as additional
             // literals and emit garbage.
             let lz4_end = lz4_start + compressed_bytes_padded - compressed_data_padding;
-            if lz4_end <= mmap.len() && lz4_end > lz4_start {
+            if lz4_end <= data.len() && lz4_end > lz4_start {
                 let expected = (data_length as usize) + 1024 * 64; // slack
                 out.push(RecordSample {
-                    compressed: mmap[lz4_start..lz4_end].to_vec(),
+                    compressed: data[lz4_start..lz4_end].to_vec(),
                     expected,
                 });
             }

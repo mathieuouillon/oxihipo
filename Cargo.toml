@@ -52,9 +52,6 @@ lz4-apple = []
 tempfile = "3"
 criterion = { version = "0.7", features = ["html_reports"] }
 proptest = "1"
-# Used only by the `bench_decoders` example to pull raw record bytes for
-# microbenchmarking the decoders; the library itself streams via `pread`.
-memmap2 = "0.9"
 # tqdm-style progress bars for the `recook_by_bank` / `skim` examples.
 kdam = "0.6"
 
