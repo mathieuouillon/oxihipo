@@ -94,6 +94,16 @@ never iterates events. Errors map onto a Python exception tree
 (`KeyError` for a missing bank/column, `TypeError` for a dtype mismatch,
 `OSError` for I/O, `oxihipo.CorruptFileError` for a malformed record).
 
+## Performance
+
+Reading through the binding runs within **~10% of native Rust** — the per-event
+decode is Rust behind a released GIL, and columns move into NumPy zero-copy. On
+a 9.1 GB CLAS12 file (598k events, Apple M4 Pro, all cores),
+`f.arrays("REC::Particle", ["px","py","pz","pid"])` reads at ~5.6 GB/s vs Rust's
+6.3 GB/s. Details + reproduction:
+[`docs/python-vs-rust-benchmark.md`](../docs/python-vs-rust-benchmark.md) and
+[`examples/bench_columns.py`](examples/bench_columns.py).
+
 ## Build
 
 Requires the Rust toolchain and [maturin](https://www.maturin.rs).

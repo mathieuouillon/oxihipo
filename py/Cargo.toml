@@ -26,5 +26,11 @@ numpy = "0.23"
 # `panic = "abort"` release profile.
 [profile.release]
 panic = "unwind"
+# Match the core's release profile so the shipped wheel is as fast as a native
+# Rust build (cross-crate inlining of the decode + materialize hot loops).
+# Costs wheel build time (LTO); worth it for a read-throughput library.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 
 [workspace]
