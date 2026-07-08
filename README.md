@@ -170,6 +170,21 @@ Build with [maturin](https://www.maturin.rs) (`cd py && maturin develop
 [`py/examples/`](py/examples/). Design notes:
 [`docs/python-binding-design.md`](docs/python-binding-design.md).
 
+**Nearly-native speed.** Reading `REC::Particle` `px,py,pz,pid` from a 9.1 GB
+CLAS12 file (598,738 events, 4.7 M particles; Apple M4 Pro, all cores, warm
+cache):
+
+| | throughput | vs Rust |
+|---|--:|--:|
+| Rust `read_columns` | 6.3 GB/s | 1.00× |
+| Python `read_columns` (NumPy) | 5.8 GB/s | 0.91× |
+| Python `arrays` (Awkward) | 5.6 GB/s | 0.89× |
+
+The per-event decode runs in Rust behind a released GIL and columns move into
+NumPy zero-copy, so the binding costs ~10%. Method + reproduction:
+[`docs/python-vs-rust-benchmark.md`](docs/python-vs-rust-benchmark.md)
+(`examples/bench_columns.rs`, `py/examples/bench_columns.py`).
+
 ## Layout
 
 Single-crate repo (`oxihipo` — error, wire, compress, schema, event, read,
