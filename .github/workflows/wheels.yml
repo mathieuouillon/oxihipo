@@ -47,10 +47,26 @@ jobs:
           maturin build --release --out dist -i python
       - name: Install wheel + test dependencies
         run: |
-          python -m pip install numpy awkward pandas pyarrow pytest
+          python -m pip install numpy awkward pandas pyarrow pytest "mypy~=2.3"
           python -m pip install --no-index --find-links py/dist oxihipo --no-deps
       - name: Run the binding's test suite
         run: python -m pytest py/tests -q
+      - name: Type-check the pure-Python package (mypy)
+        working-directory: py
+        run: python -m mypy
+      - name: Check the compiled stub matches the extension (stubtest)
+        working-directory: py
+        run: python -m mypy.stubtest oxihipo._oxihipo
+      - name: Assert the py.typed marker ships in the wheel (PEP 561)
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          whl = sorted(glob.glob("py/dist/*.whl"))[-1]
+          names = zipfile.ZipFile(whl).namelist()
+          assert any(n.endswith("oxihipo/py.typed") for n in names), \
+              f"py.typed missing from {whl}: {names}"
+          print("py.typed present in", whl)
+          PY
 
   linux:
     name: wheels linux ${{ matrix.target }}

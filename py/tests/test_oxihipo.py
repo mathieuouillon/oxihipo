@@ -305,3 +305,131 @@ def test_module_arrays_workers():
     single = oxihipo.arrays(os.path.join(DATA, "sample.hipo"), "REC::Particle", ["pid"])
     par = oxihipo.arrays(os.path.join(DATA, "sample.hipo"), "REC::Particle", ["pid"], workers=2)
     assert ak.to_list(par) == ak.to_list(single)
+
+
+# --- correctness fixes (empty selections, guards, degenerate ranges) --------
+def test_empty_selection_returns_empty_not_crash(chain):
+    """A non-matching filter_name / empty bank list yields an empty (length-0)
+    array on every library instead of throwing from the assembler."""
+    ak = pytest.importorskip("awkward")
+    empty = chain.arrays(filter_name="REC::NoSuchBank*")  # default library="ak"
+    assert len(empty) == 0 and list(empty.fields) == []
+    assert ak.to_list(chain.arrays([], library="ak")) == ak.to_list(empty)
+    assert chain.arrays(filter_name="REC::NoSuchBank*", library="np") == {}
+
+
+def test_empty_selection_arrow(chain):
+    pytest.importorskip("pyarrow")
+    tbl = chain.arrays(filter_name="REC::NoSuchBank*", library="arrow")
+    assert tbl.num_columns == 0  # empty table, not a crash
+
+
+def test_empty_selection_workers_matches_single(chain):
+    """Empty selection + workers>1 must not IndexError (the parallel stitch runs
+    before the assembler's empty guard) — it must match the workers=1 result."""
+    ak = pytest.importorskip("awkward")
+    ak_s = chain.arrays(filter_name="REC::NoSuchBank*")
+    ak_p = chain.arrays(filter_name="REC::NoSuchBank*", workers=2)
+    assert len(ak_p) == len(ak_s) == 0
+    assert chain.arrays([], library="np", workers=2) == {}
+
+
+def test_concat_raw_handles_empty_results():
+    """The stitch returns [] for all-empty worker results, so the assembler's
+    empty guard runs instead of an IndexError."""
+    from oxihipo import _parallel
+
+    assert _parallel._concat_raw([]) == []
+    assert _parallel._concat_raw([[], []]) == []
+
+
+def test_np_zero_event_matches_ak_length(chain):
+    """0-event reads agree between np and ak (np.split used to give length-1)."""
+    ak = pytest.importorskip("awkward")
+    d = chain.arrays("REC::Particle", ["pid"], library="np", entry_start=0, entry_stop=0)
+    a = chain.arrays("REC::Particle", ["pid"], entry_start=0, entry_stop=0)
+    assert len(d["pid"]) == len(a) == 0
+
+
+def test_np_values_match_awkward(chain):
+    ak = pytest.importorskip("awkward")
+    d = chain.arrays("REC::Particle", ["pid", "cov"], library="np")
+    a = chain.arrays("REC::Particle", ["pid", "cov"])
+    assert [list(x) for x in d["pid"]] == ak.to_list(a.pid)
+    assert [x.tolist() for x in d["cov"]] == ak.to_list(a.cov)
+
+
+def test_columns_with_multiple_banks_raises(chain):
+    with pytest.raises(TypeError):
+        chain.arrays(["REC::Particle", "REC::Event"], ["pid"])
+    with pytest.raises(TypeError):
+        chain.arrays(filter_name="REC::*", columns=["pid"])
+
+
+def test_step_size_rejects_bool_and_zero_bytes(chain):
+    with pytest.raises(TypeError):
+        list(chain.iterate("REC::Particle", step_size=True))
+    with pytest.raises(ValueError):
+        list(chain.iterate("REC::Particle", step_size="0 MB"))
+
+
+def test_parallel_empty_range_matches_single(chain):
+    """workers>1 on an empty/degenerate range returns empty like workers=1
+    (used to IndexError in the stitch)."""
+    ak = pytest.importorskip("awkward")
+    par = chain.arrays("REC::Particle", ["pid"], workers=4, entry_start=99, entry_stop=99)
+    assert len(par) == 0
+
+
+# --- Pythonic surface -------------------------------------------------------
+def test_numpy_returns_named_tuple(chain):
+    col = chain.numpy("REC::Particle", "pid")
+    v, o, i = col  # still unpacks positionally
+    assert col.values is v and col.offsets is o and col.inner_len == i
+
+
+def test_context_manager_and_close(chain):
+    with oxihipo.open(os.path.join(DATA, "sample.hipo")) as f:
+        assert f.num_entries == 8
+    assert f._c is None  # released on exit
+    assert repr(f) == "<oxihipo.Chain: closed>"  # repr never throws
+    with pytest.raises(ValueError):  # clean error, not opaque NoneType
+        f.num_entries
+    with pytest.raises(ValueError):
+        len(f)
+    with pytest.raises(ValueError):
+        f.arrays("REC::Particle")
+
+
+def test_arrow_array_column_and_workers(chain):
+    pa = pytest.importorskip("pyarrow")
+    ak = pytest.importorskip("awkward")
+    # T#N array column → FixedSizeList (the inner>1 branch)
+    cov_ak = chain.arrays("REC::Particle", ["cov"]).cov
+    cov_tb = chain.arrays("REC::Particle", ["cov"], library="arrow").column("cov")
+    assert cov_tb.to_pylist() == ak.to_list(cov_ak)
+    # arrow + workers>1 stitches to the same table as workers=1
+    a = chain.arrays("REC::Particle", ["pid", "px"], library="arrow")
+    b = chain.arrays("REC::Particle", ["pid", "px"], library="arrow", workers=2)
+    assert a.column("pid").to_pylist() == b.column("pid").to_pylist()
+    assert a.column("px").to_pylist() == b.column("px").to_pylist()
+
+
+def test_chain_and_proxy_are_iterable(chain):
+    assert list(chain) == chain.keys()  # __iter__ over bank names
+    proxy = chain["REC::Particle"]
+    assert list(proxy) == proxy.keys() and len(proxy) == len(proxy.keys())
+
+
+def test_dir_surfaces_delegated_reader_methods(chain):
+    d = dir(chain)
+    assert "num_entries" in d and "record_spans" in d and "arrays" in d
+
+
+def test_copy_does_not_recurse(chain):
+    import copy
+
+    shallow = copy.copy(chain)  # used to RecursionError
+    assert shallow._c is chain._c
+    with pytest.raises(TypeError):  # frozen reader isn't deep-copyable — clean error
+        copy.deepcopy(chain)

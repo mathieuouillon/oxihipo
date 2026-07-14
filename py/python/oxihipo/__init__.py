@@ -13,10 +13,17 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from ._oxihipo import Chain as _RustChain, CorruptFileError, OxihipoError, __version__
+
+if TYPE_CHECKING:  # optional/lazy deps — imported only for annotations, never at runtime
+    import awkward as ak
+    import numpy as np
+    import pandas as pd
+    import pyarrow as pa
 
 __all__ = [
     "Chain",
@@ -24,10 +31,25 @@ __all__ = [
     "iterate",
     "arrays",
     "Report",
+    "NumpyColumn",
     "CorruptFileError",
     "OxihipoError",
     "__version__",
 ]
+
+# Library name → return type, for the `library=` annotations below.
+_Library = Literal["ak", "np", "pd", "arrow"]
+
+
+class NumpyColumn(NamedTuple):
+    """Return of :meth:`Chain.numpy` — a flat column plus its jagged layout.
+
+    Unpacks positionally like the old 3-tuple (``values, offsets, inner_len``)
+    but self-documents and disambiguates from ``read_columns``' element order."""
+
+    values: "np.ndarray"
+    offsets: "np.ndarray"  # int64, length = n_events + 1
+    inner_len: int  # > 1 for fixed-size ``T#N`` array columns
 
 
 @dataclass(frozen=True)
@@ -50,6 +72,10 @@ _STEP_UNITS = {
 
 def _parse_step_size(step_size):
     """``step_size`` → ``("events", n)`` (int) or ``("bytes", n)`` ("200 MB")."""
+    # `bool` is an `int` subclass — reject it so `step_size=True` isn't read as
+    # "1 event" by accident.
+    if isinstance(step_size, bool):
+        raise TypeError("step_size must be an int or byte-budget string, not bool")
     if isinstance(step_size, int):
         if step_size <= 0:
             raise ValueError("step_size must be a positive number of events")
@@ -60,7 +86,10 @@ def _parse_step_size(step_size):
     num, unit = float(m.group(1)), m.group(2).lower()
     if unit not in _STEP_UNITS:
         raise ValueError(f"unknown step_size unit {unit!r}")
-    return ("bytes", max(1, int(num * _STEP_UNITS[unit])))
+    n = int(num * _STEP_UNITS[unit])
+    if n <= 0:  # e.g. "0 MB" — mirror the int path instead of silently clamping to 1
+        raise ValueError("step_size must be a positive byte budget")
+    return ("bytes", n)
 
 
 def _worker_threads(threads, workers):
@@ -109,10 +138,11 @@ class _BankProxy:
         return self._chain._c.columns(self._bank)
 
     def typenames(self) -> dict[str, str]:
+        # `typenames()` already returns a dict — iterate it directly, no re-copy.
         pref = self._bank + "/"
         return {
             k[len(pref):]: v
-            for k, v in dict(self._chain._c.typenames()).items()
+            for k, v in self._chain._c.typenames().items()
             if k.startswith(pref)
         }
 
@@ -128,6 +158,12 @@ class _BankProxy:
     def __contains__(self, column: str) -> bool:
         return column in self.keys()
 
+    def __iter__(self):
+        return iter(self.keys())
+
+    def __len__(self) -> int:
+        return len(self.keys())
+
     def __repr__(self) -> str:
         return f"<oxihipo.Bank {self._bank!r}: {self.keys()}>"
 
@@ -140,6 +176,24 @@ class Chain:
     ``array(bank, column)`` returns one jagged column.
     """
 
+    # `close()` sets this to None; typed as the reader so member access checks
+    # against the real surface (use-after-close raises naturally at runtime).
+    _c: "_RustChain"
+
+    if TYPE_CHECKING:
+        # These live on the compiled reader and reach users through __getattr__.
+        # Declaring them here (no runtime attribute is created) lets type
+        # checkers and IDEs see the real surface instead of collapsing it to
+        # ``Any`` — which is what makes the shipped ``py.typed`` marker useful.
+        num_entries: int
+        file_count: int
+        files: list[str]
+
+        def columns(self, bank: str) -> list[str]: ...
+        def typenames(self) -> dict[str, str]: ...
+        def record_spans(self) -> list[tuple[int, int, int, int]]: ...
+        def record_decompressed_sizes(self) -> list[int]: ...
+
     def __init__(self, source):
         self._c = source if isinstance(source, _RustChain) else _RustChain(source)
         # The resolved file list + any filter, so worker processes can re-open
@@ -147,24 +201,84 @@ class Chain:
         self._source = list(self._c.files)
         self._require = None
         self._record_tag = None
+        # Per-record metadata is immutable (the Rust chain is frozen) and
+        # `filtered()` builds a fresh wrapper, so it is safe to memoize.
+        self._spans_cache: list | None = None
+        self._sizes_cache: list | None = None
 
     # --- delegation to the compiled reader ---------------------------------
+    def _reader(self) -> "_RustChain":
+        """The compiled reader, or a clean error if the chain has been closed."""
+        if self._c is None:
+            raise ValueError("operation on a closed Chain")
+        return self._c
+
     def __getattr__(self, name):  # num_entries, file_count, files, columns, …
-        return getattr(self._c, name)
+        # __getattr__ runs only when normal lookup fails. Guard the delegate so
+        # a half-built Chain (copy/pickle/__new__, before `_c` exists) raises a
+        # clean AttributeError instead of recursing on `self._c` forever, and a
+        # closed chain raises a clear ValueError rather than a NoneType error.
+        if name.startswith("__") or name == "_c":
+            raise AttributeError(name)
+        c = self.__dict__.get("_c", None)
+        if c is None:
+            if "_c" in self.__dict__:  # present but None → closed
+                raise ValueError("operation on a closed Chain")
+            raise AttributeError(name)  # absent → half-built
+        return getattr(c, name)
+
+    def __dir__(self):
+        # Surface the delegated reader methods to dir()/help()/autocomplete.
+        extra = set(dir(self._c)) if self._c is not None else set()
+        return sorted(set(super().__dir__()) | extra)
+
+    def _record_spans(self):
+        if self._spans_cache is None:
+            self._spans_cache = self._reader().record_spans()
+        return self._spans_cache
+
+    def _record_decompressed_sizes(self):
+        if self._sizes_cache is None:  # per-record header I/O — worth caching
+            self._sizes_cache = self._reader().record_decompressed_sizes()
+        return self._sizes_cache
 
     def __len__(self):
-        return len(self._c)
+        return len(self._reader())
+
+    def __iter__(self):
+        """Iterate bank names — dict-style, consistent with ``bank in chain``
+        and ``chain[bank]``. Note ``len(chain)`` is the *event* count (uproot
+        parity), so it intentionally differs from ``len(list(chain))``."""
+        return iter(self.keys())
 
     def __contains__(self, bank):
-        return bank in self._c
+        return bank in self._reader()
 
     def __repr__(self):
-        return f"<oxihipo.Chain: {self._c.num_entries} events, {self._c.file_count} file(s)>"
+        c = self.__dict__.get("_c", None)
+        if c is None:
+            return "<oxihipo.Chain: closed>"
+        return f"<oxihipo.Chain: {c.num_entries} events, {c.file_count} file(s)>"
+
+    # --- resource management (uproot parity) -------------------------------
+    def close(self) -> None:
+        """Release the underlying reader (idempotent). ``with`` closes for you.
+
+        The core reads with positioned ``pread`` on a shared file descriptor
+        (no mmap), so CPython already drops handles when the chain goes out of
+        scope — this just makes ``with ox.open(...) as f`` work."""
+        self._c = None  # type: ignore[assignment]
+
+    def __enter__(self) -> "Chain":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def keys(self, recursive: bool = False, filter_name: str | None = None) -> list[str]:
         """Bank names, or ``bank/column`` keys (``recursive=True``); optionally
         keep only those matching the ``filter_name`` glob."""
-        out = self._c.keys(recursive)
+        out = self._reader().keys(recursive)
         if filter_name is not None:
             out = [k for k in out if fnmatch.fnmatch(k, filter_name)]
         return out
@@ -172,9 +286,16 @@ class Chain:
     # --- selection resolution ---------------------------------------------
     def _resolve(self, banks, columns, filter_name):
         """→ (selection, single) where selection is [(bank, [cols])]."""
+        # `columns=` only makes sense for a single named bank; across banks,
+        # columns are selected via filter_name. Fail loudly rather than drop it.
+        if columns is not None and (filter_name is not None or not isinstance(banks, str)):
+            raise TypeError(
+                "`columns=` is only valid with a single bank name; select "
+                "columns across banks via filter_name='BANK/col*'"
+            )
         if filter_name is not None:
             grouped: dict[str, list[str]] = {}
-            for key in self._c.keys(True):
+            for key in self._reader().keys(True):
                 bank = key.split("/", 1)[0]
                 if fnmatch.fnmatch(key, filter_name) or fnmatch.fnmatch(bank, filter_name):
                     grouped.setdefault(bank, [])
@@ -183,26 +304,32 @@ class Chain:
             # A bank matched by name (not a column glob) keeps all its columns.
             return [(b, cols) for b, cols in grouped.items()], False
         if banks is None:
-            return [(b, []) for b in self._c.keys(False)], False
+            return [(b, []) for b in self._reader().keys(False)], False
         if isinstance(banks, str):
             return [(banks, list(columns) if columns is not None else [])], True
         return [(b, []) for b in banks], False
 
     # --- the raw NumPy path (no Awkward needed) ----------------------------
-    def numpy(self, bank: str, column: str, *, entry_start=None, entry_stop=None, threads=0):
-        """``(values, offsets, inner_len)`` for one column — plain NumPy."""
-        _, offsets, cols = self._c.read_columns(
+    def numpy(
+        self, bank: str, column: str, *, entry_start=None, entry_stop=None, threads=0
+    ) -> NumpyColumn:
+        """``(values, offsets, inner_len)`` for one column — plain NumPy.
+
+        Returns a :class:`NumpyColumn` named tuple (still unpacks positionally)."""
+        _, offsets, cols = self._reader().read_columns(
             [(bank, [column])], entry_start, entry_stop, threads
         )[0]
         _, values, inner_len = cols[0]
-        return values, offsets, inner_len
+        return NumpyColumn(values, offsets, inner_len)
 
     # --- the Awkward path --------------------------------------------------
-    def array(self, bank: str, column: str, *, entry_start=None, entry_stop=None, threads=0):
+    def array(
+        self, bank: str, column: str, *, entry_start=None, entry_stop=None, threads=0
+    ) -> "ak.Array":
         """One jagged column as an ``ak.Array`` (type ``N * var * T``)."""
         import awkward as ak
 
-        _, offsets, cols = self._c.read_columns(
+        _, offsets, cols = self._reader().read_columns(
             [(bank, [column])], entry_start, entry_stop, threads
         )[0]
         _, values, inner_len = cols[0]
@@ -214,7 +341,7 @@ class Chain:
         columns: Sequence[str] | None = None,
         *,
         filter_name: str | None = None,
-        library: str = "ak",
+        library: _Library = "ak",
         entry_start=None,
         entry_stop=None,
         threads=0,
@@ -236,20 +363,26 @@ class Chain:
           ``threads``, the cores are split across workers (total ≈ all cores);
           on the farm the extra decode threads simply wait on I/O.
         """
+        c = self._reader()
         selection, single = self._resolve(banks, columns, filter_name)
         if workers and workers > 1:
             from . import _parallel
 
-            total = self._c.num_entries
+            total = c.num_entries
             lo = 0 if entry_start is None else max(0, entry_start)
             hi = total if entry_stop is None else min(total, entry_stop)
-            ranges = _parallel.split_ranges(self._c.record_spans(), workers, lo, hi)
-            return _parallel.parallel_arrays(
-                self._source, self._require, self._record_tag, selection, ranges,
-                workers, _worker_threads(threads, workers),
-                lambda res: self._assemble(res, single, library),
-            )
-        res = self._c.read_columns(selection, entry_start, entry_stop, threads)
+            ranges = _parallel.split_ranges(self._record_spans(), workers, lo, hi)
+            # Only fan out when the range actually splits AND something is
+            # selected; otherwise fall through to the single-process read, which
+            # handles empty/degenerate cases (a filter that matched nothing,
+            # entry_start past the end, an empty bank list) as one empty result.
+            if len(ranges) > 1 and selection:
+                return _parallel.parallel_arrays(
+                    self._source, self._require, self._record_tag, selection, ranges,
+                    workers, _worker_threads(threads, workers),
+                    lambda res: self._assemble(res, single, library),
+                )
+        res = c.read_columns(selection, entry_start, entry_stop, threads)
         return self._assemble(res, single, library)
 
     def _assemble(self, res, single, library):
@@ -265,26 +398,35 @@ class Chain:
             f"unknown library {library!r} (expected 'ak', 'np', 'pd', or 'arrow')"
         )
 
-    def _assemble_arrow(self, res):
-        import awkward as ak
+    def _assemble_arrow(self, res) -> "pa.Table":
+        import pyarrow as pa
 
-        # A pyarrow.Table wants one (list-typed) column per field, i.e. a
-        # top-level *record of lists* — so zip the jagged columns at depth 1
-        # (not the default deep broadcast, which would nest them into one
-        # column). Awkward's Arrow export uses the C Data Interface, so the
-        # NumPy buffers pass through zero-copy (needs pyarrow installed).
+        # Build the pyarrow.Table straight from the returned NumPy buffers — one
+        # (large-)list column per field — instead of round-tripping through
+        # Awkward. `pa.array(offsets)`/`pa.array(values)` wrap the int64/numeric
+        # buffers zero-copy, so the whole path stays copy-free and needs no
+        # awkward import (only pyarrow).
         multi = len(res) > 1
-        fields = {}
-        for bname, offsets, cols in res:
-            for name, values, inner in cols:
+        cols: dict[str, pa.Array] = {}
+        for bname, offsets, bcols in res:
+            off = pa.array(offsets)  # int64 → LargeList offsets, zero-copy
+            for name, values, inner in bcols:
+                child = pa.array(values)  # numeric, no nulls → zero-copy
+                if inner > 1:  # T#N array column → fixed-size inner list
+                    child = pa.FixedSizeListArray.from_arrays(child, int(inner))
                 key = f"{bname}/{name}" if multi else name
-                fields[key] = ak.Array(_wrap_column(ak, offsets, values, inner))
-        return ak.to_arrow_table(ak.zip(fields, depth_limit=1))
+                cols[key] = pa.LargeListArray.from_arrays(off, child)
+        return pa.table(cols)  # empty selection → a valid empty table (no crash)
 
     def _assemble_ak(self, res, single):
         import awkward as ak
 
         built = {bname: _bank_record(ak, offsets, cols) for bname, offsets, cols in res}
+        if not built:
+            # Empty/non-matching selection → a length-0 array, not a crash.
+            # length=0 (rather than num_entries) keeps this consistent across a
+            # sub-range, a filtered chain, and the arrow backend (0 rows).
+            return ak.Array(ak.contents.RecordArray([], [], length=0))
         if single and len(built) == 1:
             return ak.Array(next(iter(built.values())))
         names = list(built.keys())
@@ -296,13 +438,17 @@ class Chain:
         multi = len(res) > 1
         out: dict[str, np.ndarray] = {}
         for bname, offsets, cols in res:
-            split = offsets[1:-1]
+            # One bulk int64→pyint conversion, shared by every column of the
+            # bank; `n == 0` yields a length-0 array (np.split gave a spurious
+            # length-1 one). Then fill the object array in a single pass whose
+            # slices are zero-copy views into the flat buffer.
+            bounds = offsets.tolist()
+            n = len(bounds) - 1
             for name, values, inner in cols:
                 v = values.reshape(-1, inner) if inner > 1 else values
-                parts = np.split(v, split)
-                arr = np.empty(len(parts), dtype=object)
-                for i, part in enumerate(parts):
-                    arr[i] = part
+                arr = np.empty(n, dtype=object)
+                for i in range(n):
+                    arr[i] = v[bounds[i]:bounds[i + 1]]
                 out[f"{bname}/{name}" if multi else name] = arr
         return out
 
@@ -323,7 +469,7 @@ class Chain:
         *,
         step_size=100_000,
         filter_name: str | None = None,
-        library: str = "ak",
+        library: _Library = "ak",
         report: bool = False,
         entry_start=None,
         entry_stop=None,
@@ -346,12 +492,13 @@ class Chain:
         in order. Without an explicit ``threads``, cores are split across the
         workers (total ≈ all cores).
         """
+        c = self._reader()
         selection, single = self._resolve(banks, columns, filter_name)
         mode, size = _parse_step_size(step_size)
-        spans = self._c.record_spans()
-        sizes = self._c.record_decompressed_sizes() if mode == "bytes" else None
-        files = self._c.files
-        total = self._c.num_entries
+        spans = self._record_spans()
+        sizes = self._record_decompressed_sizes() if mode == "bytes" else None
+        files = c.files
+        total = c.num_entries
         lo = 0 if entry_start is None else max(0, entry_start)
         hi = total if entry_stop is None else min(total, entry_stop)
         batches = list(self._iter_batches(spans, sizes, mode, size, lo, hi))
@@ -369,7 +516,7 @@ class Chain:
             return
 
         for start, stop, fi in batches:
-            res = self._c.read_columns(selection, start, stop, threads)
+            res = c.read_columns(selection, start, stop, threads)
             chunk = self._assemble(res, single, library)
             yield (chunk, Report(start, stop, files[fi])) if report else chunk
 
@@ -400,7 +547,7 @@ class Chain:
     def filtered(self, require=None, record_tag=None) -> "Chain":
         """A new chain restricted to events carrying every bank in ``require``
         (and, if given, whose record tag is in ``record_tag``)."""
-        new = Chain(self._c.filtered(require, record_tag))
+        new = Chain(self._reader().filtered(require, record_tag))
         new._require = require
         new._record_tag = record_tag
         return new
@@ -408,7 +555,7 @@ class Chain:
     def skim(self, dst, compression: str = "lz4bybank") -> dict:
         """Copy the (filtered) chain to ``dst``, re-compressing. Returns
         ``{"events", "records", "bytes"}``."""
-        return self._c.skim(str(dst), compression)
+        return self._reader().skim(str(dst), compression)
 
     def __getitem__(self, key: str):
         """``chain["REC::Particle/px"]`` → column; ``chain["REC::Particle"]`` →
@@ -416,7 +563,7 @@ class Chain:
         if "/" in key:
             bank, column = key.rsplit("/", 1)
             return self.array(bank, column)
-        if key in self._c:
+        if key in self._reader():
             return _BankProxy(self, key)
         raise KeyError(key)
 
@@ -426,21 +573,54 @@ def open(source) -> Chain:  # noqa: A001  (uproot-style: oxihipo.open(...))
     return Chain(source)
 
 
-def iterate(source, banks=None, columns=None, **kwargs):
+def iterate(
+    source,
+    banks=None,
+    columns: Sequence[str] | None = None,
+    *,
+    step_size=100_000,
+    filter_name: str | None = None,
+    library: _Library = "ak",
+    report: bool = False,
+    entry_start=None,
+    entry_stop=None,
+    threads=0,
+    workers=1,
+):
     """Stream chunks from a file/dir/glob/list without materializing it whole.
 
-    Equivalent to ``open(source).iterate(banks, columns, **kwargs)`` — a
-    generator, so a multi-file chain never opens more than it needs at once.
-    Pass ``workers=N`` to stream the batches across ``N`` processes.
+    Equivalent to ``open(source).iterate(...)`` — a generator, so a multi-file
+    chain never opens more than it needs at once. Pass ``workers=N`` to stream
+    the batches across ``N`` processes. (The keyword surface is spelled out here
+    — not hidden behind ``**kwargs`` — so ``help()`` and IDEs see it.)
     """
-    return open(source).iterate(banks, columns, **kwargs)
+    return open(source).iterate(
+        banks, columns, step_size=step_size, filter_name=filter_name,
+        library=library, report=report, entry_start=entry_start,
+        entry_stop=entry_stop, threads=threads, workers=workers,
+    )
 
 
-def arrays(source, banks=None, columns=None, **kwargs):
+def arrays(
+    source,
+    banks=None,
+    columns: Sequence[str] | None = None,
+    *,
+    filter_name: str | None = None,
+    library: _Library = "ak",
+    entry_start=None,
+    entry_stop=None,
+    threads=0,
+    workers=1,
+):
     """Read banks/columns from a file/dir/glob/list into one array.
 
-    Equivalent to ``open(source).arrays(banks, columns, **kwargs)``; pass
-    ``workers=N`` to read with ``N`` processes (disjoint record ranges,
-    stitched into one result) — the fast path on a parallel filesystem.
+    Equivalent to ``open(source).arrays(...)``; pass ``workers=N`` to read with
+    ``N`` processes (disjoint record ranges, stitched into one result) — the
+    fast path on a parallel filesystem.
     """
-    return open(source).arrays(banks, columns, **kwargs)
+    return open(source).arrays(
+        banks, columns, filter_name=filter_name, library=library,
+        entry_start=entry_start, entry_stop=entry_stop, threads=threads,
+        workers=workers,
+    )

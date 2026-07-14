@@ -21,16 +21,39 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 
 
-def _read_range(source, require, record_tag, selection, start, stop, threads):
-    """Worker entry point: open the source, (re)apply the filter, read one
-    global event range. Returns the raw ``read_columns`` buffers, which are
-    just NumPy arrays and pickle across the process boundary."""
-    import oxihipo
+# One opened (and filtered) chain per worker process, keyed by what identifies
+# it. The pool is persistent for the life of one arrays()/iterate() call, so a
+# worker that handles several batches parses each file's header/dictionary/
+# trailer once instead of once per batch. (Meaningful for iterate() over
+# many-file chains; arrays() gives each worker ≈one range so it barely helps.)
+_CHAIN_CACHE: dict = {}
 
-    chain = oxihipo.open(source)
-    if require is not None or record_tag is not None:
-        chain = chain.filtered(require=require, record_tag=record_tag)
-    return chain._c.read_columns(selection, start, stop, threads)
+
+def _worker_chain(source, require, record_tag):
+    key = (
+        tuple(source),
+        tuple(require) if require is not None else None,
+        tuple(record_tag) if record_tag is not None else None,
+    )
+    chain = _CHAIN_CACHE.get(key)
+    if chain is None:
+        import oxihipo
+
+        chain = oxihipo.open(source)
+        if require is not None or record_tag is not None:
+            chain = chain.filtered(require=require, record_tag=record_tag)
+        _CHAIN_CACHE[key] = chain
+    return chain
+
+
+def _read_range(source, require, record_tag, selection, start, stop, threads):
+    """Worker entry point: open (once per process) the source, (re)apply the
+    filter, read one global event range. Returns the raw ``read_columns``
+    buffers, which are just NumPy arrays and pickle across the process
+    boundary."""
+    return _worker_chain(source, require, record_tag)._c.read_columns(
+        selection, start, stop, threads
+    )
 
 
 def split_ranges(spans, workers, lo, hi):
@@ -68,6 +91,8 @@ def _concat_raw(results):
     import numpy as np
 
     results = [r for r in results if r]
+    if not results:  # empty/non-matching selection → let the assembler build empty
+        return []
     out = []
     for bi in range(len(results[0])):
         bank = results[0][bi][0]

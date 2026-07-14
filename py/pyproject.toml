@@ -14,16 +14,29 @@ keywords = ["hipo", "clas12", "jefferson-lab", "awkward", "columnar", "physics"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "License :: OSI Approved :: MIT License",
     "Topic :: Scientific/Engineering :: Physics",
     "Intended Audience :: Science/Research",
+    "Typing :: Typed",
 ]
 # NumPy is required (the columnar buffers are ndarrays). Awkward is imported
 # lazily, only inside array()/arrays(), so the numpy() path works without it.
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
+# Each extra pulls in everything its backend actually imports: the pandas and
+# arrow assemblers both go through awkward, so listing pandas/pyarrow alone
+# would install a backend that fails at first use.
 awkward = ["awkward>=2.6"]
-pandas = ["pandas>=2.0"]
+pandas = ["awkward>=2.6", "pandas>=2.0"]
+arrow = ["pyarrow>=14"]
+all = ["awkward>=2.6", "pandas>=2.0", "pyarrow>=14"]
 
 [project.urls]
 Repository = "https://github.com/mathieuouillon/oxihipo"
@@ -34,3 +47,9 @@ Repository = "https://github.com/mathieuouillon/oxihipo"
 python-source = "python"
 module-name = "oxihipo._oxihipo"
 features = ["pyo3/extension-module"]
+
+[tool.mypy]
+files = ["python/oxihipo"]
+# awkward/pandas/pyarrow are optional runtime deps imported lazily; don't fail
+# type-checking when their stubs aren't installed.
+ignore_missing_imports = true

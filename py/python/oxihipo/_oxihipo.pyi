@@ -4,10 +4,12 @@ The user-facing, fully-typed API is the pure-Python :class:`oxihipo.Chain`
 wrapper; this stub types the low-level compiled reader it delegates to.
 """
 
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, final
 
 import numpy as np
 from numpy.typing import NDArray
+
+__all__ = ["Chain", "__version__", "OxihipoError", "CorruptFileError"]
 
 __version__: str
 
@@ -19,8 +21,11 @@ _Selection = Sequence[tuple[str, Sequence[str]]]
 # Per bank: (name, int64 offsets, [(column, values, inner_len), ...]).
 _BankColumns = tuple[str, NDArray[np.int64], list[tuple[str, NDArray[Any], int]]]
 
+@final
 class Chain:
-    def __init__(self, source: Any) -> None: ...
+    # Constructed via __new__ (a PyO3 #[new]); the class is frozen and cannot
+    # be subclassed at runtime.
+    def __new__(cls, source: Any) -> "Chain": ...
     @property
     def num_entries(self) -> int: ...
     @property
@@ -28,7 +33,7 @@ class Chain:
     @property
     def files(self) -> list[str]: ...
     def __len__(self) -> int: ...
-    def __contains__(self, bank: str) -> bool: ...
+    def __contains__(self, bank: str, /) -> bool: ...
     def keys(self, recursive: bool = ...) -> list[str]: ...
     def columns(self, bank: str) -> list[str]: ...
     def typenames(self) -> dict[str, str]: ...

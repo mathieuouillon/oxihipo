@@ -38,7 +38,8 @@ Common knobs (on `arrays` / `array` / `numpy` / `iterate`):
 - `filter_name="REC::*"` — glob over `bank` / `bank/column` keys.
 - `library=` — `"ak"` (default, `ak.Array`), `"np"` (`dict` of object-dtype
   `ndarray`), `"pd"` (pandas, one frame per bank), `"arrow"` (`pyarrow.Table`,
-  one list column per field — for polars / duckdb).
+  one `large_list` column per field — for polars / duckdb). A non-matching
+  `filter_name` / empty bank list yields an *empty* result, not an error.
 - `threads=` — `0` = all cores (default), `1` = sequential, `n` = `n`-thread pool.
 - `workers=` — read with `N` **processes** for I/O-bound filesystems; see
   [Parallel reading](#parallel-reading-multi-process).
@@ -88,6 +89,9 @@ for chunk in ox.iterate("/volatile/run5042/*.hipo", "REC::Particle", step_size="
 - **This helps only when I/O is the bottleneck.** On a local, already-cached
   disk the limit is decode/bandwidth, not I/O, so `workers>1` just adds process
   and IPC overhead — keep the default `workers=1` there.
+- Each `arrays(workers=N)` / `iterate(workers=N)` call spins up its own worker
+  pool, so pay the spawn cost once: prefer a **single** `iterate(...)` over a
+  many-file chain to a loop of small `arrays()` calls.
 
 > **Required:** any script that passes `workers=` must be guarded by
 > `if __name__ == "__main__":`. Workers are spawned (not forked — forking after
@@ -153,7 +157,12 @@ your interpreter is newer than the pinned pyo3 knows about, build with
 
 ## Dependencies
 
+Each extra pulls in everything its backend actually imports, so a single
+`pip install oxihipo[<extra>]` gives a working backend:
+
 - `numpy >= 1.24` (required)
-- `awkward >= 2.6` — for `array` / `arrays` (`pip install oxihipo[awkward]`)
-- `pandas` — for `library="pd"` (`oxihipo[pandas]`)
-- `pyarrow` — for `library="arrow"`
+- `oxihipo[awkward]` — `awkward >= 2.6`, for `array` / `arrays` (`library="ak"`)
+- `oxihipo[pandas]` — awkward + pandas, for `library="pd"`
+- `oxihipo[arrow]` — `pyarrow >= 14`, for `library="arrow"` (assembled directly
+  with pyarrow — no awkward needed on the polars / duckdb path)
+- `oxihipo[all]` — awkward + pandas + pyarrow
