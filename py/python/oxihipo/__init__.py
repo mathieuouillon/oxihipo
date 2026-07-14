@@ -11,6 +11,7 @@ NumPy-only path needs no Awkward import.
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from dataclasses import dataclass
 from typing import Sequence
@@ -21,6 +22,7 @@ __all__ = [
     "Chain",
     "open",
     "iterate",
+    "arrays",
     "Report",
     "CorruptFileError",
     "OxihipoError",
@@ -59,6 +61,16 @@ def _parse_step_size(step_size):
     if unit not in _STEP_UNITS:
         raise ValueError(f"unknown step_size unit {unit!r}")
     return ("bytes", max(1, int(num * _STEP_UNITS[unit])))
+
+
+def _worker_threads(threads, workers):
+    """Per-worker rayon thread count for a ``workers``-process read. An explicit
+    ``threads`` wins; otherwise the machine's cores are split across the workers
+    (total ≈ all cores) so the decode keeps up without N×oversubscribing the
+    CPU. On an I/O-bound farm the surplus threads simply wait on the read."""
+    if threads:
+        return threads
+    return max(1, (os.cpu_count() or 1) // workers)
 
 
 # --------------------------------------------------------------------------
@@ -130,6 +142,11 @@ class Chain:
 
     def __init__(self, source):
         self._c = source if isinstance(source, _RustChain) else _RustChain(source)
+        # The resolved file list + any filter, so worker processes can re-open
+        # an identical chain (see `workers=` on arrays/iterate).
+        self._source = list(self._c.files)
+        self._require = None
+        self._record_tag = None
 
     # --- delegation to the compiled reader ---------------------------------
     def __getattr__(self, name):  # num_entries, file_count, files, columns, …
@@ -201,6 +218,7 @@ class Chain:
         entry_start=None,
         entry_stop=None,
         threads=0,
+        workers=1,
     ):
         """Bank(s) → an array in the requested ``library``.
 
@@ -211,10 +229,26 @@ class Chain:
           object-dtype ``ndarray``; ``"pd"`` → pandas ``DataFrame`` (one bank)
           or ``dict`` of frames; ``"arrow"`` → a ``pyarrow.Table`` (for
           polars / duckdb).
-        - ``threads``: ``0`` = all cores (default), ``1`` = sequential, ``n`` =
-          an ``n``-thread pool for the Rust read.
+        - ``threads``: rayon threads *within* the read (``0`` = all cores).
+        - ``workers``: read with ``N`` **processes** (disjoint record ranges,
+          stitched into one result). On a parallel filesystem (ifarm) this is
+          the way to beat the per-process I/O ceiling. Without an explicit
+          ``threads``, the cores are split across workers (total ≈ all cores);
+          on the farm the extra decode threads simply wait on I/O.
         """
         selection, single = self._resolve(banks, columns, filter_name)
+        if workers and workers > 1:
+            from . import _parallel
+
+            total = self._c.num_entries
+            lo = 0 if entry_start is None else max(0, entry_start)
+            hi = total if entry_stop is None else min(total, entry_stop)
+            ranges = _parallel.split_ranges(self._c.record_spans(), workers, lo, hi)
+            return _parallel.parallel_arrays(
+                self._source, self._require, self._record_tag, selection, ranges,
+                workers, _worker_threads(threads, workers),
+                lambda res: self._assemble(res, single, library),
+            )
         res = self._c.read_columns(selection, entry_start, entry_stop, threads)
         return self._assemble(res, single, library)
 
@@ -294,6 +328,7 @@ class Chain:
         entry_start=None,
         entry_stop=None,
         threads=0,
+        workers=1,
     ):
         """Stream the chain in bounded-memory chunks.
 
@@ -304,6 +339,12 @@ class Chain:
         budget (``"200 MB"``, ``"1 GB"``). Chunks are aligned to record and
         file boundaries. With ``report=True`` each item is ``(chunk, Report)``.
         ``threads`` tunes the per-chunk Rust read (``0`` = all cores).
+
+        ``workers=N`` reads the batches across ``N`` **processes** — the way to
+        beat the per-process I/O ceiling on a parallel filesystem (ifarm). It
+        keeps ~``N`` reads in flight (resident memory ≈ ``N`` chunks) and yields
+        in order. Without an explicit ``threads``, cores are split across the
+        workers (total ≈ all cores).
         """
         selection, single = self._resolve(banks, columns, filter_name)
         mode, size = _parse_step_size(step_size)
@@ -313,13 +354,24 @@ class Chain:
         total = self._c.num_entries
         lo = 0 if entry_start is None else max(0, entry_start)
         hi = total if entry_stop is None else min(total, entry_stop)
-        for start, stop, fi in self._iter_batches(spans, sizes, mode, size, lo, hi):
+        batches = list(self._iter_batches(spans, sizes, mode, size, lo, hi))
+
+        if workers and workers > 1:
+            from . import _parallel
+
+            stream = _parallel.parallel_iterate(
+                self._source, self._require, self._record_tag, selection, batches,
+                workers, _worker_threads(threads, workers),
+                lambda res: self._assemble(res, single, library),
+            )
+            for chunk, start, stop, fi in stream:
+                yield (chunk, Report(start, stop, files[fi])) if report else chunk
+            return
+
+        for start, stop, fi in batches:
             res = self._c.read_columns(selection, start, stop, threads)
             chunk = self._assemble(res, single, library)
-            if report:
-                yield chunk, Report(start, stop, files[fi])
-            else:
-                yield chunk
+            yield (chunk, Report(start, stop, files[fi])) if report else chunk
 
     @staticmethod
     def _iter_batches(spans, sizes, mode, size, lo, hi):
@@ -348,7 +400,10 @@ class Chain:
     def filtered(self, require=None, record_tag=None) -> "Chain":
         """A new chain restricted to events carrying every bank in ``require``
         (and, if given, whose record tag is in ``record_tag``)."""
-        return Chain(self._c.filtered(require, record_tag))
+        new = Chain(self._c.filtered(require, record_tag))
+        new._require = require
+        new._record_tag = record_tag
+        return new
 
     def skim(self, dst, compression: str = "lz4bybank") -> dict:
         """Copy the (filtered) chain to ``dst``, re-compressing. Returns
@@ -376,5 +431,16 @@ def iterate(source, banks=None, columns=None, **kwargs):
 
     Equivalent to ``open(source).iterate(banks, columns, **kwargs)`` — a
     generator, so a multi-file chain never opens more than it needs at once.
+    Pass ``workers=N`` to stream the batches across ``N`` processes.
     """
     return open(source).iterate(banks, columns, **kwargs)
+
+
+def arrays(source, banks=None, columns=None, **kwargs):
+    """Read banks/columns from a file/dir/glob/list into one array.
+
+    Equivalent to ``open(source).arrays(banks, columns, **kwargs)``; pass
+    ``workers=N`` to read with ``N`` processes (disjoint record ranges,
+    stitched into one result) — the fast path on a parallel filesystem.
+    """
+    return open(source).arrays(banks, columns, **kwargs)

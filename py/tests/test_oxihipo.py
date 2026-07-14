@@ -266,3 +266,42 @@ def test_library_arrow(chain):
     tbl = chain.arrays("REC::Particle", ["pid", "px"], library="arrow")
     assert tbl.num_rows == 8  # one row per event; columns are jagged lists
     assert {"pid", "px"} <= set(tbl.column_names)
+
+
+# --- multi-process reading (workers=), for parallel-filesystem I/O ----------
+def test_parallel_arrays_matches_single(chain):
+    ak = pytest.importorskip("awkward")
+    single = chain.arrays("REC::Particle", ["pid", "px", "cov"])
+    par = chain.arrays("REC::Particle", ["pid", "px", "cov"], workers=2)
+    assert ak.to_list(par) == ak.to_list(single)
+
+
+def test_parallel_arrays_multibank(chain):
+    ak = pytest.importorskip("awkward")
+    single = chain.arrays(["REC::Particle", "REC::Event"])
+    par = chain.arrays(["REC::Particle", "REC::Event"], workers=3)
+    assert set(par.fields) == set(single.fields)
+    assert ak.to_list(par["REC::Event"].evno) == ak.to_list(single["REC::Event"].evno)
+
+
+def test_parallel_iterate_matches_single(chain):
+    ak = pytest.importorskip("awkward")
+    full = chain.arrays("REC::Particle", ["pid"])
+    chunks = list(chain.iterate("REC::Particle", ["pid"], step_size=1, workers=2))
+    assert ak.to_list(ak.concatenate(chunks)) == ak.to_list(full)
+
+
+def test_parallel_respects_filter(chain):
+    ak = pytest.importorskip("awkward")
+    g = chain.filtered(require=["REC::Particle"])  # workers must reapply the filter
+    single = g.arrays("REC::Event", ["evno"])
+    par = g.arrays("REC::Event", ["evno"], workers=2)
+    assert ak.to_list(par.evno) == ak.to_list(single.evno)
+    assert len(par) == len(SURV)
+
+
+def test_module_arrays_workers():
+    ak = pytest.importorskip("awkward")
+    single = oxihipo.arrays(os.path.join(DATA, "sample.hipo"), "REC::Particle", ["pid"])
+    par = oxihipo.arrays(os.path.join(DATA, "sample.hipo"), "REC::Particle", ["pid"], workers=2)
+    assert ak.to_list(par) == ak.to_list(single)

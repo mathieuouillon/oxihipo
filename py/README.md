@@ -40,6 +40,8 @@ Common knobs (on `arrays` / `array` / `numpy` / `iterate`):
   `ndarray`), `"pd"` (pandas, one frame per bank), `"arrow"` (`pyarrow.Table`,
   one list column per field — for polars / duckdb).
 - `threads=` — `0` = all cores (default), `1` = sequential, `n` = `n`-thread pool.
+- `workers=` — read with `N` **processes** for I/O-bound filesystems; see
+  [Parallel reading](#parallel-reading-multi-process).
 
 ## Streaming (bigger than RAM)
 
@@ -60,6 +62,37 @@ for chunk in ox.iterate("/data/run5042/*.hipo", "REC::Particle", step_size="1 GB
 
 `step_size` is an event count (`int`) or a byte budget (`"200 MB"`, `"1 GB"`);
 chunks are aligned to record and file boundaries.
+
+## Parallel reading (multi-process)
+
+On a parallel filesystem (JLab ifarm `/volatile`, Lustre) a single process
+saturates well below the filesystem's aggregate bandwidth — the limit is
+*per-process*, not per-node. `workers=N` splits the chain into `N` disjoint,
+record-aligned event ranges, reads them from `N` separate processes, and
+stitches the result — turning one I/O stream into `N`.
+
+```python
+# whole-array read, N processes, stitched into one ak.Array:
+a = ox.arrays("/volatile/run5042/*.hipo", "REC::Particle", ["px", "py", "pz"], workers=8)
+
+# streaming, ~N reads in flight (resident memory ≈ N chunks), yielded in order:
+for chunk in ox.iterate("/volatile/run5042/*.hipo", "REC::Particle", step_size="1 GB", workers=8):
+    ...
+```
+
+- Works with everything else: `filter_name`, `entry_start`/`entry_stop`,
+  `library=`, and `.filtered(...)` all carry through to the workers.
+- Without an explicit `threads=`, the machine's cores are split across the
+  workers (total ≈ all cores); on an I/O-bound farm the surplus decode threads
+  simply wait on the read.
+- **This helps only when I/O is the bottleneck.** On a local, already-cached
+  disk the limit is decode/bandwidth, not I/O, so `workers>1` just adds process
+  and IPC overhead — keep the default `workers=1` there.
+
+> **Required:** any script that passes `workers=` must be guarded by
+> `if __name__ == "__main__":`. Workers are spawned (not forked — forking after
+> Rust's thread pool exists is unsafe), so each re-imports your script; without
+> the guard it would re-run at import. See [`examples/parallel.py`](examples/parallel.py).
 
 ## Selecting and writing
 

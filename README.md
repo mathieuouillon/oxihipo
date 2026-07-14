@@ -163,6 +163,10 @@ p = f.arrays("REC::Particle", ["pid", "px"])        # ak.Array: N * var * {pid, 
 
 for chunk in f.iterate("REC::Particle", step_size="200 MB"):   # bounded memory
     ...                                             # 10-100 GB inputs in ~constant RAM
+
+# I/O-bound filesystem (ifarm /volatile): read with N processes to beat the
+# per-process bandwidth ceiling — guard the script with `if __name__ == "__main__":`
+p = ox.arrays("/volatile/run5042/*.hipo", "REC::Particle", ["px"], workers=8)
 ```
 
 Build with [maturin](https://www.maturin.rs) (`cd py && maturin develop
