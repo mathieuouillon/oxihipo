@@ -1,11 +1,10 @@
 # oxihipo
 
+[![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/)
 [![CI](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml)
-[![docs](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml/badge.svg)](https://mathieuouillon.github.io/oxihipo/)
+[![docs](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
-
-📖 **[Documentation → mathieuouillon.github.io/oxihipo](https://mathieuouillon.github.io/oxihipo/)**
 
 Pure-Rust reader and writer for the **HIPO v6** binary container used at
 Jefferson Lab CLAS12. Built so that **read throughput meaningfully exceeds

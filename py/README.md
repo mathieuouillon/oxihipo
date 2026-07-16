@@ -1,6 +1,6 @@
 # oxihipo (Python)
 
-📖 **[Documentation → mathieuouillon.github.io/oxihipo](https://mathieuouillon.github.io/oxihipo/docs/python/reading)**
+[![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/docs/python/reading)
 
 Fast, **columnar** reading of HIPO (CLAS12) files, powered by the Rust
 `oxihipo` core. A HIPO bank reads like a
