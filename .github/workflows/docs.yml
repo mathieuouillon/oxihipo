@@ -1,0 +1,69 @@
+name: docs
+
+# Build the Docusaurus site on every PR (so a broken link or bad MDX fails
+# review, not main), and deploy to GitHub Pages on push to main.
+#
+# ONE-TIME SETUP: GitHub Pages must be enabled for the repo with its source set
+# to "GitHub Actions" (Settings → Pages → Build and deployment → Source).
+# This workflow deliberately does not use `configure-pages`' `enablement: true`,
+# because that input requires a token with `administration:write` (a PAT or App
+# token) — the default GITHUB_TOKEN cannot enable Pages.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'website/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    working-directory: website
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      # `onBrokenLinks: 'throw'` means a dead cross-reference fails here.
+      - name: Build
+        run: npm run build
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: website/build
+
+  deploy:
+    name: deploy
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write # to deploy
+      id-token: write # to verify the deployment origin
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

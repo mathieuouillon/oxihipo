@@ -1,5 +1,7 @@
 # oxihipo (Python)
 
+📖 **[Documentation → mathieuouillon.github.io/oxihipo](https://mathieuouillon.github.io/oxihipo/docs/python/reading)**
+
 Fast, **columnar** reading of HIPO (CLAS12) files, powered by the Rust
 `oxihipo` core. A HIPO bank reads like a
 [uproot](https://uproot.readthedocs.io) jagged branch, and columns come back as
@@ -138,8 +140,8 @@ decode is Rust behind a released GIL, and columns move into NumPy zero-copy. On
 a 9.1 GB CLAS12 file (598k events, Apple M4 Pro, all cores),
 `f.arrays("REC::Particle", ["px","py","pz","pid"])` reads at ~5.6 GB/s vs Rust's
 6.3 GB/s. Details + reproduction:
-[`docs/python-vs-rust-benchmark.md`](../docs/python-vs-rust-benchmark.md) and
-[`examples/bench_columns.py`](examples/bench_columns.py).
+[Python vs Rust benchmark](https://mathieuouillon.github.io/oxihipo/docs/design/python-vs-rust-benchmark)
+and [`examples/bench_columns.py`](examples/bench_columns.py).
 
 ## Build
 

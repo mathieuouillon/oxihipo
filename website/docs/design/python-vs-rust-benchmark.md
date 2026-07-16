@@ -1,3 +1,9 @@
+---
+id: python-vs-rust-benchmark
+title: Python vs Rust benchmark
+sidebar_position: 2
+---
+
 # Python vs Rust read speed
 
 How much does the Python binding cost versus reading the same columns straight

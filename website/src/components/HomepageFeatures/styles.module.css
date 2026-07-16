@@ -1,0 +1,36 @@
+.features {
+  padding: 3rem 0 1rem;
+  width: 100%;
+}
+
+/* Equal-height cards regardless of body length. */
+.card {
+  height: 100%;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: var(--ifm-global-radius);
+  background: var(--ifm-background-surface-color);
+  transition: border-color 200ms ease, transform 200ms ease;
+}
+
+.card:hover {
+  border-color: var(--ifm-color-primary);
+  transform: translateY(-2px);
+}
+
+.cardTitle {
+  font-size: 1.15rem;
+  margin-bottom: 0.6rem;
+}
+
+.cardBody {
+  margin-bottom: 0;
+  font-size: 0.94rem;
+  line-height: 1.6;
+  color: var(--ifm-color-emphasis-800);
+}
+
+.cardBody code {
+  font-size: 0.85em;
+}

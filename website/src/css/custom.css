@@ -1,0 +1,42 @@
+/**
+ * Global styles. The classic template bundles Infima.
+ * Palette: Rust orange, darkened in light mode for AA contrast on white and
+ * lightened in dark mode for contrast on the dark surface.
+ */
+
+:root {
+  --ifm-color-primary: #b5410b;
+  --ifm-color-primary-dark: #a33b0a;
+  --ifm-color-primary-darker: #99370a;
+  --ifm-color-primary-darkest: #7e2d08;
+  --ifm-color-primary-light: #c7470c;
+  --ifm-color-primary-lighter: #d34c0d;
+  --ifm-color-primary-lightest: #ef6520;
+  --ifm-code-font-size: 92%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #ff8a4c;
+  --ifm-color-primary-dark: #ff7530;
+  --ifm-color-primary-darker: #ff6a22;
+  --ifm-color-primary-darkest: #e14f08;
+  --ifm-color-primary-light: #ff9f68;
+  --ifm-color-primary-lighter: #ffaa76;
+  --ifm-color-primary-lightest: #ffc9a2;
+  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 255, 0.1);
+}
+
+/* Wide benchmark tables must scroll inside the content column rather than
+   forcing the page to scroll horizontally. */
+.markdown table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* Numeric benchmark columns line up better with tabular figures. */
+.markdown table td,
+.markdown table th {
+  font-variant-numeric: tabular-nums;
+}

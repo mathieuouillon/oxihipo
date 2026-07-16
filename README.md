@@ -1,8 +1,11 @@
 # oxihipo
 
 [![CI](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml)
+[![docs](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml/badge.svg)](https://mathieuouillon.github.io/oxihipo/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+
+📖 **[Documentation → mathieuouillon.github.io/oxihipo](https://mathieuouillon.github.io/oxihipo/)**
 
 Pure-Rust reader and writer for the **HIPO v6** binary container used at
 Jefferson Lab CLAS12. Built so that **read throughput meaningfully exceeds
@@ -170,9 +173,9 @@ p = ox.arrays("/volatile/run5042/*.hipo", "REC::Particle", ["px"], workers=8)
 ```
 
 Build with [maturin](https://www.maturin.rs) (`cd py && maturin develop
---release`); see [`py/README.md`](py/README.md) and
-[`py/examples/`](py/examples/). Design notes:
-[`docs/python-binding-design.md`](docs/python-binding-design.md).
+--release`); see the [Python guide](https://mathieuouillon.github.io/oxihipo/docs/python/reading),
+[`py/README.md`](py/README.md), and [`py/examples/`](py/examples/). Design notes:
+[Python binding design](https://mathieuouillon.github.io/oxihipo/docs/design/python-binding).
 
 **Nearly-native speed.** Reading `REC::Particle` `px,py,pz,pid` from a 9.1 GB
 CLAS12 file (598,738 events, 4.7 M particles; Apple M4 Pro, all cores, warm
@@ -186,7 +189,7 @@ cache):
 
 The per-event decode runs in Rust behind a released GIL and columns move into
 NumPy zero-copy, so the binding costs ~10%. Method + reproduction:
-[`docs/python-vs-rust-benchmark.md`](docs/python-vs-rust-benchmark.md)
+[Python vs Rust benchmark](https://mathieuouillon.github.io/oxihipo/docs/design/python-vs-rust-benchmark)
 (`examples/bench_columns.rs`, `py/examples/bench_columns.py`).
 
 ## Layout

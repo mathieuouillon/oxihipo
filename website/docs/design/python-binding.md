@@ -1,9 +1,23 @@
-<!--
-Design proposal (NOT yet implemented). Produced by a multi-agent design panel
-reconciled against 6 adversarial verifications. Scope: design only.
--->
+---
+id: python-binding
+title: Python binding design
+sidebar_position: 1
+---
 
 # oxihipo → Python binding — final design
+
+:::info This is a design record, not a user guide
+This was the design proposal written **before** the binding was built, kept as a
+record of the reasoning and the trade-offs. The design has since been
+implemented and extended, so some details here describe intent rather than the
+shipped code — for example, the binding pins pyo3 0.23 and therefore uses
+`Python::allow_threads` (renamed to `detach` in later pyo3), and features like
+multi-process reading and the direct-pyarrow path came later.
+
+For how the binding actually behaves today, read
+[How it works](../python/how-it-works.md) and the
+[Python guide](../python/reading.md).
+:::
 
 **Status:** authoritative design, reconciled against 6 adversarial verdicts. Where a proposal and a verdict disagreed, the verdict won. The four load-bearing corrections applied throughout are: (1) `Python::allow_threads` is deprecated → use **`Python::detach`**; (2) the columnar fast path (`for_each_column`) **cannot** feed Awkward because it discards per-event row counts → a **new bulk materializer** that emits offsets *and* honors the chain filter is mandatory; (3) offsets are **`Vec<i64>` / `Index64`**, never u64/int32; (4) panics are handled by PyO3's built-in trampoline (return `PyResult` + `From<HipoError>`), **not** hand-rolled `catch_unwind` — but the binding crate must still compile `panic = "unwind"`.
 
