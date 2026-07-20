@@ -281,17 +281,41 @@ only what an analysis touches:
   selective reads. It's what `skim` defaults to.
 
 Both carry Rust-only wire tags the C++ `hipo4` reader can't read (the stock
-`None` / `Lz4` / `Lz4Best` / `Gzip` codecs stay compatible). On a 29.7 GB CLAS12
-ifarm skim, reading `REC::Particle` only, the by-bank format hit **36.6 Mev/s at
-par=64 — 25× the `Lz4` baseline** and cut the file to 6.66 GB.
+`None` / `Lz4` / `Lz4Best` / `Gzip` codecs stay compatible).
 
-The `recook_by_bank` example re-emits a file as `Lz4ByBankV2`:
+Every format, on 50k events of a real CLAS12 file (274 banks; Apple M4 Pro,
+single thread, warm cache). `Ratio` is file size vs `None`; `sel`/`all` are the
+ms to read one bank / all 274:
+
+| Format | Size MB | Ratio | sel (1 bk) | all (274) |
+|---|--:|--:|--:|--:|
+| `None` | 1734 | 1.00× | 158 | 1589 |
+| `Lz4` | 1081 | 0.62× | 396 | 1817 |
+| `Lz4Best` | 922 | 0.53× | 395 | 1826 |
+| `Gzip` | 852 | 0.49× | 2878 | 4348 |
+| **`Lz4ByBankV2`** | 872 | 0.50× | **86** | 1529 |
+| **`Lz4PerColumn`** | **813** | **0.47×** | **75** | **1280** |
+
+`Lz4PerColumn` is the **smallest file** (beating even Gzip) *and* the **fastest
+read at every scope** — one bank is ~5× faster than whole-record `Lz4` because it
+inflates only that bank's columns. `Gzip` packs tightly but is an order of
+magnitude slower to inflate. The same win reaches Python: `arrays("REC::Particle")`
+is ~4× faster on the per-bank/per-column formats than on `Lz4`. And on a 29.7 GB
+ifarm skim (parallel, Lustre) the by-bank format hit **36.6 Mev/s — 25× the `Lz4`
+baseline**.
+
+Reproduce (both benchmarks read the same per-format files):
 
 ```sh
-cargo run --release --example recook_by_bank -- in.hipo out_by_bank.hipo   # or --batch <dir> <dir>
+OXIHIPO_BENCH_KEEP=/tmp/fmt \
+  cargo run --release --example bench_read_compression -- rec.hipo 3 50000
+python py/examples/bench_compression.py /tmp/fmt 20000 3   # Python side
+# and re-emit a real file as Lz4ByBankV2:
+cargo run --release --example recook_by_bank -- in.hipo out_by_bank.hipo
 ```
 
-Full format guide, trade-offs, and the complete benchmark tables:
+Full format guide, trade-offs, and the complete tables (all read scopes, Rust +
+Python):
 **[Compression formats](https://mathieuouillon.github.io/oxihipo/docs/performance/compression)**
 and **[Benchmarks](https://mathieuouillon.github.io/oxihipo/docs/performance/benchmarks)**.
 
@@ -310,8 +334,17 @@ and **[Benchmarks](https://mathieuouillon.github.io/oxihipo/docs/performance/ben
 Every PR runs:
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo test`
+- `cargo test --all-targets` — unit + integration tests, including a broad
+  end-to-end pass over the read/write API — metadata, sequential + random-access
+  + parallel reads, every data type, filters, the columnar reader, `skim`, and
+  multi-file chains (`tests/end_to_end.rs`) — plus an all-compression-format
+  write → read → cross-format-`skim` round-trip (`tests/all_formats.rs`)
+- a smoke-run of the core examples end-to-end (write → read → recook → read; plus
+  a small all-format encode/read sweep) so a runtime break in an example fails CI
 - `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings`
+
+The Python wheel workflow additionally runs pytest, `mypy`, and `mypy.stubtest`
+against a freshly built wheel.
 
 ## License
 

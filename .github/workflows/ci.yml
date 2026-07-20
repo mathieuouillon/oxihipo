@@ -21,6 +21,17 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
+      # High-level smoke test: `cargo test` compiles the examples but never runs
+      # them, so a runtime break (panic, bad logic) ships silently. Drive the
+      # core examples end-to-end — write → read → recook to Lz4ByBankV2 → read
+      # back, plus a small all-format encode/read sweep.
+      - name: Smoke-run examples
+        run: |
+          cargo run --example write -- /tmp/demo.hipo
+          cargo run --example read -- /tmp/demo.hipo
+          cargo run --example recook_by_bank -- /tmp/demo.hipo /tmp/demo_bybank.hipo
+          cargo run --example read -- /tmp/demo_bybank.hipo
+          cargo run --example bench_read_compression -- 3000 1
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
