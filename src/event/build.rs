@@ -270,8 +270,10 @@ impl EventBuilder {
         Self::default()
     }
 
-    pub fn with_tag(mut self, tag: u32) -> Self {
-        self.tag = tag;
+    /// Set the per-event tag (`EH_TAG`). Accepts a raw `u32` or a
+    /// [`TagSet`](crate::TagSet) / named `tag_flags!` flag.
+    pub fn with_tag(mut self, tag: impl Into<u32>) -> Self {
+        self.tag = tag.into();
         self
     }
 
@@ -279,8 +281,10 @@ impl EventBuilder {
         self.tag
     }
 
-    pub fn set_tag(&mut self, tag: u32) -> &mut Self {
-        self.tag = tag;
+    /// Set the per-event tag (`EH_TAG`) in place; accepts `u32` or a
+    /// [`TagSet`](crate::TagSet).
+    pub fn set_tag(&mut self, tag: impl Into<u32>) -> &mut Self {
+        self.tag = tag.into();
         self
     }
 
@@ -435,7 +439,7 @@ mod tests {
             .unwrap()
             .set_i8("charge", 1)
             .unwrap();
-        let mut eb = EventBuilder::new().with_tag(7);
+        let mut eb = EventBuilder::new().with_tag(7u32);
         eb.add(b);
         let bytes = eb.finish();
 
@@ -549,7 +553,7 @@ mod tests {
         let mut b2 = BankBuilder::new(&s2);
         b2.push_row().set_i64("evno", 99).unwrap();
 
-        let mut eb = EventBuilder::new().with_tag(0);
+        let mut eb = EventBuilder::new().with_tag(0u32);
         eb.add(b1).add(b2);
         assert_eq!(eb.structure_count(), 2);
         let bytes = eb.finish();

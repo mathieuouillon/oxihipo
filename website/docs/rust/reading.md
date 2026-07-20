@@ -56,6 +56,15 @@ per-event allocation.
 `.event_tag_any(mask)` keep events by their per-event `EH_TAG` (read without
 inflating any bank). All clauses AND together, and `with_filter` is cheap — it
 clones the shared file handles rather than reopening.
+
+`event_tag_any` (and the writer's `with_tag`) accept a raw `u32` **or** a
+`TagSet` — declare named flags with the `tag_flags!` macro so a tag reads like
+the physics it encodes:
+
+```rust
+oxihipo::tag_flags! { pub EventTag { Dvcs = 0, Sidis = 1 } }
+let g = chain.with_filter(Filter::new().event_tag_any(EventTag::Dvcs | EventTag::Sidis))?;
+```
 :::
 
 ## Parallel scans

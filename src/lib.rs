@@ -38,6 +38,7 @@ mod wire;
 pub mod event;
 pub mod read;
 pub mod schema;
+mod tag;
 pub mod write;
 
 pub use crate::error::{HipoError, Result};
@@ -47,6 +48,7 @@ pub use crate::read::{
     Filter, IntoSources, MaterializedColumn,
 };
 pub use crate::schema::{ColumnHandle, DataType, Dict, Schema, SchemaEntry};
+pub use crate::tag::TagSet;
 pub use crate::write::{BankWriter, Compression, RowWriter, WriteSummary, Writer};
 
 /// Unwrap an `Option<T>`; on `None`, `continue` the enclosing loop.

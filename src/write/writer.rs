@@ -546,8 +546,10 @@ impl<'a> EventWriter<'a> {
         }
     }
 
-    pub fn with_tag(&mut self, tag: u32) -> &mut Self {
-        self.builder.set_tag(tag);
+    /// Set this event's tag (`EH_TAG`) — a raw `u32` or a
+    /// [`TagSet`](crate::TagSet) / named `tag_flags!` flag.
+    pub fn with_tag(&mut self, tag: impl Into<u32>) -> &mut Self {
+        self.builder.set_tag(tag.into());
         self
     }
 

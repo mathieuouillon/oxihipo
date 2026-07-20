@@ -83,10 +83,11 @@ impl Filter {
 
     /// Keep only events with at least one of `mask`'s bits set in their tag
     /// (`tag & mask != 0`) — the bit-flag form, for tags used as a set of
-    /// physics categories. Repeated calls OR into the mask. ANDs with the
+    /// physics categories. Accepts a raw `u32` or a [`TagSet`](crate::TagSet) /
+    /// named `tag_flags!` flag. Repeated calls OR into the mask. ANDs with the
     /// other clauses.
-    pub fn event_tag_any(mut self, mask: u32) -> Self {
-        self.event_tag_mask |= mask;
+    pub fn event_tag_any(mut self, mask: impl Into<u32>) -> Self {
+        self.event_tag_mask |= mask.into();
         self
     }
 
@@ -276,7 +277,7 @@ mod tests {
 
     #[test]
     fn event_tag_any_is_a_bitmask() {
-        let f = Filter::new().event_tag_any(0b0101);
+        let f = Filter::new().event_tag_any(0b0101_u32);
         assert_eq!(f.event_tag_mask(), 0b0101);
         assert!(f.tag_matches(0b0001)); // bit 0 set
         assert!(f.tag_matches(0b0100)); // bit 2 set

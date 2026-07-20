@@ -8,7 +8,17 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oxihipo::{Chain, Compression, DataType, Dict, Filter, Result, Schema, Writer};
+use oxihipo::{Chain, Compression, DataType, Dict, Filter, Result, Schema, TagSet, Writer};
+
+// Named flags via the `tag_flags!` macro — the Phase 2 ergonomics.
+oxihipo::tag_flags! {
+    /// Physics categories for the named-tag test.
+    pub Cat {
+        Dvcs = 0,
+        Sidis = 1,
+        Elastic = 2,
+    }
+}
 
 const N: i64 = 60;
 
@@ -213,4 +223,67 @@ fn event_tags_column_aligns_with_read_columns() {
             "{name}: event_tags aligns with read_columns"
         );
     }
+}
+
+#[test]
+fn named_tags_via_macro_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("named.hipo");
+
+    // Each event's category rotates by i % 3, written with the named flags.
+    let cat = |i: i64| -> TagSet {
+        match i % 3 {
+            0 => Cat::Dvcs,
+            1 => Cat::Sidis | Cat::Elastic,
+            _ => Cat::Elastic,
+        }
+    };
+
+    let mut w = Writer::create(&path)
+        .schemas(&dict())
+        .compression(Compression::Lz4PerColumn)
+        .build()
+        .unwrap();
+    for i in 0..30i64 {
+        w.event(|ev| {
+            ev.with_tag(cat(i)); // a TagSet flows straight into with_tag
+            ev.bank("REC::Event", |b| {
+                b.row(|r| {
+                    r.set("evno", i)?;
+                    Ok(())
+                })?;
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+
+    // Filter by a named flag: only Dvcs events (i % 3 == 0) survive, and each
+    // reads back as exactly Cat::Dvcs.
+    let g = Chain::open(&path)
+        .unwrap()
+        .with_filter(Filter::new().event_tag_any(Cat::Dvcs))
+        .unwrap();
+    let evnos: Vec<i64> = g
+        .events()
+        .map(Result::unwrap)
+        .map(|e| e.bank("REC::Event").unwrap().get::<i64>("evno", 0))
+        .collect();
+    assert_eq!(evnos, (0..30).filter(|i| i % 3 == 0).collect::<Vec<_>>());
+    for e in g.events().map(Result::unwrap) {
+        assert_eq!(TagSet::from(e.tag()), Cat::Dvcs);
+    }
+
+    // Elastic appears alone (i % 3 == 2) and combined with Sidis (i % 3 == 1),
+    // so event_tag_any(Elastic) keeps both → i % 3 != 0.
+    let elastic = Chain::open(&path)
+        .unwrap()
+        .with_filter(Filter::new().event_tag_any(Cat::Elastic))
+        .unwrap();
+    assert_eq!(
+        elastic.event_tags(None, 1).unwrap().len(),
+        (0..30).filter(|i| i % 3 != 0).count(),
+    );
 }
