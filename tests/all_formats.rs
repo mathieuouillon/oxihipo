@@ -15,7 +15,7 @@ const FORMATS: &[(&str, Compression)] = &[
     ("Lz4", Compression::Lz4),
     ("Lz4Best", Compression::Lz4Best),
     ("Gzip", Compression::Gzip),
-    ("Lz4ByBankV2", Compression::Lz4ByBankV2),
+    ("Lz4PerBank", Compression::Lz4PerBank),
     ("Lz4PerColumn", Compression::Lz4PerColumn),
 ];
 

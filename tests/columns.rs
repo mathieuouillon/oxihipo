@@ -2,7 +2,7 @@
 //! materializer behind the planned Python binding.
 //!
 //! The central test writes one *logical* dataset under every storage format
-//! (`None`, `Lz4`, `Lz4ByBankV2`, `Lz4PerColumn`) and asserts that
+//! (`None`, `Lz4`, `Lz4PerBank`, `Lz4PerColumn`) and asserts that
 //! `read_columns` produces byte-identical offsets + content for all of them,
 //! matching an independently computed expectation. The rest cover the
 //! alignment/absent-bank/filter/range/error contracts.
@@ -101,7 +101,7 @@ fn write_file(path: &std::path::Path, compression: Compression, n: usize) {
 const FORMATS: [Compression; 4] = [
     Compression::None,
     Compression::Lz4,
-    Compression::Lz4ByBankV2,
+    Compression::Lz4PerBank,
     Compression::Lz4PerColumn,
 ];
 
@@ -234,7 +234,7 @@ fn absent_events_give_empty_sublists() {
 #[test]
 fn never_written_bank_is_all_zero_offsets() {
     let (_dir, p) = tmp("f.hipo");
-    write_file(&p, Compression::Lz4ByBankV2, 6);
+    write_file(&p, Compression::Lz4PerBank, 6);
     let chain = Chain::open(&p).unwrap();
     // REC::Calorimeter is in the dict but never written to any record.
     let bufs = chain

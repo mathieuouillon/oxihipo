@@ -41,7 +41,7 @@ tune anything:
 3. **Nothing is decompressed that you don't read.** This is the big one on
    ifarm. The stock HIPO format stores one LZ4 block per record, so reading any
    bank inflates *every* bank. The opt-in
-   [`Lz4ByBankV2`](./performance/compression.md) (and `Lz4PerColumn`) formats
+   [`Lz4PerBank`](./performance/compression.md) (and `Lz4PerColumn`) formats
    store each bank (or column) as its own stream and inflate it only when
    `ev.bank(name)` asks for it — a real analysis touches maybe 5 of ~30 banks,
    so the other ~85% of LZ4 work simply never happens.

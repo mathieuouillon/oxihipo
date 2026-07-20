@@ -31,7 +31,7 @@
 //! The per-file outputs are kept after the merge (you can delete
 //! `<output_dir>` yourself once the merged file is verified).
 //!
-//! Output is written in the `Lz4ByBankV2` format (LZ4-HC bank streams plus a
+//! Output is written in the `Lz4PerBank` format (LZ4-HC bank streams plus a
 //! compressed directory). Files produced are not readable by the C++ `hipo4`
 //! reader (Rust-only compression tag 6).
 
@@ -56,14 +56,14 @@ enum Mode {
         output_dir: PathBuf,
         /// Optional `--merge <path>`: after recooking each input into
         /// `output_dir`, concatenate every per-file output into one
-        /// combined `Lz4ByBankV2` file at `path`.
+        /// combined `Lz4PerBank` file at `path`.
         merge: Option<PathBuf>,
     },
 }
 
 fn parse_args() -> (Mode, Compression) {
     const USAGE: &str = "usage: recook_by_bank [--batch] <in> <out> [--merge <merged_file>]";
-    let compression = Compression::Lz4ByBankV2;
+    let compression = Compression::Lz4PerBank;
     let mut batch = false;
     let mut merge: Option<PathBuf> = None;
     let mut positional: Vec<String> = Vec::new();

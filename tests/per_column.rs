@@ -1,6 +1,6 @@
 //! End-to-end tests for the `Lz4PerColumn` format: it must decode
 //! **identically** to the row-contiguous (`Lz4`) and by-bank
-//! (`Lz4ByBankV2`) formats — same typed values and same reassembled bank
+//! (`Lz4PerBank`) formats — same typed values and same reassembled bank
 //! bytes — while splitting every column into its own stream.
 
 use oxihipo::{Chain, Compression, DataType, Dict, Filter, Result, Schema, Writer};
@@ -120,7 +120,7 @@ fn per_column_matches_other_formats() {
     let bybank = dir.path().join("bybank.hipo");
     let percol = dir.path().join("percol.hipo");
     write_file(&lz4, n, Compression::Lz4).unwrap();
-    write_file(&bybank, n, Compression::Lz4ByBankV2).unwrap();
+    write_file(&bybank, n, Compression::Lz4PerBank).unwrap();
     write_file(&percol, n, Compression::Lz4PerColumn).unwrap();
 
     let ref_vals = collect_values(&lz4);

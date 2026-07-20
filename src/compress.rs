@@ -88,7 +88,7 @@ pub fn decompress(
         }
         CompressionType::Lz4
         | CompressionType::Lz4Best
-        | CompressionType::Lz4ByBankV2
+        | CompressionType::Lz4PerBank
         | CompressionType::Lz4PerColumn => {
             // The by-bank / per-column formats reach this point only when their
             // record decoders hand us a single inner LZ4 block; their
@@ -233,7 +233,7 @@ pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) 
         }
         CompressionType::Lz4
         | CompressionType::Lz4Best
-        | CompressionType::Lz4ByBankV2
+        | CompressionType::Lz4PerBank
         | CompressionType::Lz4PerColumn => {
             if expected == 0 {
                 return Ok(0);
@@ -315,7 +315,7 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
         }
         CompressionType::Lz4
         | CompressionType::Lz4Best
-        | CompressionType::Lz4ByBankV2
+        | CompressionType::Lz4PerBank
         | CompressionType::Lz4PerColumn => {
             // The by-bank / per-column formats are record-level extensions;
             // their inner compression units still flow through this same

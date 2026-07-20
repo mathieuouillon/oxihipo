@@ -113,7 +113,7 @@ impl WriterBuilder {
 }
 
 /// Uncompressed-payload target that triggers a record flush, chosen per
-/// compression when the caller didn't set one. `Lz4ByBankV2` and
+/// compression when the caller didn't set one. `Lz4PerBank` and
 /// `Lz4PerColumn` use 32 MB.
 ///
 /// A record-size sweep on real CLAS12 data (8/16/32/64/128 MB) showed the
@@ -128,7 +128,7 @@ impl WriterBuilder {
 /// [`WriterBuilder::max_record_bytes`].
 const fn default_max_record_bytes(compression: Compression) -> usize {
     match compression {
-        Compression::Lz4ByBankV2 | Compression::Lz4PerColumn => 32 * 1024 * 1024,
+        Compression::Lz4PerBank | Compression::Lz4PerColumn => 32 * 1024 * 1024,
         _ => 8 * 1024 * 1024,
     }
 }

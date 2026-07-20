@@ -34,17 +34,17 @@ Every mode oxihipo can write, in wire-tag order. The Rust name is the
 | `Lz4` | `"lz4"` | ✅ | Stock LZ4, one block per record. |
 | `Lz4Best` | `"lz4best"` | ✅ | LZ4 high-compression. Needs the `lz4-c` feature; without it, falls back to standard LZ4 (identical output to `Lz4`). |
 | `Gzip` | `"gzip"` | ✅ | Stock gzip, one block per record. |
-| `Lz4ByBankV2` | `"lz4bybankv2"` | ❌ | One LZ4-HC stream per bank, plus a compressed directory; inflate only the banks you read. |
+| `Lz4PerBank` | `"lz4perbank"` | ❌ | One LZ4-HC stream per bank, plus a compressed directory; inflate only the banks you read. |
 | `Lz4PerColumn` | `"lz4percolumn"` | ❌ | One LZ4-HC stream per `(bank, column)`; best ratio and finest-grained selective reads. |
 
-The two extensions (`Lz4ByBankV2`, `Lz4PerColumn`) carry wire tags 6 and 7 that
+The two extensions (`Lz4PerBank`, `Lz4PerColumn`) carry wire tags 6 and 7 that
 the C++ `hipo4` reader doesn't understand — use them for Rust-only, or
 oxihipo-Python-only, consumers. The four stock codecs stay byte-compatible with
 `hipo4`.
 
 :::note Two older extensions were removed
 Earlier versions also shipped `Lz4Chunked` (parallel-inflate-everything, tag 4)
-and `Lz4ByBank` v1 (tag 5). Both are superseded — `Lz4ByBankV2` does everything
+and `Lz4ByBank` v1 (tag 5). Both are superseded — `Lz4PerBank` does everything
 v1 did with smaller files, and `Lz4PerColumn` goes finer still — so they were
 removed. A file written in either old format is now **rejected on read**.
 :::
@@ -74,12 +74,12 @@ let mut w = Writer::create("out.hipo")
 
 None of these solve the one-block-per-record problem; the extensions below do.
 
-## `Lz4ByBankV2` — decompress only the banks you read
+## `Lz4PerBank` — decompress only the banks you read
 
 **This is usually the one you want.** Real analyses touch 2–5 banks out of ~30;
 the other ~85% is wasted LZ4 work.
 
-`Compression::Lz4ByBankV2` stores each bank type as its own LZ4-HC stream within
+`Compression::Lz4PerBank` stores each bank type as its own LZ4-HC stream within
 the record, plus an event×bank presence directory (itself LZ4-compressed,
 prefixed with an extension-format-version byte). The reader parses the directory
 eagerly but inflates a bank's stream only when `ev.bank(name)` actually asks for
@@ -88,7 +88,7 @@ it. Banks you never touch stay compressed for the record's lifetime.
 ```rust
 let mut w = Writer::create("out.hipo")
     .schemas(dict)
-    .compression(Compression::Lz4ByBankV2)
+    .compression(Compression::Lz4PerBank)
     .build()?;
 ```
 
@@ -108,7 +108,7 @@ SSD; `bench_par` reads `REC::Particle.rows()` only):
 
 :::note About these numbers
 The by-bank rows were measured on the original by-bank variant (fast default-LZ4
-streams). `Lz4ByBankV2` shares that layout with **HC-compressed** streams, so its
+streams). `Lz4PerBank` shares that layout with **HC-compressed** streams, so its
 selective-read speed is the same and its files are *smaller* — the throughput
 figures carry over, and the size is conservative.
 :::
@@ -140,7 +140,7 @@ events' `px`, then all `py`, …). Two wins compound:
   column of `float32` next to a column of `float32` from the next event dedups
   far better than `px,py,pz,…` interleaved).
 
-So it beats `Lz4ByBankV2` on **both** size and selective-read speed. Banks
+So it beats `Lz4PerBank` on **both** size and selective-read speed. Banks
 without a schema (and composite banks) are stored opaquely as a single stream.
 Wire tag 7. It's the default for [`skim`](../python/reading.md).
 
@@ -152,7 +152,7 @@ let mut w = Writer::create("out.hipo")
 ```
 
 :::note Record size matters more here
-`Lz4PerColumn` (and `Lz4ByBankV2`) default to a **32 MB** uncompressed-payload
+`Lz4PerColumn` (and `Lz4PerBank`) default to a **32 MB** uncompressed-payload
 record-flush target, versus 8 MB for the stock codecs. A record-size sweep on
 CLAS12 data showed the trade-off for per-column: the compression **ratio rises
 monotonically** with record size (≈2.04× at 8 MB → 2.18× at 128 MB), but
@@ -175,7 +175,7 @@ are the ms to read every column of one bank / all 274:
 | `Lz4` | 1081 | 0.62× | 396 | 1817 |
 | `Lz4Best` | 922 | 0.53× | 395 | 1826 |
 | `Gzip` | 852 | 0.49× | 2878 | 4348 |
-| **`Lz4ByBankV2`** | 872 | 0.50× | **86** | 1529 |
+| **`Lz4PerBank`** | 872 | 0.50× | **86** | 1529 |
 | **`Lz4PerColumn`** | **813** | **0.47×** | **75** | **1280** |
 
 *(read columns in ms)*
@@ -189,7 +189,7 @@ read scope plus the matching Python numbers — is on the
 
 ## Converting existing files
 
-The `recook_by_bank` example re-emits an existing file as `Lz4ByBankV2`, for A/B
+The `recook_by_bank` example re-emits an existing file as `Lz4PerBank`, for A/B
 benchmarking or a one-time conversion:
 
 ```sh
@@ -235,10 +235,10 @@ decompression automatically, with no format-aware code anywhere.
 |---|---|
 | C++ `hipo4` has to read the file | `Lz4` (or `Gzip` for a tighter, slower file) |
 | Archival with `hipo4` compatibility, size matters | `Lz4Best` (needs the `lz4-c` feature) |
-| Rust/Python-only, analysis touches a few banks | **`Lz4ByBankV2`** |
+| Rust/Python-only, analysis touches a few banks | **`Lz4PerBank`** |
 | Rust/Python-only, you read a few *columns* — or want the best ratio | **`Lz4PerColumn`** |
 
 `Chain::skim` (and Python `skim`) default to `Lz4PerColumn`: the best ratio and
 the finest selective reads, at the cost of a slower one-time write. Drop to
-`Lz4ByBankV2` if you'd rather write faster and still only inflate the banks you
+`Lz4PerBank` if you'd rather write faster and still only inflate the banks you
 read.

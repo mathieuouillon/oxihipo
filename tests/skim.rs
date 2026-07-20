@@ -58,7 +58,7 @@ fn skim_filters_and_rewrites() {
         .unwrap()
         .with_filter(Filter::require(["RAW::tag"]))
         .unwrap()
-        .skim(&out, Compression::Lz4ByBankV2)
+        .skim(&out, Compression::Lz4PerBank)
         .unwrap();
     assert_eq!(summary.events, 20);
     assert!(summary.records >= 1);
@@ -85,7 +85,7 @@ fn skim_no_filter_copies_every_event() {
 
     let summary = Chain::open(&src)
         .unwrap()
-        .skim(&out, Compression::Lz4ByBankV2)
+        .skim(&out, Compression::Lz4PerBank)
         .unwrap();
     assert_eq!(summary.events, 37);
     assert_eq!(Chain::open(&out).unwrap().event_count(), 37);
@@ -104,7 +104,7 @@ fn skim_empty_survivors_is_valid() {
         .unwrap()
         .with_filter(Filter::require(["RAW::tag"]))
         .unwrap()
-        .skim(&out, Compression::Lz4ByBankV2)
+        .skim(&out, Compression::Lz4PerBank)
         .unwrap();
     assert_eq!(summary.events, 0);
     assert_eq!(Chain::open(&out).unwrap().event_count(), 0);

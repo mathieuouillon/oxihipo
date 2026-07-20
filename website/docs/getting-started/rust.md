@@ -76,7 +76,7 @@ hardware — the second argument is the thread count (`0` = all cores).
 
 - [Reading](../rust/reading.md) — chains, filters, `for_each`, typed columns
 - [Writing](../rust/writing.md) — the `Writer` builder and compression choices
-- [Compression formats](../performance/compression.md) — `Lz4ByBankV2`, and why it
+- [Compression formats](../performance/compression.md) — `Lz4PerBank`, and why it
   matters more than thread count
 - [Shared filesystems](../performance/shared-filesystems.md) — what to do when
   ifarm's Lustre is the bottleneck

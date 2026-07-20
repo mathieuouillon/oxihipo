@@ -34,7 +34,7 @@ layers are intentionally out of scope.
   across cores out of order (`threads = 0` ⇒ all cores, `1` ⇒ sequential,
   `n` ⇒ exactly `n`); shared state in `f` is atomic or locked.
 - **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions
-  that decompress only what an analysis actually reads: `Lz4ByBankV2`
+  that decompress only what an analysis actually reads: `Lz4PerBank`
   (per-bank streams) and `Lz4PerColumn` (per-column streams) — see the
   benchmarks below.
 - **Pure-Rust by default**, with optional features: `lz4-c` (C LZ4
@@ -272,12 +272,12 @@ stores **one LZ4 block per record**, so reading any bank inflates *every* bank.
 Two opt-in format extensions fix that by storing sub-record streams and inflating
 only what an analysis touches:
 
-- **`Compression::Lz4ByBankV2`** — one LZ4-HC stream per bank type, plus a
+- **`Compression::Lz4PerBank`** — one LZ4-HC stream per bank type, plus a
   compressed presence directory. `ev.bank("REC::Particle")` inflates only that
   bank's stream; untouched banks stay compressed. No reader-side code change.
 - **`Compression::Lz4PerColumn`** — one LZ4-HC stream per `(bank, column)`,
   cross-event contiguous. Reads at *column* granularity and compresses better
-  than a bank's interleaved bytes, so it beats `Lz4ByBankV2` on both size and
+  than a bank's interleaved bytes, so it beats `Lz4PerBank` on both size and
   selective reads. It's what `skim` defaults to.
 
 Both carry Rust-only wire tags the C++ `hipo4` reader can't read (the stock
@@ -293,7 +293,7 @@ ms to read one bank / all 274:
 | `Lz4` | 1081 | 0.62× | 396 | 1817 |
 | `Lz4Best` | 922 | 0.53× | 395 | 1826 |
 | `Gzip` | 852 | 0.49× | 2878 | 4348 |
-| **`Lz4ByBankV2`** | 872 | 0.50× | **86** | 1529 |
+| **`Lz4PerBank`** | 872 | 0.50× | **86** | 1529 |
 | **`Lz4PerColumn`** | **813** | **0.47×** | **75** | **1280** |
 
 `Lz4PerColumn` is the **smallest file** (beating even Gzip) *and* the **fastest
@@ -310,7 +310,7 @@ Reproduce (both benchmarks read the same per-format files):
 OXIHIPO_BENCH_KEEP=/tmp/fmt \
   cargo run --release --example bench_read_compression -- rec.hipo 3 50000
 python py/examples/bench_compression.py /tmp/fmt 20000 3   # Python side
-# and re-emit a real file as Lz4ByBankV2:
+# and re-emit a real file as Lz4PerBank:
 cargo run --release --example recook_by_bank -- in.hipo out_by_bank.hipo
 ```
 

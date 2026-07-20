@@ -29,7 +29,7 @@
   *Summary.* HIPO records can be stored under eight compression schemes.
   Five are _whole-record_ codecs (`None`, `Lz4`, `Lz4Best`, `Gzip`,
   `Lz4Chunked`): reading any bank inflates the entire record. Three are
-  _per-bank / per-column_ codecs (`Lz4ByBank`, `Lz4ByBankV2`,
+  _per-bank / per-column_ codecs (`Lz4ByBank`, `Lz4PerBank`,
   `Lz4PerColumn`): reading a bank — or, for `Lz4PerColumn`, a single
   column — inflates only that. On a real CLAS12 reconstruction file
   (598,738 events; a
@@ -102,7 +102,7 @@ record or just that bank's bytes.
     [`Gzip`], [DEFLATE (zlib) over the whole record], [record], [yes],
     [`Lz4Chunked`], [Record split into _N_-event chunks, each its own LZ4 block], [sub-record chunk], [no (Rust-only)],
     [`Lz4ByBank`], [One LZ4 stream _per bank type_ + a presence/size directory; fast default-LZ4 streams], [*per bank*], [no (Rust-only)],
-    [`Lz4ByBankV2`], [`Lz4ByBank` with *LZ4‑HC* bank streams + an LZ4-compressed directory + version byte; smaller than `Lz4Best` (slower _write_)], [*per bank*], [no (Rust-only)],
+    [`Lz4PerBank`], [`Lz4ByBank` with *LZ4‑HC* bank streams + an LZ4-compressed directory + version byte; smaller than `Lz4Best` (slower _write_)], [*per bank*], [no (Rust-only)],
     [`Lz4PerColumn`], [One *LZ4‑HC* stream per _(bank, column)_, laid out cross-event contiguous; reading one column never touches the others. Smallest on disk.], [*per column*], [no (Rust-only)],
   ),
 )
@@ -116,7 +116,7 @@ The reader has two internal paths:
   produced. Reading 1 bank or 270 banks costs the same: you always pay to
   inflate everything.
 
-- *ByBank path* (`Lz4ByBank`, `Lz4ByBankV2`). The record's small directory
+- *ByBank path* (`Lz4ByBank`, `Lz4PerBank`). The record's small directory
   (bank descriptors, an event×bank presence matrix, per-bank sizes) is
   parsed eagerly, but each bank's LZ4 stream is inflated _lazily_ on the
   first `ev.bank("NAME")`. Untouched banks are never decompressed.
@@ -189,7 +189,7 @@ every column* of the named banks. Best of 3 passes.
     [`Gzip`],        [1704.5], [2.04], [5794.7], [5943.5], [6184.4], [6519.5], [7367.1], [8625.6],
     [`Lz4Chunked`],  [2163.9], [1.60], [396.4], [438.9], [739.8], [1134.3], [2018.2], [3269.0],
     [`Lz4ByBank`],   [2099.9], [1.65], [167.2], [217.6], [905.3], [1261.2], [2018.8], [3071.3],
-    [`Lz4ByBankV2`], [1743.4], [1.99], [171.7], [224.7], [1057.9], [1326.1], [2092.0], [3164.7],
+    [`Lz4PerBank`], [1743.4], [1.99], [171.7], [224.7], [1057.9], [1326.1], [2092.0], [3164.7],
     [`Lz4PerColumn`],[1625.2], [2.13], [*148.8*], [*194.7*], [791.7], [1050.1], [*1707.5*], [*2632.0*],
   ),
 )
@@ -219,7 +219,7 @@ advantage nearly vanishes — isolating that the real-data win comes from
     [`Gzip`],        [6.8],  [9.12], [42.6], [3.5], [160],  [27.3], [5.5],
     [`Lz4Chunked`],  [20.1], [3.08], [24.8], [6.0], [810],  [11.3], [13.3],
     [`Lz4ByBank`],   [13.4], [4.63], [40.2], [3.7], [333],  [7.9],  [19.0],
-    [`Lz4ByBankV2`], [7.2],  [8.61], [31.9], [4.7], [226],  [6.5],  [23.1],
+    [`Lz4PerBank`], [7.2],  [8.61], [31.9], [4.7], [226],  [6.5],  [23.1],
   ),
 )
 
@@ -313,7 +313,7 @@ of data — that is what the column-major `for_each_column` scan is for.
   sweeps one column's streams straight through — *≈ 140 ms for a full-file
   column, ~10× faster* than the row-major all-read — and scales with the
   columns you touch, not the total. Whole-event reassembly is then only for
-  recook / serialization. `Lz4PerColumn` (and `Lz4ByBankV2`) default to
+  recook / serialization. `Lz4PerColumn` (and `Lz4PerBank`) default to
   *32 MB records* — longer per-column runs compress better and amortise the
   directory (a record-size sweep put the ratio/read knee there; reads are
   otherwise flat in record size).
@@ -366,7 +366,7 @@ of data — that is what the column-major `for_each_column` scan is for.
   [*`Lz4PerColumn`* — the *smallest* format (2.13×, beats `Gzip`) *and*
    fastest at nearly every read scope, from one column to all 73 banks (only
    uncompressed `None` edges it in the 10–20-bank middle); slower to _write_
-   (HC), 32 MB records. `Lz4ByBankV2` is the per-bank equivalent (1.99×, HC
+   (HC), 32 MB records. `Lz4PerBank` is the per-bank equivalent (1.99×, HC
    bank streams).],
   [Must stay C++ `hipo4`-readable],
   [*`Lz4Best`* — same decode speed as `Lz4`, ≈ 15 % smaller.],
@@ -504,5 +504,5 @@ codec wins. Produced by `examples/list_populated_banks.rs`.
   Single-thread, warm-cache, Apple M4 Pro (aarch64), release. Relative
   throughput on one machine; absolute MB/s differs by hardware and (for cold
   network/parallel filesystems) shifts toward the smaller-on-disk schemes.
-  `Lz4ByBank`/`Lz4ByBankV2`/`Lz4Chunked` are Rust-only format extensions.
+  `Lz4ByBank`/`Lz4PerBank`/`Lz4Chunked` are Rust-only format extensions.
 ]

@@ -21,11 +21,11 @@ use crate::wire::record_header::RecordHeader;
 /// - `None` / `Lz4` / `Lz4Best` / `Gzip` are interchangeable with the wire
 ///   tag of the same name, and produce files readable by the C++ `hipo4`
 ///   reader.
-/// - `Lz4ByBankV2` and `Lz4PerColumn` are Rust-only format extensions that
+/// - `Lz4PerBank` and `Lz4PerColumn` are Rust-only format extensions that
 ///   enable true partial decompression — `ev.bank("name")` (or one column)
 ///   inflates only the stream it needs, leaving the rest compressed.
 ///
-/// **Files written with `Lz4ByBankV2` or `Lz4PerColumn` are not readable by
+/// **Files written with `Lz4PerBank` or `Lz4PerColumn` are not readable by
 /// the C++ `hipo4` reader.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
@@ -38,12 +38,12 @@ pub enum Compression {
     /// an extension-format-version byte). Readers decompress only the bank
     /// streams they actually touch; per-bank grouping plus HC beats
     /// whole-record [`Self::Lz4Best`]. Writes are slower (HC).
-    Lz4ByBankV2,
+    Lz4PerBank,
     /// Per-*column* layout: within each bank, every column is stored as its
     /// own LZ4-HC stream laid out cross-event contiguous (all events' `px`,
     /// then all `py`, …). Reading one column inflates only that column, and
     /// homogeneous columns compress better than a bank's interleaved bytes,
-    /// so this beats [`Self::Lz4ByBankV2`] on both size and selective reads.
+    /// so this beats [`Self::Lz4PerBank`] on both size and selective reads.
     /// Banks without a schema (or composite banks) are stored opaquely as a
     /// single stream. Writes are slower (HC). Layout in `wire/per_column.rs`.
     Lz4PerColumn,
@@ -61,7 +61,7 @@ impl Compression {
             Self::Lz4 => CompressionType::Lz4,
             Self::Lz4Best => CompressionType::Lz4Best,
             Self::Gzip => CompressionType::Gzip,
-            Self::Lz4ByBankV2 => CompressionType::Lz4ByBankV2,
+            Self::Lz4PerBank => CompressionType::Lz4PerBank,
             Self::Lz4PerColumn => CompressionType::Lz4PerColumn,
         }
     }
@@ -153,7 +153,7 @@ pub(crate) fn build_record_bytes(
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
     match compression {
-        Compression::Lz4ByBankV2 => build_by_bank_v2_record_bytes(
+        Compression::Lz4PerBank => build_by_bank_record_bytes(
             events,
             user_word_1,
             user_word_2,
@@ -394,7 +394,7 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
 ///   E × ceil(B/8) presence
 ///   B × E × u32 event_bank_sizes
 /// ```
-fn build_by_bank_v2_record_bytes(
+fn build_by_bank_record_bytes(
     events: &[&[u8]],
     user_word_1: u64,
     user_word_2: u64,
@@ -498,7 +498,7 @@ fn build_by_bank_v2_record_bytes(
         user_header_length: 0,
         data_length,
         compressed_data_length: compressed_with_pad as u32,
-        compression: CompressionType::Lz4ByBankV2,
+        compression: CompressionType::Lz4PerBank,
         user_word_1,
         user_word_2,
         endianness: Endianness::Little,

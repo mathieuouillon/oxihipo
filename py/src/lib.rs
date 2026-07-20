@@ -242,7 +242,7 @@ impl PyChain {
     }
 
     /// Copy the (filtered) chain to `dst`, re-compressing with `compression`
-    /// (`"none"`, `"lz4"`, `"lz4best"`, `"gzip"`, `"lz4bybankv2"`,
+    /// (`"none"`, `"lz4"`, `"lz4best"`, `"gzip"`, `"lz4perbank"`,
     /// `"lz4percolumn"`). Returns `{"events", "records", "bytes"}`.
     #[pyo3(signature = (dst, compression="lz4percolumn"))]
     fn skim<'py>(
@@ -295,7 +295,7 @@ fn parse_compression(name: &str) -> PyResult<oxihipo::Compression> {
         "lz4" => Compression::Lz4,
         "lz4best" => Compression::Lz4Best,
         "gzip" => Compression::Gzip,
-        "lz4bybankv2" => Compression::Lz4ByBankV2,
+        "lz4perbank" => Compression::Lz4PerBank,
         "lz4percolumn" => Compression::Lz4PerColumn,
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(

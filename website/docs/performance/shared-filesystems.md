@@ -26,7 +26,7 @@ The levers are user-side, roughly in order of payoff:
 
 ### 1. Change the format
 
-Converting to [`Lz4ByBankV2`](./compression.md) is usually worth more than every
+Converting to [`Lz4PerBank`](./compression.md) is usually worth more than every
 other lever combined — on the ifarm skim it cut the file to a quarter of its
 size *and* stopped inflating banks the analysis never reads. Fewer bytes off
 Lustre, less LZ4 work. Start here.

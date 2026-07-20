@@ -59,18 +59,18 @@ Compression::None            // no compression
 Compression::Lz4             // stock, hipo4-compatible
 Compression::Lz4Best         // HC level (needs the `lz4-c` feature)
 Compression::Gzip            // stock, hipo4-compatible
-Compression::Lz4ByBankV2     // per-bank streams, lazy inflate
+Compression::Lz4PerBank     // per-bank streams, lazy inflate
 Compression::Lz4PerColumn    // per-column streams, best ratio + finest reads
 ```
 
 `None`, `Lz4`, `Lz4Best`, and `Gzip` stay byte-compatible with the C++ `hipo4`
-reader. `Lz4ByBankV2` and `Lz4PerColumn` are **opt-in format extensions** with
+reader. `Lz4PerBank` and `Lz4PerColumn` are **opt-in format extensions** with
 new compression tags that `hipo4` doesn't know about — use them for Rust-only
 (or oxihipo-Python-only) consumers.
 
 If you're deciding between them, read
 [Compression formats](../performance/compression.md) — the short version is that
-`Lz4ByBankV2` is usually the one you want, and `Lz4PerColumn` (what `skim`
+`Lz4PerBank` is usually the one you want, and `Lz4PerColumn` (what `skim`
 defaults to) squeezes the file smaller still.
 
 ## Copying events verbatim

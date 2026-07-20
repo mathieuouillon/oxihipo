@@ -32,7 +32,7 @@ throughput at par=10.
 
 :::note Measured on the original by-bank variant
 These were measured on the first by-bank format (fast default-LZ4 streams).
-`Lz4ByBankV2` — what you write today — shares the layout with HC-compressed
+`Lz4PerBank` — what you write today — shares the layout with HC-compressed
 streams: selective-read speed is the same (the figures carry over) and the file
 is *smaller* than the 6.66 GB shown. `Lz4PerColumn` inflates at column
 granularity and is smaller still.
@@ -71,7 +71,7 @@ read *every value of every column* of that many banks, for every event — `sel`
 | `Lz4` | 1081 | 0.62× | 396 | 1203 | 1817 |
 | `Lz4Best` | 922 | 0.53× | 395 | 1198 | 1826 |
 | `Gzip` | 852 | 0.49× | 2878 | 3717 | 4348 |
-| **`Lz4ByBankV2`** | 872 | 0.50× | **86** | 1032 | 1529 |
+| **`Lz4PerBank`** | 872 | 0.50× | **86** | 1032 | 1529 |
 | **`Lz4PerColumn`** | **813** | **0.47×** | **75** | **839** | **1280** |
 
 *(read columns in ms)*
@@ -92,7 +92,7 @@ reading the same files through the binding — `sel` = `arrays("REC::Particle")`
 | `Lz4` | 1081 | 0.62× | 48 | 271 |
 | `Lz4Best` | 922 | 0.53× | 36 | 260 |
 | `Gzip` | 852 | 0.49× | 126 | 343 |
-| **`Lz4ByBankV2`** | 872 | 0.50× | **12** | 171 |
+| **`Lz4PerBank`** | 872 | 0.50× | **12** | 171 |
 | **`Lz4PerColumn`** | **813** | **0.47×** | **12** | 172 |
 
 *(read columns in ms)*
@@ -140,7 +140,7 @@ sequential `Chain::events()` scan reads all 187,941 events at ~257 kev/s.
 # Rust throughput, threads = 0 → all cores
 cargo run --release --example bench_par -- /path/to/file.hipo 0
 
-# Convert a file first if you want the by-bank (Lz4ByBankV2) numbers
+# Convert a file first if you want the by-bank (Lz4PerBank) numbers
 cargo run --release --example recook_by_bank -- in.hipo out_by_bank.hipo
 cargo run --release --example bench_par -- out_by_bank.hipo 0
 

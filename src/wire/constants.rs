@@ -125,7 +125,7 @@ pub enum CompressionType {
     Lz4Best = 2,
     Gzip = 3,
     // Tags 4 (`Lz4Chunked`) and 5 (`Lz4ByBank` v1) were removed — they are
-    // superseded by `Lz4ByBankV2` and `Lz4PerColumn`. Files carrying those
+    // superseded by `Lz4PerBank` and `Lz4PerColumn`. Files carrying those
     // tags are rejected at header parse (`from_word` returns `None`).
     /// By-bank layout: one LZ4-HC stream per bank type, plus a directory of
     /// which events have which banks. The directory carries an
@@ -134,7 +134,7 @@ pub enum CompressionType {
     /// decompression — `ev.bank("name")` inflates only the requested bank's
     /// stream. Layout in `wire/by_bank.rs`. **Not readable by the C++ `hipo4`
     /// reader.**
-    Lz4ByBankV2 = 6,
+    Lz4PerBank = 6,
     /// Per-*column* layout: one LZ4-HC stream per `(bank, column)`, laid
     /// out cross-event contiguous (all events' `px`, then all `py`, …).
     /// Reading one column inflates only that column's stream; homogeneous
@@ -152,7 +152,7 @@ impl CompressionType {
             2 => Some(Self::Lz4Best),
             3 => Some(Self::Gzip),
             // 4/5 (removed Lz4Chunked / Lz4ByBank v1) → unknown ⇒ rejected.
-            6 => Some(Self::Lz4ByBankV2),
+            6 => Some(Self::Lz4PerBank),
             7 => Some(Self::Lz4PerColumn),
             _ => None,
         }
@@ -161,7 +161,7 @@ impl CompressionType {
     /// True for the by-bank format (v2, tag 6) — decoded through
     /// `ByBankRecord::parse` rather than the whole-record path.
     pub const fn is_by_bank(self) -> bool {
-        matches!(self, Self::Lz4ByBankV2)
+        matches!(self, Self::Lz4PerBank)
     }
 
     /// True for the per-column format (tag 7), which the reader decodes

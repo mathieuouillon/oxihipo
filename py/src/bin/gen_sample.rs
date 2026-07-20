@@ -11,7 +11,7 @@ fn main() {
     let compression = match fmt.as_str() {
         "none" => Compression::None,
         "lz4" => Compression::Lz4,
-        "bybank" => Compression::Lz4ByBankV2,
+        "bybank" => Compression::Lz4PerBank,
         "percolumn" => Compression::Lz4PerColumn,
         other => panic!("unknown format {other}"),
     };

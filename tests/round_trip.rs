@@ -558,7 +558,7 @@ fn write_then_scan_lz4_by_bank() {
     {
         let mut w = Writer::create(&path)
             .schemas(&sample_dict())
-            .compression(Compression::Lz4ByBankV2)
+            .compression(Compression::Lz4PerBank)
             .max_record_events(40)
             .build()
             .unwrap();
@@ -643,7 +643,7 @@ fn lz4_by_bank_for_each_matches_iterator() {
     {
         let mut w = Writer::create(&path)
             .schemas(&sample_dict())
-            .compression(Compression::Lz4ByBankV2)
+            .compression(Compression::Lz4PerBank)
             .max_record_events(30)
             .build()
             .unwrap();
@@ -690,7 +690,7 @@ fn lz4_by_bank_skips_unused_banks() {
     {
         let mut w = Writer::create(&path)
             .schemas(&sample_dict())
-            .compression(Compression::Lz4ByBankV2)
+            .compression(Compression::Lz4PerBank)
             .max_record_events(50)
             .build()
             .unwrap();

@@ -31,13 +31,13 @@ import time
 import oxihipo as ox
 
 # The formats the Python binding can write, in the same order as the Rust bench.
-FORMATS = ["None", "Lz4", "Lz4Best", "Gzip", "Lz4ByBankV2", "Lz4PerColumn"]
+FORMATS = ["None", "Lz4", "Lz4Best", "Gzip", "Lz4PerBank", "Lz4PerColumn"]
 SKIM_NAME = {
     "None": "none",
     "Lz4": "lz4",
     "Lz4Best": "lz4best",
     "Gzip": "gzip",
-    "Lz4ByBankV2": "lz4bybankv2",
+    "Lz4PerBank": "lz4perbank",
     "Lz4PerColumn": "lz4percolumn",
 }
 
