@@ -26,6 +26,7 @@ verbatim, so don't wrap a single path in one.
 | `f.numpy(bank, col)` | `NumpyColumn(values, offsets, inner_len)` — plain NumPy, no Awkward import |
 | `f.event_tags()` | per-event tag (`EH_TAG`) as `uint32[n_events]`, aligned 1:1 with `arrays()` |
 | `f.tag_names` | persisted tag registry as `{name: bit}` (empty if none) — see [Filtering by tag name](#filtering-by-tag-name) |
+| `f.show()` / `f.show(bank)` | print every bank and its `column: dtype` (human-readable) |
 | `f["REC::Particle"]` | a **bank proxy**: `.keys()`, `.typenames()`, `.array(col)`, `["col"]` |
 | `f["REC::Particle/px"]` | the `px` column |
 
@@ -176,6 +177,16 @@ f = ox.open("run.hipo")            # written with compression="none"
 f.set_event_tag(42, 1)             # one 4-byte write, no rewrite
 f.set_event_tags({10: 1, 20: 2})   # batch
 ```
+
+## Scaler banks (and record tags)
+
+oxihipo reads **every** record in a file, so scaler banks (`RUN::scaler`, …) are
+available like any other bank — no special flag. (The C++ `hipo4` reader and
+hipopy need `reader.setTags(1)` to see them, because scalers live in tag-1
+records; oxihipo indexes all records instead.) They show up in `keys()`, and you
+read them with `arrays("RUN::scaler")`. If you want a *subset* by tag, that's the
+pushdown filter — `filtered(record_tag=[…])` skips whole records by their tag,
+`filtered(event_tag=…)` drops individual events (both without inflating a bank).
 
 ## Resource management
 

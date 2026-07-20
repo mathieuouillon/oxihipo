@@ -17,7 +17,13 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, overload
 
-from ._oxihipo import Chain as _RustChain, CorruptFileError, OxihipoError, __version__
+from ._oxihipo import (
+    Chain as _RustChain,
+    CorruptFileError,
+    OxihipoError,
+    Writer as _RustWriter,
+    __version__,
+)
 
 if TYPE_CHECKING:  # optional/lazy deps — imported only for annotations, never at runtime
     import awkward as ak
@@ -34,7 +40,10 @@ Source = StrPath | Sequence[StrPath]
 
 __all__ = [
     "Chain",
+    "Writer",
     "open",
+    "create",
+    "recreate",
     "iterate",
     "arrays",
     "Report",
@@ -303,6 +312,25 @@ class Chain:
         if filter_name is not None:
             out = [k for k in out if fnmatch.fnmatch(k, filter_name)]
         return out
+
+    def _schema_lines(self, bank: str | None = None) -> list[str]:
+        """Human-readable ``bank → column: dtype`` lines (all banks, or one)."""
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        for key, dt in self._reader().typenames().items():
+            b, col = key.split("/", 1)
+            grouped.setdefault(b, []).append((col, dt))
+        names = [bank] if bank is not None else sorted(grouped)
+        lines = []
+        for b in names:
+            cols = grouped.get(b, [])
+            lines.append(f"{b}  ({len(cols)} columns)")
+            lines += [f"    {c:<24} {dt}" for c, dt in cols]
+        return lines
+
+    def show(self, bank: str | None = None) -> None:
+        """Print the dictionary — every bank and its ``column: dtype`` (or, with
+        ``bank=``, just that one). A human-readable view of :meth:`typenames`."""
+        print("\n".join(self._schema_lines(bank)))
 
     # --- selection resolution ---------------------------------------------
     def _resolve(self, banks, columns, filter_name):
@@ -907,3 +935,168 @@ def arrays(
         entry_start=entry_start, entry_stop=entry_stop, threads=threads,
         workers=workers,
     )
+
+
+# --------------------------------------------------------------------------
+# Writing (columnar, uproot-shaped)
+# --------------------------------------------------------------------------
+# HIPO type char → NumPy dtype (what the columns are cast to before the write).
+_NP_DTYPE = {"B": "int8", "S": "int16", "I": "int32", "L": "int64", "F": "float32", "D": "float64"}
+
+
+def _flatten_column(col):
+    """One column → ``(offsets | None, flat 1-D ndarray)``. ``None`` offsets
+    means one row per event (a scalar-per-event column)."""
+    import numpy as np
+
+    if hasattr(col, "layout"):  # an awkward array
+        import awkward as ak
+
+        if col.ndim == 1:  # flat ak → scalar per event
+            return None, ak.to_numpy(col)
+        counts = ak.to_numpy(ak.num(col, axis=1))
+        flat = ak.to_numpy(ak.flatten(col, axis=1))
+        offsets = np.concatenate(([0], np.cumsum(counts))).astype(np.int64)
+        return offsets, flat
+
+    arr = np.asarray(col)
+    if arr.ndim == 1:  # 1-D NumPy → scalar per event
+        return None, arr
+    if arr.ndim == 2:  # (n_events, rows) rectangular → constant per-event counts
+        n, r = arr.shape
+        return (np.arange(n + 1, dtype=np.int64) * r), np.ascontiguousarray(arr).reshape(-1)
+    raise TypeError(f"unsupported column shape {arr.shape!r} (need 1-D, 2-D, or a jagged ak.Array)")
+
+
+def _to_columnar(bank, bdata, schema):
+    """One bank's ``extend`` data → ``(offsets int64, [(col, values ndarray)])``.
+    Accepts an ``ak.Array`` record (as ``arrays(bank)`` returns) or a dict of columns."""
+    import numpy as np
+
+    if hasattr(bdata, "fields") and bdata.fields:  # ak record array
+        cols_in = {f: bdata[f] for f in bdata.fields}
+    elif hasattr(bdata, "items"):
+        cols_in = dict(bdata)
+    else:
+        raise TypeError(
+            f"bank {bank!r}: extend data must be an ak.Array record or a dict of columns"
+        )
+
+    offsets = None
+    out_cols = []
+    for name, col in cols_in.items():
+        off, flat = _flatten_column(col)
+        if off is None:
+            off = np.arange(len(flat) + 1, dtype=np.int64)
+        if offsets is None:
+            offsets = off
+        elif not np.array_equal(offsets, off):
+            raise ValueError(
+                f"bank {bank!r}: column {name!r} has different per-event row counts than the others"
+            )
+        out_cols.append((name, np.ascontiguousarray(flat, dtype=_NP_DTYPE.get(schema.get(name)))))
+    if offsets is None:
+        offsets = np.zeros(1, dtype=np.int64)
+    return np.ascontiguousarray(offsets, dtype=np.int64), out_cols
+
+
+class Writer:
+    """A columnar HIPO writer — uproot-shaped (:meth:`newtree` / :meth:`extend`).
+
+    Build a fresh file with :func:`create`, or *decorate* an existing one (copy
+    its events, attaching new banks) with :func:`recreate`. Declare each new
+    bank with :meth:`newtree`, feed columnar batches (NumPy or Awkward) with
+    :meth:`extend`, then :meth:`close` — or use it as a context manager.
+
+    Array columns (``T#N``) are not yet supported by the writer; existing array
+    columns of a decorated file are copied through verbatim.
+    """
+
+    _w: "_RustWriter | None"
+
+    def __init__(self, path, compression="lz4percolumn", source=None, _inplace=None):
+        self._w = _RustWriter(str(path), compression, None if source is None else str(source))
+        self._schemas: dict[str, dict[str, str]] = {}
+        self._inplace = _inplace  # (final_path, temp_path) for recreate(dst=None)
+        self._summary: SkimSummary | None = None
+
+    def _writer(self) -> "_RustWriter":
+        if self._w is None:
+            raise ValueError("operation on a closed Writer")
+        return self._w
+
+    def newtree(
+        self,
+        bank: str,
+        columns: "dict[str, str] | Sequence[tuple[str, str]]",
+        group: int = 1,
+        item: int | None = None,
+    ) -> None:
+        """Declare a new bank. ``columns`` maps ``name → typechar`` (or a list of
+        ``(name, typechar)``); typechar ∈ ``B/S/I/L/F/D``. ``item`` (the unique
+        bank id) auto-assigns when omitted. Mirrors uproot's ``newtree``."""
+        cols: list[tuple[str, str]] = (
+            list(columns.items())
+            if isinstance(columns, dict)
+            else [(c[0], c[1]) for c in columns]
+        )
+        self._writer().add_schema(bank, cols, group, item)
+        self._schemas[bank] = dict(cols)
+
+    def extend(self, data: "dict[str, Any]") -> None:
+        """Append a batch of events. ``data`` is ``{bank: array}`` where each
+        value is an ``ak.Array`` record (as :meth:`Chain.arrays` returns) or a
+        dict of columns — a jagged ``ak.Array`` per column, or a 1-D NumPy array
+        for a scalar-per-event bank. Every bank in one call must span the same
+        number of events. Mirrors uproot's ``extend``."""
+        banks = []
+        for bank, bdata in data.items():
+            offsets, cols = _to_columnar(bank, bdata, self._schemas.get(bank, {}))
+            banks.append((bank, offsets, cols))
+        self._writer().extend(banks)
+
+    def close(self) -> SkimSummary:
+        """Finish the file (write the trailer index). Returns a
+        :class:`SkimSummary` (``events`` / ``records`` / ``bytes``). Idempotent;
+        ``with`` closes for you."""
+        if self._summary is None:
+            d = self._writer().close()
+            self._summary = SkimSummary(d["events"], d["records"], d["bytes"])
+            if self._inplace is not None:
+                final, temp = self._inplace
+                self._w = None  # release the source read handles before replacing
+                os.replace(temp, final)
+        return self._summary
+
+    write = close  # uproot / hipopy alias
+
+    def __enter__(self) -> "Writer":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        return f"<oxihipo.Writer: {'closed' if self._summary else 'open'}>"
+
+
+def create(path: StrPath, compression: str = "lz4percolumn") -> Writer:
+    """Open a new HIPO file for writing (overwrites). Declare banks with
+    :meth:`Writer.newtree`, feed batches with :meth:`Writer.extend`, then
+    :meth:`Writer.close`. Compression is one of ``none`` / ``lz4`` / ``lz4best``
+    / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``."""
+    return Writer(path, compression=compression)
+
+
+def recreate(
+    source: StrPath, dst: StrPath | None = None, compression: str = "lz4percolumn"
+) -> Writer:
+    """Decorate an existing file: copy every event of ``source`` and attach the
+    new banks you :meth:`~Writer.newtree` + :meth:`~Writer.extend` (which must
+    align 1:1 with the source events). Existing banks are copied through
+    verbatim. Writes to ``dst``; if ``dst`` is ``None``, replaces ``source`` in
+    place via a temp file."""
+    if dst is None:
+        temp = str(source) + ".oxitmp"
+        return Writer(temp, compression=compression, source=source, _inplace=(str(source), temp))
+    return Writer(dst, compression=compression, source=source)

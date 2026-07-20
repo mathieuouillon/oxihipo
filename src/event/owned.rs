@@ -181,6 +181,16 @@ impl OwnedEvent {
         }
     }
 
+    /// The event's bank **structures** — every byte after the 16-byte event
+    /// header (`bytes()[16..]`). For `ByBank` / `PerColumn` events this is the
+    /// synthesised structure region. Handy for copying an event's banks
+    /// verbatim while attaching new ones: feed it to
+    /// [`EventBuilder::add_bank_bytes`](crate::event::EventBuilder::add_bank_bytes)
+    /// (it appends raw), add more banks, then `finish()`.
+    pub fn structures_bytes(&self) -> &[u8] {
+        &self.bytes()[EVENT_HEADER_SIZE..]
+    }
+
     pub fn dict(&self) -> &Arc<Dict> {
         &self.dict
     }
@@ -738,6 +748,41 @@ mod tests {
     fn owned_event_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<OwnedEvent>();
+    }
+
+    #[test]
+    fn structures_bytes_enables_verbatim_decorate() {
+        use crate::event::build::BankBuilder;
+        use crate::event::event::Event;
+
+        // Source event carries bank A (pid=42).
+        let mut dict = Dict::new();
+        let sa = Schema::from_columns("A", 1, 1, [("pid".into(), DataType::Int, 1)]);
+        let sb = Schema::from_columns("B", 2, 2, [("e".into(), DataType::Float, 1)]);
+        dict.add(sa.clone());
+        dict.add(sb.clone());
+        let src = OwnedEvent::new(build_event_bytes(&sa, 42), Arc::new(dict));
+        // structures_bytes is exactly the tail past the 16-byte header.
+        assert_eq!(src.structures_bytes(), &src.bytes()[16..]);
+
+        // Decorate: copy the source's banks verbatim, then attach a new bank B.
+        let mut bb = BankBuilder::new(&sb);
+        bb.push_row().set_f32("e", 1.5).unwrap();
+        let mut eb = EventBuilder::new().with_tag(7u32);
+        eb.add_bank_bytes(src.structures_bytes());
+        eb.add(bb);
+        let merged = eb.finish();
+
+        let ev = Event::new(&merged);
+        assert_eq!(ev.tag(), 7);
+        assert!(
+            ev.has(1, 1) && ev.has(2, 2),
+            "both source and new bank present"
+        );
+        let (_, a) = ev.find(1, 1).unwrap();
+        assert_eq!(Bank::new(&sa, a).unwrap().col::<i32>("pid").unwrap()[0], 42);
+        let (_, b) = ev.find(2, 2).unwrap();
+        assert_eq!(Bank::new(&sb, b).unwrap().col::<f32>("e").unwrap()[0], 1.5);
     }
 
     #[test]

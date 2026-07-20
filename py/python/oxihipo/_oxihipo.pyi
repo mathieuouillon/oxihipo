@@ -10,7 +10,7 @@ from typing import Any, final
 import numpy as np
 from numpy.typing import NDArray
 
-__all__ = ["Chain", "__version__", "OxihipoError", "CorruptFileError"]
+__all__ = ["Chain", "Writer", "__version__", "OxihipoError", "CorruptFileError"]
 
 __version__: str
 
@@ -70,3 +70,19 @@ class Chain:
     def set_event_tags(self, updates: Sequence[tuple[int, int]]) -> int: ...
     def record_spans(self) -> list[tuple[int, int, int, int]]: ...
     def record_decompressed_sizes(self) -> list[int]: ...
+
+@final
+class Writer:
+    def __new__(cls, dst: str, compression: str = ..., source: str | None = ...) -> "Writer": ...
+    def add_schema(
+        self,
+        name: str,
+        cols: Sequence[tuple[str, str]],
+        group: int = ...,
+        item: int | None = ...,
+    ) -> None: ...
+    def extend(
+        self,
+        banks: Sequence[tuple[str, NDArray[np.int64], Sequence[tuple[str, NDArray[Any]]]]],
+    ) -> None: ...
+    def close(self) -> dict[str, int]: ...

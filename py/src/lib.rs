@@ -4,7 +4,8 @@
 //! in the pure-Python `oxihipo` package layered on top of `read_columns`.
 
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
-use oxihipo::{ColumnData, DataType};
+use oxihipo::event::{BankBuilder, EventBuilder};
+use oxihipo::{Chain, ChainEventIter, ColumnData, Compression, DataType, Dict, Schema, Writer};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::ops::Range;
@@ -19,6 +20,13 @@ type BankColumns<'py> = (
     Bound<'py, PyArray1<i64>>,
     Vec<(String, Bound<'py, PyAny>, u32)>,
 );
+
+/// One `PyWriter::extend` call's banks: `[(bank, offsets_i64, [(col, values)])]`.
+type ExtendBanks<'py> = Vec<(
+    String,
+    PyReadonlyArray1<'py, i64>,
+    Vec<(String, Bound<'py, PyAny>)>,
+)>;
 
 /// Move a materialized column into a NumPy array (zero-copy: NumPy takes over
 /// the Rust `Vec`'s allocation and frees it through Rust when collected).
@@ -386,6 +394,352 @@ impl PyChain {
     }
 }
 
+// ---- Writer ---------------------------------------------------------------
+
+/// Map a hipo type char to a [`DataType`]. Array columns (`T#N`) are not yet
+/// supported by the Python writer.
+fn dtype_from_char(c: &str) -> PyResult<DataType> {
+    Ok(match c {
+        "B" => DataType::Byte,
+        "S" => DataType::Short,
+        "I" => DataType::Int,
+        "L" => DataType::Long,
+        "F" => DataType::Float,
+        "D" => DataType::Double,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown column type {other:?} (expected one of B/S/I/L/F/D); \
+                 array columns are not yet supported by the Python writer"
+            )));
+        }
+    })
+}
+
+/// A column's values copied out of a NumPy array into an owned, typed `Vec`,
+/// so the actual write runs with the GIL released.
+enum ColData {
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+impl ColData {
+    /// Copy `arr` (a 1-D NumPy array) into the typed `Vec` matching `dt`.
+    fn from_py(dt: DataType, col: &str, arr: &Bound<'_, PyAny>) -> PyResult<Self> {
+        fn take<T: numpy::Element + Copy>(
+            arr: &Bound<'_, PyAny>,
+            col: &str,
+            want: &str,
+        ) -> PyResult<Vec<T>> {
+            let a = arr.extract::<PyReadonlyArray1<'_, T>>().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "column {col:?}: expected a contiguous 1-D {want} array"
+                ))
+            })?;
+            Ok(a.as_slice()?.to_vec())
+        }
+        Ok(match dt {
+            DataType::Byte => ColData::I8(take(arr, col, "int8")?),
+            DataType::Short => ColData::I16(take(arr, col, "int16")?),
+            DataType::Int => ColData::I32(take(arr, col, "int32")?),
+            DataType::Long => ColData::I64(take(arr, col, "int64")?),
+            DataType::Float => ColData::F32(take(arr, col, "float32")?),
+            DataType::Double => ColData::F64(take(arr, col, "float64")?),
+        })
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            ColData::I8(v) => v.len(),
+            ColData::I16(v) => v.len(),
+            ColData::I32(v) => v.len(),
+            ColData::I64(v) => v.len(),
+            ColData::F32(v) => v.len(),
+            ColData::F64(v) => v.len(),
+        }
+    }
+
+    /// Set flat value `i` into bank-builder row `row` of column `name`.
+    fn set_at(&self, bb: &mut BankBuilder, name: &str, row: u32, i: usize) -> oxihipo::Result<()> {
+        match self {
+            ColData::I8(v) => bb.set_i8_at(name, row, v[i])?,
+            ColData::I16(v) => bb.set_i16_at(name, row, v[i])?,
+            ColData::I32(v) => bb.set_i32_at(name, row, v[i])?,
+            ColData::I64(v) => bb.set_i64_at(name, row, v[i])?,
+            ColData::F32(v) => bb.set_f32_at(name, row, v[i])?,
+            ColData::F64(v) => bb.set_f64_at(name, row, v[i])?,
+        };
+        Ok(())
+    }
+}
+
+/// One bank of a single `extend` call, resolved against the schema and copied
+/// into owned typed buffers.
+struct ResolvedBank {
+    schema: Schema,
+    /// `n_events + 1` cumulative row offsets (event `e`'s rows = `[e]..[e+1]`).
+    offsets: Vec<i64>,
+    columns: Vec<(String, ColData)>,
+}
+
+/// Columnar HIPO writer. Create a fresh file (`ox.create`) or decorate an
+/// existing one with extra banks (`ox.recreate`). Not thread-shared.
+#[pyclass(name = "Writer", module = "oxihipo", unsendable)]
+struct PyWriter {
+    dst: String,
+    compression: Compression,
+    /// Accumulated schemas: the new banks (fresh) or source + new (decorate).
+    dict: Dict,
+    /// Next auto-assigned (unique) item number for `newtree` without an explicit item.
+    next_item: u8,
+    writer: Option<Writer>,
+    /// Decorate mode: the source event stream, merged event-by-event.
+    source: Option<ChainEventIter>,
+    /// Decorate mode: source event count, to reject under/over-provisioning.
+    source_total: Option<u64>,
+    events_written: u64,
+    finished: bool,
+}
+
+#[pymethods]
+impl PyWriter {
+    /// `source=None` → fresh file; `source=path` → decorate that file (copy its
+    /// events, attaching the banks you declare + `extend`).
+    #[new]
+    #[pyo3(signature = (dst, compression="lz4percolumn", source=None))]
+    fn new(
+        py: Python<'_>,
+        dst: String,
+        compression: &str,
+        source: Option<String>,
+    ) -> PyResult<Self> {
+        let comp = parse_compression(compression)?;
+        let (dict, next_item, source_iter, source_total) = match source {
+            None => (Dict::new(), 1u8, None, None),
+            Some(src) => {
+                let chain = py.detach(|| Chain::open(&src)).map_err(to_pyerr)?;
+                let dict = chain.schemas().clone();
+                let next_item = dict
+                    .iter()
+                    .map(|s| s.item())
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                let total = chain.event_count();
+                (dict, next_item, Some(chain.events()), Some(total))
+            }
+        };
+        Ok(Self {
+            dst,
+            compression: comp,
+            dict,
+            next_item,
+            writer: None,
+            source: source_iter,
+            source_total,
+            events_written: 0,
+            finished: false,
+        })
+    }
+
+    /// Declare a bank schema (uproot `newtree`). `cols` is `[(name, typechar)]`
+    /// with typechar in B/S/I/L/F/D. `item` auto-assigns (unique) if omitted.
+    #[pyo3(signature = (name, cols, group=1, item=None))]
+    fn add_schema(
+        &mut self,
+        name: String,
+        cols: Vec<(String, String)>,
+        group: u16,
+        item: Option<u8>,
+    ) -> PyResult<()> {
+        if self.writer.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "cannot declare a schema after the first extend()/write",
+            ));
+        }
+        let item = item.unwrap_or_else(|| {
+            let i = self.next_item;
+            self.next_item = self.next_item.saturating_add(1);
+            i
+        });
+        if item >= self.next_item {
+            self.next_item = item.saturating_add(1);
+        }
+        let entries: Vec<(String, DataType, u32)> = cols
+            .into_iter()
+            .map(|(n, t)| dtype_from_char(&t).map(|dt| (n, dt, 1u32)))
+            .collect::<PyResult<_>>()?;
+        self.dict
+            .add(Schema::from_columns(name, group, item, entries));
+        Ok(())
+    }
+
+    /// Append a batch of events. `banks` is `[(bank, offsets_i64, [(col, values)])]`;
+    /// every bank in one call must cover the same number of events.
+    #[pyo3(signature = (banks))]
+    fn extend(&mut self, py: Python<'_>, banks: ExtendBanks<'_>) -> PyResult<()> {
+        if self.finished {
+            return Err(pyo3::exceptions::PyValueError::new_err("writer is closed"));
+        }
+        // Resolve + copy every bank's columns; validate shapes.
+        let mut resolved: Vec<ResolvedBank> = Vec::with_capacity(banks.len());
+        let mut n_events: Option<usize> = None;
+        for (name, offsets, cols) in &banks {
+            let schema = self
+                .dict
+                .get(name)
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown bank {name:?}; declare it with newtree() first"
+                    ))
+                })?
+                .clone();
+            let offs: Vec<i64> = offsets.as_slice()?.to_vec();
+            let ne = offs.len().checked_sub(1).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "bank {name:?}: offsets must be non-empty"
+                ))
+            })?;
+            match n_events {
+                None => n_events = Some(ne),
+                Some(x) if x != ne => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "all banks in one extend() must cover the same number of events",
+                    ));
+                }
+                _ => {}
+            }
+            let total_rows = *offs.last().unwrap_or(&0) as usize;
+            let mut columns = Vec::with_capacity(cols.len());
+            for (cname, arr) in cols {
+                let dt = schema
+                    .entries()
+                    .iter()
+                    .find(|e| &e.name == cname)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "bank {name:?} has no column {cname:?}"
+                        ))
+                    })?
+                    .ty;
+                let cd = ColData::from_py(dt, cname, arr)?;
+                if cd.len() != total_rows {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "bank {name:?} column {cname:?}: {} values but offsets imply {total_rows}",
+                        cd.len()
+                    )));
+                }
+                columns.push((cname.clone(), cd));
+            }
+            resolved.push(ResolvedBank {
+                schema,
+                offsets: offs,
+                columns,
+            });
+        }
+        let n_events = n_events.unwrap_or(0);
+        if let Some(total) = self.source_total {
+            if self.events_written + n_events as u64 > total {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "extending {} events past the source file's {total} events",
+                    self.events_written + n_events as u64
+                )));
+            }
+        }
+
+        self.ensure_writer()?;
+        let writer = self.writer.as_mut().expect("writer built");
+        let source = self.source.as_mut();
+        py.detach(move || -> oxihipo::Result<()> {
+            let mut source = source;
+            for e in 0..n_events {
+                let mut eb = EventBuilder::new();
+                if let Some(src_it) = source.as_deref_mut() {
+                    match src_it.next() {
+                        Some(Ok(src_ev)) => {
+                            eb.set_tag(src_ev.tag());
+                            eb.add_bank_bytes(src_ev.structures_bytes());
+                        }
+                        Some(Err(err)) => return Err(err),
+                        None => {
+                            return Err(oxihipo::HipoError::CorruptRecord {
+                                offset: 0,
+                                reason: "source exhausted before all decorate events were written",
+                            });
+                        }
+                    }
+                }
+                for rb in &resolved {
+                    let lo = rb.offsets[e] as usize;
+                    let hi = rb.offsets[e + 1] as usize;
+                    let mut bb = BankBuilder::with_row_capacity(&rb.schema, (hi - lo) as u32);
+                    bb.push_rows((hi - lo) as u32);
+                    for (cname, cd) in &rb.columns {
+                        for (row, i) in (lo..hi).enumerate() {
+                            cd.set_at(&mut bb, cname, row as u32, i)?;
+                        }
+                    }
+                    eb.add(bb);
+                }
+                writer.append_raw(&eb.finish())?;
+            }
+            Ok(())
+        })
+        .map_err(to_pyerr)?;
+        self.events_written += n_events as u64;
+        Ok(())
+    }
+
+    /// Finish the file (writes the trailer index). Returns
+    /// `{"events", "records", "bytes"}`. Idempotent.
+    fn close<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        if !self.finished {
+            if let Some(total) = self.source_total {
+                if self.events_written != total {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "decorate covered {} of the source's {total} events; \
+                         provide data for all events",
+                        self.events_written
+                    )));
+                }
+            }
+        }
+        self.ensure_writer()?;
+        let summary = if let Some(writer) = self.writer.take() {
+            py.detach(|| writer.finish()).map_err(to_pyerr)?
+        } else {
+            oxihipo::WriteSummary {
+                events: self.events_written,
+                records: 0,
+                bytes: 0,
+            }
+        };
+        self.finished = true;
+        let out = PyDict::new(py);
+        out.set_item("events", summary.events)?;
+        out.set_item("records", summary.records)?;
+        out.set_item("bytes", summary.bytes)?;
+        Ok(out)
+    }
+}
+
+impl PyWriter {
+    fn ensure_writer(&mut self) -> PyResult<()> {
+        if self.writer.is_none() {
+            let w = Writer::create(&self.dst)
+                .schemas(&self.dict)
+                .compression(self.compression)
+                .build()
+                .map_err(to_pyerr)?;
+            self.writer = Some(w);
+        }
+        Ok(())
+    }
+}
+
 /// Map a compression name to the core enum.
 fn parse_compression(name: &str) -> PyResult<oxihipo::Compression> {
     use oxihipo::Compression;
@@ -407,6 +761,7 @@ fn parse_compression(name: &str) -> PyResult<oxihipo::Compression> {
 #[pymodule]
 fn _oxihipo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyChain>()?;
+    m.add_class::<PyWriter>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     error::register(m)?;
     Ok(())

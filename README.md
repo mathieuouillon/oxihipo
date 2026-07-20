@@ -183,6 +183,17 @@ for chunk in f.iterate("REC::Particle", step_size="200 MB"):   # bounded memory
 p = ox.arrays("/volatile/run5042/*.hipo", "REC::Particle", ["px"], workers=8)
 ```
 
+Writing is uproot-shaped and columnar too — `create` a new file, or `recreate`
+to **decorate** an existing one with a derived bank (an ML score, a computed
+kinematic) without rewriting the physics banks:
+
+```python
+w = ox.recreate("dst.hipo", "decorated.hipo")   # copies every event verbatim
+w.newtree("ML::pred", {"score": "F"})            # declare a new bank
+w.extend({"ML::pred": {"score": scores}})        # one float32 per event
+w.close()
+```
+
 Build with [maturin](https://www.maturin.rs) (`cd py && maturin develop
 --release`); see the [Python guide](https://mathieuouillon.github.io/oxihipo/docs/python/reading),
 [`py/README.md`](py/README.md), and [`py/examples/`](py/examples/). Design notes:

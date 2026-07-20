@@ -20,6 +20,7 @@ const sidebars = {
       label: 'Python guide',
       items: [
         'python/reading',
+        'python/writing',
         'python/streaming',
         'python/parallel',
         'python/how-it-works',

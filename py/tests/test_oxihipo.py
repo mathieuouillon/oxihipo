@@ -587,3 +587,90 @@ def test_set_event_tag_rejects_compressed(tmp_path):
         oxihipo.open(dst).set_event_tag(1, 5)
     with open(dst, "rb") as fh:
         assert fh.read() == before
+
+
+# -------------------------------------------------------------------------
+# Writing
+# -------------------------------------------------------------------------
+def test_writer_roundtrip_jagged(tmp_path):
+    # Write a fresh file with a jagged bank, read it back.
+    ak = pytest.importorskip("awkward")
+    dst = str(tmp_path / "w.hipo")
+    w = oxihipo.create(dst, compression="lz4percolumn")
+    w.newtree("NEW::bank", {"px": "F", "pid": "I"})
+    px = ak.Array([[1.0, 2.0], [], [3.0, 4.0, 5.0]])
+    pid = ak.Array([[11, 22], [], [11, -11, 211]])
+    w.extend({"NEW::bank": {"px": px, "pid": pid}})
+    summary = w.close()
+    assert summary.events == 3
+
+    f = oxihipo.open(dst)
+    assert f.num_entries == 3
+    assert ak.to_list(f.array("NEW::bank", "px")) == [[1.0, 2.0], [], [3.0, 4.0, 5.0]]
+    assert ak.to_list(f.array("NEW::bank", "pid")) == [[11, 22], [], [11, -11, 211]]
+
+
+def test_writer_scalar_bank_and_context(tmp_path):
+    # A scalar-per-event bank (1-D NumPy columns), via the context manager.
+    ak = pytest.importorskip("awkward")
+    dst = str(tmp_path / "w2.hipo")
+    with oxihipo.create(dst) as w:
+        w.newtree("RUN::config", {"run": "I", "energy": "F"})
+        w.extend({
+            "RUN::config": {
+                "run": np.array([5, 5, 6], dtype=np.int32),
+                "energy": np.array([10.6, 10.6, 10.2], dtype=np.float32),
+            }
+        })
+    f = oxihipo.open(dst)
+    assert f.num_entries == 3
+    assert ak.to_list(f.array("RUN::config", "run")) == [[5], [5], [6]]  # one row/event
+
+
+def test_writer_rejects_array_columns(tmp_path):
+    w = oxihipo.create(str(tmp_path / "x.hipo"))
+    with pytest.raises(ValueError):
+        w.newtree("BAD::bank", {"cov": "F#3"})  # array columns unsupported (v1)
+
+
+def test_decorate_adds_bank(tmp_path):
+    # Copy a fixture, decorate it with a per-event ML-score bank, read back.
+    ak = pytest.importorskip("awkward")
+    src = str(tmp_path / "src.hipo")
+    shutil.copy(os.path.join(DATA, "sample.hipo"), src)  # Lz4PerColumn, 8 events
+    dst = str(tmp_path / "dec.hipo")
+    n = oxihipo.open(src).num_entries
+    scores = (np.arange(n, dtype=np.float32) * 0.5)
+
+    w = oxihipo.recreate(src, dst)
+    w.newtree("ML::pred", {"score": "F"})
+    w.extend({"ML::pred": {"score": scores}})
+    assert w.close().events == n
+
+    f = oxihipo.open(dst)
+    assert f.num_entries == n
+    assert "REC::Particle" in f and "ML::pred" in f
+    # existing banks copied verbatim…
+    assert ak.to_list(f.arrays("REC::Event", ["evno"]).evno) == [[1000 + i] for i in range(n)]
+    # …and the new bank is there, one score per event.
+    assert np.allclose(ak.to_numpy(ak.flatten(f.array("ML::pred", "score"))), scores)
+
+
+def test_decorate_requires_all_events(tmp_path):
+    # Providing fewer new-bank events than the source has is an error on close.
+    src = str(tmp_path / "s.hipo")
+    shutil.copy(os.path.join(DATA, "sample.hipo"), src)
+    w = oxihipo.recreate(src, str(tmp_path / "d.hipo"))
+    w.newtree("ML::pred", {"score": "F"})
+    w.extend({"ML::pred": {"score": np.array([1.0, 2.0], dtype=np.float32)}})  # 2 of 8
+    with pytest.raises(ValueError):
+        w.close()
+
+
+def test_show(chain, capsys):
+    chain.show()
+    out = capsys.readouterr().out
+    assert "REC::Particle" in out and "pid" in out
+    chain.show("REC::Event")
+    out2 = capsys.readouterr().out
+    assert "REC::Event" in out2 and "evno" in out2
