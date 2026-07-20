@@ -15,7 +15,9 @@ crate-type = ["cdylib", "rlib"]
 # Pure-Rust core (lz4_flex decode) — the binding only reads, so it needs no
 # C LZ4 / HC compression path.
 oxihipo = { path = "..", default-features = false }
-pyo3 = { version = "0.23", features = ["abi3-py39", "extension-module"] }
+# abi3 floor: `requires-python` gates installs to >=3.13; the abi3 stable-ABI
+# floor is the highest pyo3 0.23 offers (py312), which a 3.13+ interpreter runs.
+pyo3 = { version = "0.23", features = ["abi3-py312", "extension-module"] }
 # rust-numpy tracks pyo3; 0.23 pairs with pyo3 0.23 and exposes the stable
 # `Vec::into_pyarray(py) -> Bound<PyArray>` zero-copy move.
 numpy = "0.23"

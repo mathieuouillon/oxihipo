@@ -106,7 +106,7 @@ for chunk in ox.iterate("/volatile/run5042/*.hipo", "REC::Particle", step_size="
 ```python
 g = f.filtered(require=["REC::Particle"])           # events carrying a bank
 g = f.filtered(record_tag=[0x42])                   # by record tag
-summary = g.skim("electrons.hipo", compression="lz4percolumn")   # {events, records, bytes}
+summary = g.skim("electrons.hipo", compression="lz4percolumn")   # SkimSummary(events, records, bytes)
 ```
 
 `filtered()` returns a new chain; the filter reduces what `arrays()` / `skim()`
@@ -154,7 +154,7 @@ maturin develop --release        # build + install into the active venv
 # or: maturin build --release     # produce an abi3 wheel under target/wheels
 ```
 
-The extension is `abi3` (one wheel per OS/arch works across CPython ≥ 3.9). If
+The extension is `abi3` (one wheel per OS/arch works across CPython ≥ 3.13). If
 your interpreter is newer than the pinned pyo3 knows about, build with
 `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
 

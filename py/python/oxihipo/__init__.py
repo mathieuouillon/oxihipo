@@ -13,9 +13,9 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, overload
 
 from ._oxihipo import Chain as _RustChain, CorruptFileError, OxihipoError, __version__
 
@@ -25,6 +25,13 @@ if TYPE_CHECKING:  # optional/lazy deps — imported only for annotations, never
     import pandas as pd
     import pyarrow as pa
 
+# Path-like inputs. Python 3.13 (the minimum we support) evaluates these `|`
+# unions and the `os.PathLike[str]` subscription at runtime, so they can be
+# plain module-level aliases — usable by `typing.get_type_hints`, not just
+# checkers.
+StrPath = str | os.PathLike[str]
+Source = StrPath | Sequence[StrPath]
+
 __all__ = [
     "Chain",
     "open",
@@ -32,6 +39,7 @@ __all__ = [
     "arrays",
     "Report",
     "NumpyColumn",
+    "SkimSummary",
     "CorruptFileError",
     "OxihipoError",
     "__version__",
@@ -50,6 +58,17 @@ class NumpyColumn(NamedTuple):
     values: "np.ndarray"
     offsets: "np.ndarray"  # int64, length = n_events + 1
     inner_len: int  # > 1 for fixed-size ``T#N`` array columns
+
+
+class SkimSummary(NamedTuple):
+    """Return of :meth:`Chain.skim` — what was written to the new file.
+
+    Attribute access (``s.events``) or positional unpacking
+    (``events, records, nbytes = s``); ``bytes`` is the total on-disk size."""
+
+    events: int
+    records: int
+    bytes: int
 
 
 @dataclass(frozen=True)
@@ -311,7 +330,13 @@ class Chain:
 
     # --- the raw NumPy path (no Awkward needed) ----------------------------
     def numpy(
-        self, bank: str, column: str, *, entry_start=None, entry_stop=None, threads=0
+        self,
+        bank: str,
+        column: str,
+        *,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 0,
     ) -> NumpyColumn:
         """``(values, offsets, inner_len)`` for one column — plain NumPy.
 
@@ -324,7 +349,13 @@ class Chain:
 
     # --- the Awkward path --------------------------------------------------
     def array(
-        self, bank: str, column: str, *, entry_start=None, entry_stop=None, threads=0
+        self,
+        bank: str,
+        column: str,
+        *,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 0,
     ) -> "ak.Array":
         """One jagged column as an ``ak.Array`` (type ``N * var * T``)."""
         import awkward as ak
@@ -335,17 +366,47 @@ class Chain:
         _, values, inner_len = cols[0]
         return ak.Array(_wrap_column(ak, offsets, values, inner_len))
 
+    # Overloads give the exact return type per `library` (ak.Array / np dict /
+    # pandas / pyarrow) so checkers and IDEs don't collapse it to a union.
+    @overload
+    def arrays(
+        self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+        *, filter_name: str | None = ..., library: Literal["ak"] = ...,
+        entry_start: int | None = ..., entry_stop: int | None = ...,
+        threads: int = ..., workers: int = ...,
+    ) -> "ak.Array": ...
+    @overload
+    def arrays(
+        self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+        *, filter_name: str | None = ..., library: Literal["np"],
+        entry_start: int | None = ..., entry_stop: int | None = ...,
+        threads: int = ..., workers: int = ...,
+    ) -> "dict[str, np.ndarray]": ...
+    @overload
+    def arrays(
+        self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+        *, filter_name: str | None = ..., library: Literal["pd"],
+        entry_start: int | None = ..., entry_stop: int | None = ...,
+        threads: int = ..., workers: int = ...,
+    ) -> "pd.DataFrame | dict[str, pd.DataFrame]": ...
+    @overload
+    def arrays(
+        self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+        *, filter_name: str | None = ..., library: Literal["arrow"],
+        entry_start: int | None = ..., entry_stop: int | None = ...,
+        threads: int = ..., workers: int = ...,
+    ) -> "pa.Table": ...
     def arrays(
         self,
-        banks=None,
+        banks: str | Sequence[str] | None = None,
         columns: Sequence[str] | None = None,
         *,
         filter_name: str | None = None,
         library: _Library = "ak",
-        entry_start=None,
-        entry_stop=None,
-        threads=0,
-        workers=1,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 0,
+        workers: int = 1,
     ):
         """Bank(s) → an array in the requested ``library``.
 
@@ -462,19 +523,37 @@ class Chain:
         return next(iter(frames.values())) if len(frames) == 1 else frames
 
     # --- bounded-memory streaming -----------------------------------------
+    # Overloads capture the useful distinction: ``report=True`` yields
+    # ``(chunk, Report)`` pairs, otherwise bare chunks. The chunk itself is
+    # ``Any`` because its type depends on ``library=`` (see ``arrays`` for the
+    # per-library types).
+    @overload
+    def iterate(
+        self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+        *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
+        report: Literal[False] = ..., entry_start: int | None = ..., entry_stop: int | None = ...,
+        threads: int = ..., workers: int = ...,
+    ) -> "Iterator[Any]": ...
+    @overload
+    def iterate(
+        self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+        *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
+        report: Literal[True], entry_start: int | None = ..., entry_stop: int | None = ...,
+        threads: int = ..., workers: int = ...,
+    ) -> "Iterator[tuple[Any, Report]]": ...
     def iterate(
         self,
-        banks=None,
+        banks: str | Sequence[str] | None = None,
         columns: Sequence[str] | None = None,
         *,
-        step_size=100_000,
+        step_size: int | str = 100_000,
         filter_name: str | None = None,
         library: _Library = "ak",
         report: bool = False,
-        entry_start=None,
-        entry_stop=None,
-        threads=0,
-        workers=1,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 0,
+        workers: int = 1,
     ):
         """Stream the chain in bounded-memory chunks.
 
@@ -544,7 +623,11 @@ class Chain:
             yield max(start, lo), min(stop, hi), cur_file
 
     # --- selection / write knobs ------------------------------------------
-    def filtered(self, require=None, record_tag=None) -> "Chain":
+    def filtered(
+        self,
+        require: Sequence[str] | None = None,
+        record_tag: Sequence[int] | None = None,
+    ) -> "Chain":
         """A new chain restricted to events carrying every bank in ``require``
         (and, if given, whose record tag is in ``record_tag``)."""
         new = Chain(self._reader().filtered(require, record_tag))
@@ -552,14 +635,26 @@ class Chain:
         new._record_tag = record_tag
         return new
 
-    def skim(self, dst, compression: str = "lz4percolumn") -> dict:
-        """Copy the (filtered) chain to ``dst``, re-compressing. Returns
-        ``{"events", "records", "bytes"}``."""
-        return self._reader().skim(str(dst), compression)
+    def skim(self, dst: StrPath, compression: str = "lz4percolumn") -> SkimSummary:
+        """Copy the (filtered) chain to ``dst``, re-compressing. Returns a
+        :class:`SkimSummary` (``events`` / ``records`` / ``bytes``)."""
+        d = self._reader().skim(str(dst), compression)
+        return SkimSummary(d["events"], d["records"], d["bytes"])
 
-    def __getitem__(self, key: str):
-        """``chain["REC::Particle/px"]`` → column; ``chain["REC::Particle"]`` →
-        a bank proxy."""
+    def __getitem__(self, key: str | tuple[str, str | Sequence[str]]):
+        """Index into the chain:
+
+        - ``chain["REC::Particle"]`` → a bank proxy;
+        - ``chain["REC::Particle/px"]`` or ``chain["REC::Particle", "px"]`` → one column;
+        - ``chain["REC::Particle", ["px", "py"]]`` → a record of those columns.
+        """
+        if isinstance(key, tuple):
+            if len(key) != 2:
+                raise KeyError(key)
+            bank, cols = key
+            if isinstance(cols, str):
+                return self.array(bank, cols)
+            return self.arrays(bank, list(cols))
         if "/" in key:
             bank, column = key.rsplit("/", 1)
             return self.array(bank, column)
@@ -568,24 +663,38 @@ class Chain:
         raise KeyError(key)
 
 
-def open(source) -> Chain:  # noqa: A001  (uproot-style: oxihipo.open(...))
+def open(source: Source) -> Chain:  # noqa: A001  (uproot-style: oxihipo.open(...))
     """Open a HIPO file, directory, glob, or list of paths → :class:`Chain`."""
     return Chain(source)
 
 
+@overload
 def iterate(
-    source,
-    banks=None,
+    source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+    *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
+    report: Literal[False] = ..., entry_start: int | None = ..., entry_stop: int | None = ...,
+    threads: int = ..., workers: int = ...,
+) -> "Iterator[Any]": ...
+@overload
+def iterate(
+    source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+    *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
+    report: Literal[True], entry_start: int | None = ..., entry_stop: int | None = ...,
+    threads: int = ..., workers: int = ...,
+) -> "Iterator[tuple[Any, Report]]": ...
+def iterate(
+    source: Source,
+    banks: str | Sequence[str] | None = None,
     columns: Sequence[str] | None = None,
     *,
-    step_size=100_000,
+    step_size: int | str = 100_000,
     filter_name: str | None = None,
     library: _Library = "ak",
     report: bool = False,
-    entry_start=None,
-    entry_stop=None,
-    threads=0,
-    workers=1,
+    entry_start: int | None = None,
+    entry_stop: int | None = None,
+    threads: int = 0,
+    workers: int = 1,
 ):
     """Stream chunks from a file/dir/glob/list without materializing it whole.
 
@@ -594,24 +703,56 @@ def iterate(
     the batches across ``N`` processes. (The keyword surface is spelled out here
     — not hidden behind ``**kwargs`` — so ``help()`` and IDEs see it.)
     """
-    return open(source).iterate(
+    # Widen to Any so forwarding the union `library` / plain-`bool` `report`
+    # doesn't re-run overload resolution on Chain.iterate — the module-level
+    # overloads above already give callers the precise return type.
+    chain: Any = open(source)
+    return chain.iterate(
         banks, columns, step_size=step_size, filter_name=filter_name,
         library=library, report=report, entry_start=entry_start,
         entry_stop=entry_stop, threads=threads, workers=workers,
     )
 
 
+@overload
 def arrays(
-    source,
-    banks=None,
+    source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+    *, filter_name: str | None = ..., library: Literal["ak"] = ...,
+    entry_start: int | None = ..., entry_stop: int | None = ...,
+    threads: int = ..., workers: int = ...,
+) -> "ak.Array": ...
+@overload
+def arrays(
+    source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+    *, filter_name: str | None = ..., library: Literal["np"],
+    entry_start: int | None = ..., entry_stop: int | None = ...,
+    threads: int = ..., workers: int = ...,
+) -> "dict[str, np.ndarray]": ...
+@overload
+def arrays(
+    source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+    *, filter_name: str | None = ..., library: Literal["pd"],
+    entry_start: int | None = ..., entry_stop: int | None = ...,
+    threads: int = ..., workers: int = ...,
+) -> "pd.DataFrame | dict[str, pd.DataFrame]": ...
+@overload
+def arrays(
+    source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
+    *, filter_name: str | None = ..., library: Literal["arrow"],
+    entry_start: int | None = ..., entry_stop: int | None = ...,
+    threads: int = ..., workers: int = ...,
+) -> "pa.Table": ...
+def arrays(
+    source: Source,
+    banks: str | Sequence[str] | None = None,
     columns: Sequence[str] | None = None,
     *,
     filter_name: str | None = None,
     library: _Library = "ak",
-    entry_start=None,
-    entry_stop=None,
-    threads=0,
-    workers=1,
+    entry_start: int | None = None,
+    entry_stop: int | None = None,
+    threads: int = 0,
+    workers: int = 1,
 ):
     """Read banks/columns from a file/dir/glob/list into one array.
 
@@ -619,7 +760,8 @@ def arrays(
     ``N`` processes (disjoint record ranges, stitched into one result) — the
     fast path on a parallel filesystem.
     """
-    return open(source).arrays(
+    chain: Any = open(source)  # widen: see the note in `iterate` above
+    return chain.arrays(
         banks, columns, filter_name=filter_name, library=library,
         entry_start=entry_start, entry_stop=entry_stop, threads=threads,
         workers=workers,

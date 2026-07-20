@@ -1,7 +1,7 @@
 name: wheels
 
 # Build (and, on a tag, publish) the `oxihipo` Python wheels. The extension is
-# abi3 (one wheel per OS/arch works on CPython >= 3.9) and pure-Rust
+# abi3 (one wheel per OS/arch works on CPython >= 3.13) and pure-Rust
 # (default-features = false), so the aarch64 / cross builds need no C toolchain.
 on:
   push:
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

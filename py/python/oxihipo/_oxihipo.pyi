@@ -4,7 +4,8 @@ The user-facing, fully-typed API is the pure-Python :class:`oxihipo.Chain`
 wrapper; this stub types the low-level compiled reader it delegates to.
 """
 
-from typing import Any, Optional, Sequence, final
+from collections.abc import Sequence
+from typing import Any, final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -40,14 +41,14 @@ class Chain:
     def read_columns(
         self,
         selection: _Selection,
-        entry_start: Optional[int] = ...,
-        entry_stop: Optional[int] = ...,
+        entry_start: int | None = ...,
+        entry_stop: int | None = ...,
         threads: int = ...,
     ) -> list[_BankColumns]: ...
     def filtered(
         self,
-        require: Optional[Sequence[str]] = ...,
-        record_tag: Optional[Sequence[int]] = ...,
+        require: Sequence[str] | None = ...,
+        record_tag: Sequence[int] | None = ...,
     ) -> "Chain": ...
     def skim(self, dst: str, compression: str = ...) -> dict[str, int]: ...
     def record_spans(self) -> list[tuple[int, int, int, int]]: ...

@@ -74,7 +74,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 oxihipo = { path = "..", features = ["lz4-c"] }
-pyo3  = { version = "0.29", features = ["abi3-py39", "extension-module"] }
+pyo3  = { version = "0.23", features = ["abi3-py312", "extension-module"] }
 numpy = "0.29"          # rust-numpy, tracks pyo3; see §10 on the into_pyarray name
 
 [profile.release]
@@ -137,7 +137,7 @@ for chunk in ox.iterate("/data/run5042/*.hipo", "REC::Particle", step_size="1 GB
 
 # ---- filter pushdown (BRANCH-SELECTION / presence, NOT a value-level cut) ---
 g = f.filtered(require=["REC::Particle"], record_tag=[0x42])   # -> new Chain
-g.skim("electrons.hipo", compression="lz4bybank")             # -> WriteSummary dict
+g.skim("electrons.hipo", compression="lz4percolumn")         # -> SkimSummary(events, records, bytes)
 
 # ---- single-event inspection (debugging only, explicitly NOT the hot path) --
 ev = f.event(42)                        # -> Event | None
@@ -442,7 +442,7 @@ Distilled from the critic's risk register and the verdicts. Each is a design rul
 ## 10. Packaging & distribution
 
 - **Build tool:** maturin; separate `oxihipo-py` cdylib.
-- **pyo3 features:** `["extension-module", "abi3-py39"]`. abi3 → **one wheel per (OS, arch)** across CPython ≥ 3.9; `extension-module` drops the libpython link (manylinux-clean). rust-numpy is orthogonal to the CPython limited API — it resolves NumPy's C-API at import time through a capsule, so abi3 + numpy coexist.
+- **pyo3 features:** `["extension-module", "abi3-py312"]`. abi3 → **one wheel per (OS, arch)** across CPython ≥ 3.13 (the abi3 floor is py312, the highest pyo3 0.23 offers; `requires-python >= 3.13` gates installs); `extension-module` drops the libpython link (manylinux-clean). rust-numpy is orthogonal to the CPython limited API — it resolves NumPy's C-API at import time through a capsule, so abi3 + numpy coexist.
 - **rust-numpy / `into_pyarray` name (verdict 1):** target a release where `into_pyarray(self, py) -> Bound<'py, PyArray>` is the stable name (rust-numpy **≥ 0.23**; the current paired `0.29` retains this signature). Do **not** straddle the old `0.22` API, where the Bound-returning entry point was `into_pyarray_bound` and plain `into_pyarray` was the deprecated GIL-ref path. Require `T: Element` (all six scalars qualify, incl. the `Sync` bound).
 - **NumPy 2.x ABI (R17):** pin a numpy-2-aware rust-numpy; CI-matrix numpy 1.26 **and** ≥2.0. abi3 covers CPython, not numpy — that compatibility is separate and explicit.
 - **Runtime deps:** `numpy>=1.24` hard; `awkward>=2.6` imported **lazily** (only in `array`/`arrays`/`iterate`) so `numpy(...)` works without it; `pandas>=2`, `pyarrow` as extras (`oxihipo[pandas,arrow]`). `.array*()` raises a clear `ImportError` if awkward is missing.

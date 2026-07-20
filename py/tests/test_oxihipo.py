@@ -95,6 +95,11 @@ def test_arrays_multi_bank_record(chain):
 def test_getitem_and_bank_proxy(chain):
     ak = pytest.importorskip("awkward")
     assert chain["REC::Particle/pid"][3].tolist() == [300, 301, 302]
+    # tuple indexing: (bank, col) → one column; (bank, [cols]) → a record
+    assert chain["REC::Particle", "pid"][3].tolist() == [300, 301, 302]
+    assert set(chain["REC::Particle", ["pid", "px"]].fields) == {"pid", "px"}
+    with pytest.raises(KeyError):
+        chain["REC::Particle", "pid", "px"]  # wrong-arity tuple
     part = chain["REC::Particle"]
     assert part.keys() == ["pid", "px", "cov"]
     assert part.typenames()["cov"] == "float32[3]"
@@ -157,7 +162,9 @@ def test_skim(chain, tmp_path):
     ak = pytest.importorskip("awkward")
     out = str(tmp_path / "skim.hipo")
     summary = chain.filtered(require=["REC::Particle"]).skim(out, compression="lz4percolumn")
-    assert summary["events"] == len(SURV)
+    assert isinstance(summary, oxihipo.SkimSummary)
+    assert summary.events == len(SURV)  # attribute access…
+    assert tuple(summary) == (summary.events, summary.records, summary.bytes)  # …and positional
     reopened = oxihipo.open(out)
     assert reopened.num_entries == len(SURV)
     assert ak.to_list(reopened.array("REC::Event", "evno")) == [[1000 + i] for i in SURV]
