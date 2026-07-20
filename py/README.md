@@ -154,9 +154,10 @@ maturin develop --release        # build + install into the active venv
 # or: maturin build --release     # produce an abi3 wheel under target/wheels
 ```
 
-The extension is `abi3` (one wheel per OS/arch works across CPython ≥ 3.13). If
-your interpreter is newer than the pinned pyo3 knows about, build with
-`PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
+The extension is built with **pyo3 0.29** and **rust-numpy 0.29**, with an
+`abi3-py313` floor — so one `abi3` wheel per OS/arch works across CPython ≥ 3.13.
+pyo3 0.29 supports current CPython natively; only for an interpreter *newer* than
+it knows do you need `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
 
 ## Dependencies
 

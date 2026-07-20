@@ -50,6 +50,11 @@ Not yet published to crates.io — depend on it via git:
 oxihipo = { git = "https://github.com/mathieuouillon/oxihipo" }
 ```
 
+Built on a lean, pure-Rust dependency set — `lz4_flex` 0.14 and `flate2` 1
+(`zlib-rs` backend) for de/compression, `rayon` 1 for parallel reads, plus
+`bytemuck` 1, `serde` 1, and `thiserror` 2. The optional `lz4-c` feature pulls
+`lz4-sys` (C LZ4) for `Lz4Best` HC and faster decode.
+
 ## Quick start
 
 ```rust
