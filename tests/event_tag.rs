@@ -8,7 +8,9 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oxihipo::{Chain, Compression, DataType, Dict, Filter, Result, Schema, TagSet, Writer};
+use oxihipo::{
+    Chain, Compression, DataType, Dict, Filter, Result, Schema, TagRegistry, TagSet, Writer,
+};
 
 // Named flags via the `tag_flags!` macro — the Phase 2 ergonomics.
 oxihipo::tag_flags! {
@@ -286,4 +288,72 @@ fn named_tags_via_macro_round_trip() {
         elastic.event_tags(None, 1).unwrap().len(),
         (0..30).filter(|i| i % 3 != 0).count(),
     );
+}
+
+/// Phase 2b: `tag_names` writes the name↔bit registry into the file, so a
+/// reader resolves names *without* the `tag_flags!` decl; `skim` carries it
+/// through; a file written without it exposes an empty registry.
+#[test]
+fn tag_registry_persists_and_survives_skim() {
+    let dir = tempfile::tempdir().unwrap();
+    let want = TagRegistry::from_names(Cat::NAMES.iter().copied());
+
+    for (name, comp) in FORMATS {
+        let path = dir.path().join(format!("reg_{name}.hipo"));
+        let mut w = Writer::create(&path)
+            .schemas(&dict())
+            .tag_names(Cat::NAMES) // record the registry
+            .compression(*comp)
+            .build()
+            .unwrap();
+        for evno in 0..N {
+            w.event(|ev| {
+                ev.with_tag(tag_of(evno));
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| {
+                        r.set("evno", evno)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+
+        // The reader recovers the full registry from the file.
+        let chain = Chain::open(&path).unwrap();
+        assert_eq!(chain.tag_registry(), &want, "{name}: registry round-trip");
+        assert_eq!(chain.tag_registry().name(0), Some("Dvcs"));
+        assert_eq!(chain.tag_registry().mask("Elastic"), Some(0b100));
+
+        // A name resolved through the persisted registry filters correctly —
+        // `tag_of(evno) == 1` (bit 0 = Dvcs) ⇔ evno % 3 == 0.
+        let mask = chain.tag_registry().mask("Dvcs").unwrap();
+        let dvcs = chain
+            .clone()
+            .with_filter(Filter::new().event_tag_any(mask))
+            .unwrap();
+        assert_eq!(
+            surviving_evnos(&dvcs),
+            (0..N).filter(|e| e % 3 == 0).collect::<Vec<_>>(),
+            "{name}: filter by name-resolved mask"
+        );
+
+        // skim copies the registry into the output file.
+        let skimmed = dir.path().join(format!("skim_{name}.hipo"));
+        chain.skim(&skimmed, Compression::Lz4PerColumn).unwrap();
+        assert_eq!(
+            Chain::open(&skimmed).unwrap().tag_registry(),
+            &want,
+            "{name}: registry survives skim"
+        );
+    }
+
+    // A file written *without* `tag_names` has an empty registry (and reading
+    // the extra bank never breaks the untagged path).
+    let plain = dir.path().join("plain.hipo");
+    write_tagged(&plain, Compression::Lz4PerColumn).unwrap();
+    assert!(Chain::open(&plain).unwrap().tag_registry().is_empty());
 }

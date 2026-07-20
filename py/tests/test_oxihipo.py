@@ -5,7 +5,8 @@ Runs against small committed fixtures (``tests/data/*.hipo``, written by
 model: 8 events; event ``i`` has ``i % 4`` particles (so 0, 4 are empty) with
 ``pid = i*100 + r``, an array column ``cov`` (``float32[3]``), one
 ``REC::Event`` row per event with ``evno = 1000 + i``, and a per-event tag
-``1 << (i % 3)`` (so tags cycle 1, 2, 4).
+``1 << (i % 3)`` (so tags cycle 1, 2, 4). The file also carries a tag-name
+registry ``{dvcs: 0, sidis: 1, elastic: 2}``.
 """
 
 import os
@@ -486,3 +487,40 @@ def test_event_tags_column(chain):
     # tracks the chain filter, and honors entry_start/entry_stop.
     assert chain.filtered(event_tag=[4]).event_tags().tolist() == [4, 4]
     assert chain.event_tags(entry_start=2, entry_stop=5).tolist() == [4, 1, 2]
+
+
+def test_tag_names(chain):
+    # The persisted name↔bit registry rides in the file (gen_sample records it).
+    assert chain.tag_names == {"dvcs": 0, "sidis": 1, "elastic": 2}
+
+
+def test_event_tag_filter_by_name(chain):
+    ak = pytest.importorskip("awkward")
+    # A name resolves to its bit (any-mask): "dvcs" = bit 0 → tag 1 → i in {0,3,6}.
+    got = ak.to_list(chain.filtered(event_tag="dvcs").array("REC::Event", "evno"))
+    assert got == [[1000], [1003], [1006]]
+
+    # Multiple names OR their bits: dvcs|elastic = bits {0,2} → tags {1,4} → 5 events,
+    # exactly the raw-bitmask spelling.
+    by_name = chain.filtered(event_tag=["dvcs", "elastic"]).array("REC::Event", "evno")
+    by_mask = chain.filtered(event_tag_any=0b101).array("REC::Event", "evno")
+    assert ak.to_list(by_name) == ak.to_list(by_mask)
+    assert len(ak.to_list(by_name)) == 5
+
+    # event_tag_any accepts names too: "sidis" = bit 1 → tag 2 → i in {1,4,7}.
+    sidis = ak.to_list(chain.filtered(event_tag_any="sidis").array("REC::Event", "evno"))
+    assert sidis == [[1001], [1004], [1007]]
+
+    # An unknown name fails loudly rather than silently matching nothing.
+    with pytest.raises(KeyError):
+        chain.filtered(event_tag="nope")
+
+
+def test_event_tag_filter_by_name_survives_workers(chain):
+    # Names resolve in the parent to numeric masks, so worker processes (which
+    # re-open the chain) need no registry of their own.
+    ak = pytest.importorskip("awkward")
+    g = chain.filtered(event_tag="dvcs")
+    single = ak.to_list(g.arrays("REC::Event", ["evno"]).evno)
+    par = ak.to_list(g.arrays("REC::Event", ["evno"], workers=2).evno)
+    assert par == single == [[1000], [1003], [1006]]

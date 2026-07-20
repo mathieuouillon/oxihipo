@@ -48,7 +48,7 @@ pub use crate::read::{
     Filter, IntoSources, MaterializedColumn,
 };
 pub use crate::schema::{ColumnHandle, DataType, Dict, Schema, SchemaEntry};
-pub use crate::tag::TagSet;
+pub use crate::tag::{TagRegistry, TagSet};
 pub use crate::write::{BankWriter, Compression, RowWriter, WriteSummary, Writer};
 
 /// Unwrap an `Option<T>`; on `None`, `continue` the enclosing loop.

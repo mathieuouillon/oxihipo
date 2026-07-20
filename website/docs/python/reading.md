@@ -25,6 +25,7 @@ verbatim, so don't wrap a single path in one.
 | `f.array(bank, col)` | one column, `N * var * T` |
 | `f.numpy(bank, col)` | `NumpyColumn(values, offsets, inner_len)` — plain NumPy, no Awkward import |
 | `f.event_tags()` | per-event tag (`EH_TAG`) as `uint32[n_events]`, aligned 1:1 with `arrays()` |
+| `f.tag_names` | persisted tag registry as `{name: bit}` (empty if none) — see [Filtering by tag name](#filtering-by-tag-name) |
 | `f["REC::Particle"]` | a **bank proxy**: `.keys()`, `.typenames()`, `.array(col)`, `["col"]` |
 | `f["REC::Particle/px"]` | the `px` column |
 
@@ -114,13 +115,32 @@ differ.
 ```python
 g = f.filtered(require=["REC::Particle"])       # events carrying a bank
 g = f.filtered(record_tag=[0x42])               # by record tag
-g = f.filtered(event_tag=[1, 4])                # by per-event tag (EH_TAG)
+g = f.filtered(event_tag=[1, 4])                # by per-event tag (EH_TAG), exact set
 g = f.filtered(event_tag_any=0b101)             # tag bitmask: any of these bits set
 summary = g.skim("electrons.hipo", compression="lz4percolumn")   # SkimSummary(events, records, bytes)
 ```
 
 `filtered()` returns a new chain; the filter reduces what `arrays()` / `skim()`
 yield. Its `num_entries` stays the **pre-filter** total, as in uproot.
+
+### Filtering by tag name
+
+If the file carries a **tag registry** (written by the producer — see the Rust
+[`tag_flags!`](../rust/reading.md) / `Writer::tag_names` docs), you can filter by
+name instead of remembering bit positions. `f.tag_names` is the persisted
+`{name: bit}` map, and a name (or list of names) passed to `filtered` keeps
+events with *any* of those bits set:
+
+```python
+f.tag_names                              # {'dvcs': 0, 'sidis': 1, 'elastic': 2}
+g = f.filtered(event_tag="dvcs")         # events with the dvcs bit
+g = f.filtered(event_tag=["dvcs", "sidis"])   # dvcs OR sidis
+g = f.filtered(event_tag_any="elastic")  # same, spelled as a mask
+```
+
+Names resolve in the parent process, so `workers=` reads inherit the filter for
+free. An unknown name raises `KeyError`. A file written without a registry has
+an empty `f.tag_names`, and the numeric forms above still work.
 
 ## Resource management
 

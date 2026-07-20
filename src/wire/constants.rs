@@ -58,6 +58,11 @@ pub const EH_RESERVED: usize = 12;
 pub const DICT_GROUP: u16 = 120;
 pub const DICT_ITEM: u8 = 2;
 pub const DICT_JSON_ITEM: u8 = 1;
+/// Event-tag name↔bit registry, stored as an extra text bank in the
+/// dictionary record (an oxihipo extension — see [`crate::TagRegistry`]).
+/// Additive: readers that don't know this item skip it, so a file carrying
+/// it stays readable by the stock and C++ `hipo4` readers.
+pub const TAG_REGISTRY_ITEM: u8 = 3;
 pub const CONFIG_GROUP: u16 = 32555;
 pub const CONFIG_KEY_ITEM: u8 = 1;
 pub const CONFIG_STRING_ITEM: u8 = 2;

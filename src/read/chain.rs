@@ -27,6 +27,7 @@ use crate::read::inner::FileInner;
 use crate::read::iter::EventIter;
 use crate::read::source::IntoSources;
 use crate::schema::Dict;
+use crate::tag::TagRegistry;
 use crate::wire::by_bank::ByBankRecord;
 use crate::wire::per_column::PerColumnRecord;
 use crate::wire::record::{Record, decode_record_into};
@@ -45,6 +46,9 @@ pub struct Chain {
     /// in files `0..i`; `file_event_offsets[files.len()]` = total.
     file_event_offsets: Vec<u64>,
     dict: Arc<Dict>,
+    /// Name↔bit tag registry (first non-empty across the chain's files);
+    /// empty if none of them carry one.
+    tag_registry: Arc<TagRegistry>,
     filter: Option<Filter>,
     record_tags: Option<Vec<u64>>,
 }
@@ -67,6 +71,7 @@ impl Default for Chain {
             files: Vec::new(),
             file_event_offsets: vec![0],
             dict: Arc::new(Dict::new()),
+            tag_registry: Arc::new(TagRegistry::new()),
             filter: None,
             record_tags: None,
         }
@@ -138,6 +143,15 @@ impl Chain {
             }
         }
         let dict = Arc::clone(&files[0].dict);
+        // The tag registry travels with the dict. Prefer the first non-empty
+        // one so chaining an untagged file alongside a tagged one (same dict)
+        // still exposes the names, rather than letting file 0 blank them.
+        let tag_registry = files
+            .iter()
+            .map(|f| &f.tag_registry)
+            .find(|r| !r.is_empty())
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&files[0].tag_registry));
         let mut file_event_offsets = Vec::with_capacity(files.len() + 1);
         file_event_offsets.push(0_u64);
         let mut acc = 0_u64;
@@ -149,6 +163,7 @@ impl Chain {
             files,
             file_event_offsets,
             dict,
+            tag_registry,
             filter: None,
             record_tags: None,
         })
@@ -171,6 +186,25 @@ impl Chain {
 
     pub fn schemas(&self) -> &Dict {
         &self.dict
+    }
+
+    /// The file's persisted tag registry — the name↔bit table written by
+    /// [`WriterBuilder::tag_names`](crate::write::WriterBuilder::tag_names).
+    /// Empty if the file carries none. Lets a reader resolve tag names without
+    /// the original `tag_flags!` declaration:
+    ///
+    /// ```no_run
+    /// # use oxihipo::{Chain, Filter};
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("run.hipo")?;
+    /// if let Some(mask) = chain.tag_registry().mask("dvcs") {
+    ///     let dvcs = chain.with_filter(Filter::new().event_tag_any(mask))?;
+    ///     # let _ = dvcs;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub fn tag_registry(&self) -> &TagRegistry {
+        &self.tag_registry
     }
 
     /// Iterate the paths in input order.
@@ -407,10 +441,10 @@ impl Chain {
     ///
     /// The chain's [`Filter`] (set via [`Self::with_filter`]) and any
     /// record-tag pushdown apply on the read side, so only matching events
-    /// are written. The output carries the same dictionary as the input and
-    /// preserves each event's tag; multiple input files merge into one
-    /// output. Reading stops and the error is returned on the first corrupt
-    /// record (this uses the fallible [`Self::events`] internally).
+    /// are written. The output carries the same dictionary **and tag registry**
+    /// as the input and preserves each event's tag; multiple input files merge
+    /// into one output. Reading stops and the error is returned on the first
+    /// corrupt record (this uses the fallible [`Self::events`] internally).
     ///
     /// ```no_run
     /// use oxihipo::{Chain, Compression, Filter};
@@ -458,6 +492,7 @@ impl Chain {
     ) -> Result<WriteSummary> {
         let mut w = Writer::create(dst)
             .schemas(self.schemas())
+            .tag_registry(self.tag_registry())
             .compression(compression)
             .build()?;
         let mut written = 0u64;

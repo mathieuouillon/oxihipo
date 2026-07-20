@@ -65,6 +65,13 @@ the physics it encodes:
 oxihipo::tag_flags! { pub EventTag { Dvcs = 0, Sidis = 1 } }
 let g = chain.with_filter(Filter::new().event_tag_any(EventTag::Dvcs | EventTag::Sidis))?;
 ```
+
+Record the names in the file with [`Writer::tag_names`](./writing.md#tagging-events)
+(`.tag_names(EventTag::NAMES)`) and a reader recovers them without the
+`tag_flags!` declaration — `chain.tag_registry()` returns a `TagRegistry` whose
+`.mask("dvcs")` feeds straight back into `event_tag_any`. This is what powers
+`filtered(event_tag="dvcs")` in the Python binding, and `skim` copies the
+registry into the output.
 :::
 
 ## Parallel scans

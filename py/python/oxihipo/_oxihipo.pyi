@@ -51,6 +51,7 @@ class Chain:
         entry_stop: int | None = ...,
         threads: int = ...,
     ) -> NDArray[np.uint32]: ...
+    def tag_names(self) -> list[tuple[str, int]]: ...
     def filtered(
         self,
         require: Sequence[str] | None = ...,

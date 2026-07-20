@@ -36,6 +36,10 @@ fn main() {
 
     let mut w = Writer::create(&path)
         .schemas(&d)
+        // Persist the name↔bit registry: tags are `1 << (i % 3)`, so bit 0 =
+        // dvcs, 1 = sidis, 2 = elastic. Lets the Python tests resolve
+        // `filtered(event_tag="dvcs")` from the file itself.
+        .tag_names(&[("dvcs", 0), ("sidis", 1), ("elastic", 2)])
         .compression(compression)
         .max_record_events(3)
         .build()

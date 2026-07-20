@@ -34,7 +34,8 @@ use std::path::{Path, PathBuf};
 
 use crate::compress::ScratchBuf;
 use crate::error::{HipoError, Result};
-use crate::schema::{Dict, Schema};
+use crate::schema::Dict;
+use crate::tag::TagRegistry;
 use crate::wire::bytes::{Endianness, write_u32_le};
 use crate::wire::constants::*;
 use crate::wire::file_header::FileHeader;
@@ -67,6 +68,7 @@ impl Default for WriterOptions {
 pub struct WriterBuilder {
     path: PathBuf,
     dict: Option<Dict>,
+    tag_registry: TagRegistry,
     options: WriterOptions,
     /// Whether the caller set `max_record_bytes` explicitly. When they
     /// didn't, [`Self::build`] picks a per-compression default (larger
@@ -78,6 +80,33 @@ pub struct WriterBuilder {
 impl WriterBuilder {
     pub fn schemas(mut self, dict: &Dict) -> Self {
         self.dict = Some(dict.clone());
+        self
+    }
+
+    /// Record a name↔bit tag registry in the output so a later reader can
+    /// resolve tag names without the original `tag_flags!` declaration. Pass a
+    /// `tag_flags!` type's `NAMES` directly:
+    ///
+    /// ```no_run
+    /// # use oxihipo::{tag_flags, Compression, Writer};
+    /// tag_flags! { pub EventTag { Dvcs = 0, Sidis = 1 } }
+    /// # fn run() -> oxihipo::Result<()> {
+    /// let w = Writer::create("out.hipo").tag_names(EventTag::NAMES).build()?;
+    /// # let _ = w; Ok(()) }
+    /// ```
+    ///
+    /// The names ride in the dictionary record (additive — see
+    /// [`TagRegistry`]); writing none leaves the output byte-for-byte as before.
+    pub fn tag_names(mut self, names: &[(&str, u32)]) -> Self {
+        self.tag_registry = TagRegistry::from_names(names.iter().copied());
+        self
+    }
+
+    /// Record an already-built [`TagRegistry`] (e.g. one read from an input
+    /// file via [`Chain::tag_registry`](crate::read::Chain::tag_registry), to
+    /// carry names through a copy). Replaces any registry set so far.
+    pub fn tag_registry(mut self, registry: &TagRegistry) -> Self {
+        self.tag_registry = registry.clone();
         self
     }
 
@@ -101,6 +130,7 @@ impl WriterBuilder {
         let Self {
             path,
             dict,
+            tag_registry,
             mut options,
             record_bytes_explicit,
         } = self;
@@ -108,7 +138,7 @@ impl WriterBuilder {
             options.max_record_bytes = default_max_record_bytes(options.compression);
         }
         let dict = dict.unwrap_or_default();
-        Writer::create_inner(path, dict, options)
+        Writer::create_inner(path, dict, tag_registry, options)
     }
 }
 
@@ -156,6 +186,7 @@ pub struct Writer {
     path: PathBuf,
     file: BufWriter<File>,
     dict: Dict,
+    tag_registry: TagRegistry,
     opts: WriterOptions,
     /// Current data-record builder.
     builder: RecordBuilder,
@@ -183,17 +214,29 @@ impl Writer {
         WriterBuilder {
             path: path.as_ref().to_path_buf(),
             dict: None,
+            tag_registry: TagRegistry::new(),
             options: WriterOptions::default(),
             record_bytes_explicit: false,
         }
     }
 
-    fn create_inner(path: PathBuf, dict: Dict, opts: WriterOptions) -> Result<Self> {
+    fn create_inner(
+        path: PathBuf,
+        dict: Dict,
+        tag_registry: TagRegistry,
+        opts: WriterOptions,
+    ) -> Result<Self> {
         let path_for_err = path.clone();
-        Self::create_inner_impl(path, dict, opts).map_err(|e| e.with_path(path_for_err))
+        Self::create_inner_impl(path, dict, tag_registry, opts)
+            .map_err(|e| e.with_path(path_for_err))
     }
 
-    fn create_inner_impl(path: PathBuf, dict: Dict, opts: WriterOptions) -> Result<Self> {
+    fn create_inner_impl(
+        path: PathBuf,
+        dict: Dict,
+        tag_registry: TagRegistry,
+        opts: WriterOptions,
+    ) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -204,6 +247,7 @@ impl Writer {
             path,
             file: BufWriter::new(file),
             dict,
+            tag_registry,
             opts,
             builder: RecordBuilder::new(),
             compress_buf: ScratchBuf::new(),
@@ -346,7 +390,7 @@ impl Writer {
     }
 
     fn write_file_header_and_dictionary(&mut self) -> Result<()> {
-        let dict_record = build_dictionary_record(&self.dict)?;
+        let dict_record = build_dictionary_record(&self.dict, &self.tag_registry)?;
         self.user_header_length = dict_record.len() as u32;
 
         let mut bit_info: u32 = HIPO_VERSION;
@@ -434,11 +478,22 @@ impl Drop for Writer {
     }
 }
 
-/// Build the dictionary record (one event per schema, payload = schema text).
-fn build_dictionary_record(dict: &Dict) -> Result<Vec<u8>> {
-    let mut events: Vec<Vec<u8>> = Vec::with_capacity(dict.len());
+/// Build the dictionary record: one event per schema (payload = schema text),
+/// then — when non-empty — one trailing event carrying the tag-name registry
+/// (`(DICT_GROUP, TAG_REGISTRY_ITEM)`). The registry event is additive: readers
+/// that don't recognise the item skip it, so the file stays readable by tools
+/// that predate it.
+fn build_dictionary_record(dict: &Dict, tag_registry: &TagRegistry) -> Result<Vec<u8>> {
+    let mut events: Vec<Vec<u8>> = Vec::with_capacity(dict.len() + 1);
     for schema in dict.iter() {
-        events.push(build_dictionary_event(schema));
+        events.push(build_meta_event(DICT_GROUP, DICT_ITEM, &schema.to_text()));
+    }
+    if !tag_registry.is_empty() {
+        events.push(build_meta_event(
+            DICT_GROUP,
+            TAG_REGISTRY_ITEM,
+            &tag_registry.to_text(),
+        ));
     }
     let event_refs: Vec<&[u8]> = events.iter().map(|e| e.as_slice()).collect();
     let mut payload_buf = Vec::new();
@@ -455,11 +510,12 @@ fn build_dictionary_record(dict: &Dict) -> Result<Vec<u8>> {
     )
 }
 
-fn build_dictionary_event(schema: &Schema) -> Vec<u8> {
-    let text = schema.to_text();
+/// Wrap a UTF-8 `text` payload as a one-bank event under `(group, item)` — the
+/// shared shape of a dictionary-record entry (a schema or the tag registry).
+fn build_meta_event(group: u16, item: u8, text: &str) -> Vec<u8> {
     let mut bank = Vec::with_capacity(BANK_STRUCTURE_SIZE + text.len());
-    bank.extend_from_slice(&DICT_GROUP.to_le_bytes());
-    bank.push(DICT_ITEM);
+    bank.extend_from_slice(&group.to_le_bytes());
+    bank.push(item);
     bank.push(11);
     bank.extend_from_slice(&(text.len() as u32).to_le_bytes());
     bank.extend_from_slice(text.as_bytes());

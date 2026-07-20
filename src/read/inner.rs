@@ -20,6 +20,7 @@ use std::sync::Arc;
 use crate::error::{HipoError, Result};
 use crate::event::Event;
 use crate::schema::Dict;
+use crate::tag::TagRegistry;
 use crate::wire::constants::*;
 use crate::wire::event_index::FileEventIndex;
 use crate::wire::file_header::FileHeader;
@@ -52,6 +53,9 @@ pub(crate) struct FileInner {
     /// without cloning it (which would clone each schema's name →
     /// index `HashMap`).
     pub dict: Arc<Dict>,
+    /// Name↔bit tag registry parsed from the dictionary record — empty if
+    /// the file carries none. Shared by `Arc` like `dict`.
+    pub tag_registry: Arc<TagRegistry>,
     /// Regular records only (no dictionary, no trailer).
     pub index: FileEventIndex,
 }
@@ -83,7 +87,7 @@ impl FileInner {
         let first_data_record_offset =
             dict_record_offset + u64::from(file_header.user_header_length);
 
-        let dict = parse_dictionary(&shared, len, dict_record_offset)?;
+        let (dict, tag_registry) = parse_dictionary(&shared, len, dict_record_offset)?;
 
         // Build the data-record index. The trailer at `trailer_position`
         // (when present) lists every record including the dictionary; we
@@ -104,6 +108,7 @@ impl FileInner {
             len,
             file_header,
             dict: Arc::new(dict),
+            tag_registry: Arc::new(tag_registry),
             index,
         })
     }
@@ -179,33 +184,39 @@ fn read_record_into(
     Ok(header)
 }
 
-/// Read every dictionary event in the file's user-header record and add the
-/// embedded schemas to a fresh `Dict`. Missing or unreadable dictionary
-/// records are treated as "empty dict" — same tolerance as the C++ reader.
-fn parse_dictionary(file: &SharedFile, file_len: u64, offset: u64) -> Result<Dict> {
+/// Read the file's user-header record: add every embedded schema to a fresh
+/// `Dict`, and parse the tag-name registry if one is present (an extra
+/// `(DICT_GROUP, TAG_REGISTRY_ITEM)` text bank). Missing or unreadable
+/// records are treated as "empty" — same tolerance as the C++ reader.
+fn parse_dictionary(file: &SharedFile, file_len: u64, offset: u64) -> Result<(Dict, TagRegistry)> {
     let mut dict = Dict::new();
+    let mut tag_registry = TagRegistry::new();
     let mut buf = Vec::new();
     if read_record_into(file, file_len, offset, &mut buf).is_err() {
-        return Ok(dict);
+        return Ok((dict, tag_registry));
     }
     let mut record = Record::new();
     if record.load(&buf).is_err() {
-        return Ok(dict);
+        return Ok((dict, tag_registry));
     }
     for ev_idx in 0..record.event_count() {
         let Some(ev_buf) = record.event(ev_idx) else {
             continue;
         };
         let ev = Event::new(ev_buf);
-        let Some((_, payload)) = ev.find(DICT_GROUP, DICT_ITEM) else {
-            continue;
-        };
-        let text = parse_evio_string(payload);
-        if let Ok(schema) = crate::schema::Schema::parse_text(text.trim()) {
-            dict.add(schema);
+        if let Some((_, payload)) = ev.find(DICT_GROUP, DICT_ITEM) {
+            let text = parse_evio_string(payload);
+            if let Ok(schema) = crate::schema::Schema::parse_text(text.trim()) {
+                dict.add(schema);
+            }
+        } else if let Some((_, payload)) = ev.find(DICT_GROUP, TAG_REGISTRY_ITEM) {
+            let parsed = TagRegistry::parse_text(parse_evio_string(payload).trim());
+            if !parsed.is_empty() {
+                tag_registry = parsed;
+            }
         }
     }
-    Ok(dict)
+    Ok((dict, tag_registry))
 }
 
 /// Decode the schema text out of a `(120, 2)` dictionary structure payload.

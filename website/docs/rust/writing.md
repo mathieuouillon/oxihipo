@@ -42,6 +42,7 @@ file no reader will accept, so don't skip it.
 |---|---|
 | `.schemas(dict)` | the `Dict` describing every bank you'll write (required) |
 | `.compression(c)` | see below (defaults to `Lz4`) |
+| `.tag_names(names)` | persist a name↔bit tag registry (see [Tagging events](#tagging-events)) |
 | `.max_record_events(n)` | flush a record after `n` events |
 | `.max_record_bytes(n)` | flush a record once it reaches `n` bytes |
 | `.build()` | produce the `Writer` |
@@ -72,6 +73,36 @@ If you're deciding between them, read
 [Compression formats](../performance/compression.md) — the short version is that
 `Lz4PerBank` is usually the one you want, and `Lz4PerColumn` (what `skim`
 defaults to) squeezes the file smaller still.
+
+## Tagging events
+
+Every event carries a 32-bit tag (`EH_TAG`). Set it inside the event closure
+with `ev.with_tag(...)`; a reader then filters on it without inflating any bank
+(see [Reading](./reading.md)). A raw `u32` works, but a `tag_flags!` block turns
+the bits into named physics categories:
+
+```rust
+oxihipo::tag_flags! { pub EventTag { Dvcs = 0, Sidis = 1, Elastic = 2 } }
+
+let mut w = Writer::create("out.hipo")
+    .schemas(dict)
+    .tag_names(EventTag::NAMES)   // persist the name↔bit registry (optional)
+    .build()?;
+
+w.event(|ev| {
+    ev.with_tag(EventTag::Dvcs | EventTag::Sidis);  // a TagSet, or a raw u32
+    // ... banks ...
+    Ok(())
+})?;
+```
+
+`with_tag` accepts a raw `u32` **or** a `TagSet`. `tag_names` is optional: it
+writes the `(name, bit)` table into the file's dictionary record so a consumer
+can resolve names *without* the `tag_flags!` declaration —
+`chain.tag_registry()` in Rust, `f.tag_names` / `filtered(event_tag="dvcs")` in
+Python. The registry is additive (readers that don't know it skip it) and `skim`
+copies it through, so a tagged DST stays self-describing. Writing no registry
+leaves the output byte-for-byte as before.
 
 ## Array columns
 

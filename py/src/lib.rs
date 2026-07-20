@@ -239,6 +239,18 @@ impl PyChain {
         Ok(tags.into_pyarray(py))
     }
 
+    /// The file's persisted tag registry as ordered `(name, bit position)`
+    /// pairs — empty if the file carries none. The Python wrapper surfaces it
+    /// as the `Chain.tag_names` dict and resolves `filtered(event_tag="dvcs")`
+    /// through it.
+    fn tag_names(&self) -> Vec<(String, u32)> {
+        self.inner
+            .tag_registry()
+            .iter()
+            .map(|(name, bit)| (name.to_string(), bit))
+            .collect()
+    }
+
     /// A new `Chain` restricted to events carrying every bank in `require`,
     /// whose record tag is in `record_tag`, and whose per-event tag is in
     /// `event_tag` (or overlaps the `event_tag_any` bitmask). Cheap — clones

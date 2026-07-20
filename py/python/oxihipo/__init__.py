@@ -647,26 +647,82 @@ class Chain:
             yield max(start, lo), min(stop, hi), cur_file
 
     # --- selection / write knobs ------------------------------------------
+    @property
+    def tag_names(self) -> dict[str, int]:
+        """The file's persisted tag registry as ``{name: bit_position}`` (empty
+        if none was written). Lets :meth:`filtered` resolve tag names — e.g.
+        ``filtered(event_tag="dvcs")`` — without the Rust ``tag_flags!`` block
+        that produced them::
+
+            f.tag_names          # {'dvcs': 0, 'sidis': 1, 'elastic': 2}
+            f.filtered(event_tag="dvcs")           # events with the dvcs bit
+            f.filtered(event_tag=["dvcs", "sidis"])  # dvcs OR sidis
+        """
+        return dict(self._reader().tag_names())
+
     def filtered(
         self,
         require: Sequence[str] | None = None,
         record_tag: Sequence[int] | None = None,
-        event_tag: Sequence[int] | None = None,
-        event_tag_any: int | None = None,
+        event_tag: str | int | Sequence[str | int] | None = None,
+        event_tag_any: str | int | Sequence[str | int] | None = None,
     ) -> "Chain":
         """A new chain keeping only events that carry every bank in ``require``,
-        whose record tag is in ``record_tag``, and whose per-event tag is in
-        ``event_tag`` (or overlaps the ``event_tag_any`` bitmask). Every clause
-        is applied with pushdown — non-matching events are dropped before their
-        banks are inflated. ``num_entries`` stays the pre-filter total."""
-        new = Chain(
-            self._reader().filtered(require, record_tag, event_tag, event_tag_any)
-        )
+        whose record tag is in ``record_tag``, and whose per-event tag matches
+        ``event_tag`` / ``event_tag_any``. Every clause is applied with pushdown
+        — non-matching events are dropped before their banks are inflated.
+        ``num_entries`` stays the pre-filter total.
+
+        Tag **names** (resolved via :attr:`tag_names`) are accepted anywhere a
+        tag is: ``event_tag="dvcs"`` or ``["dvcs", "sidis"]`` keeps events with
+        *any* of those named bits set (a named flag *is* a bit). A purely
+        numeric ``event_tag`` keeps its exact-set-of-``uint32`` meaning;
+        ``event_tag_any`` is always an OR'd bitmask. An unknown name raises
+        ``KeyError``."""
+        numeric, any_mask = self._resolve_tag_filters(event_tag, event_tag_any)
+        new = Chain(self._reader().filtered(require, record_tag, numeric, any_mask))
         new._require = require
         new._record_tag = record_tag
-        new._event_tag = event_tag
-        new._event_tag_any = event_tag_any
+        new._event_tag = numeric
+        new._event_tag_any = any_mask
         return new
+
+    def _resolve_tag_filters(
+        self, event_tag, event_tag_any
+    ) -> "tuple[list[int] | None, int | None]":
+        """Resolve the two tag params to ``(numeric_exact_set, any_mask)``.
+        Names route to the ``any`` bitmask; a pure-int ``event_tag`` stays an
+        exact-set. Returns numeric values so worker processes need no registry."""
+        any_mask = None if event_tag_any is None else self._tag_mask(event_tag_any)
+        numeric = None
+        if event_tag is not None:
+            items = [event_tag] if isinstance(event_tag, (str, int)) else list(event_tag)
+            if any(isinstance(x, str) for x in items):
+                any_mask = (any_mask or 0) | self._tag_mask(items)
+            else:
+                numeric = [int(x) for x in items]
+        return numeric, any_mask
+
+    def _tag_mask(self, spec) -> int:
+        """A tag name, an int bitmask, or an iterable of them → one OR'd bitmask.
+        Names are looked up in :attr:`tag_names`; a raw int is used as-is."""
+        items = [spec] if isinstance(spec, (str, int)) else list(spec)
+        mask = 0
+        registry = None
+        for x in items:
+            if isinstance(x, bool):
+                raise TypeError("tag flag must be a name or int, not bool")
+            if isinstance(x, str):
+                if registry is None:
+                    registry = self.tag_names
+                if x not in registry:
+                    raise KeyError(
+                        f"unknown tag name {x!r}; file registry has {sorted(registry)}"
+                    )
+                mask |= 1 << registry[x]
+            else:
+                mask |= int(x)
+        return mask
 
     def skim(self, dst: StrPath, compression: str = "lz4percolumn") -> SkimSummary:
         """Copy the (filtered) chain to ``dst``, re-compressing. Returns a
