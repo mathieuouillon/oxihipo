@@ -597,7 +597,7 @@ def test_writer_roundtrip_jagged(tmp_path):
     ak = pytest.importorskip("awkward")
     dst = str(tmp_path / "w.hipo")
     w = oxihipo.create(dst, compression="lz4percolumn")
-    w.newtree("NEW::bank", {"px": "F", "pid": "I"})
+    w.new_bank("NEW::bank", {"px": "F", "pid": "I"})
     px = ak.Array([[1.0, 2.0], [], [3.0, 4.0, 5.0]])
     pid = ak.Array([[11, 22], [], [11, -11, 211]])
     w.extend({"NEW::bank": {"px": px, "pid": pid}})
@@ -615,7 +615,7 @@ def test_writer_scalar_bank_and_context(tmp_path):
     ak = pytest.importorskip("awkward")
     dst = str(tmp_path / "w2.hipo")
     with oxihipo.create(dst) as w:
-        w.newtree("RUN::config", {"run": "I", "energy": "F"})
+        w.new_bank("RUN::config", {"run": "I", "energy": "F"})
         w.extend({
             "RUN::config": {
                 "run": np.array([5, 5, 6], dtype=np.int32),
@@ -630,7 +630,7 @@ def test_writer_scalar_bank_and_context(tmp_path):
 def test_writer_rejects_array_columns(tmp_path):
     w = oxihipo.create(str(tmp_path / "x.hipo"))
     with pytest.raises(ValueError):
-        w.newtree("BAD::bank", {"cov": "F#3"})  # array columns unsupported (v1)
+        w.new_bank("BAD::bank", {"cov": "F#3"})  # array columns unsupported (v1)
 
 
 def test_decorate_adds_bank(tmp_path):
@@ -643,7 +643,7 @@ def test_decorate_adds_bank(tmp_path):
     scores = (np.arange(n, dtype=np.float32) * 0.5)
 
     w = oxihipo.recreate(src, dst)
-    w.newtree("ML::pred", {"score": "F"})
+    w.new_bank("ML::pred", {"score": "F"})
     w.extend({"ML::pred": {"score": scores}})
     assert w.close().events == n
 
@@ -661,7 +661,7 @@ def test_decorate_requires_all_events(tmp_path):
     src = str(tmp_path / "s.hipo")
     shutil.copy(os.path.join(DATA, "sample.hipo"), src)
     w = oxihipo.recreate(src, str(tmp_path / "d.hipo"))
-    w.newtree("ML::pred", {"score": "F"})
+    w.new_bank("ML::pred", {"score": "F"})
     w.extend({"ML::pred": {"score": np.array([1.0, 2.0], dtype=np.float32)}})  # 2 of 8
     with pytest.raises(ValueError):
         w.close()

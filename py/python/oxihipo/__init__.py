@@ -1001,11 +1001,11 @@ def _to_columnar(bank, bdata, schema):
 
 
 class Writer:
-    """A columnar HIPO writer — uproot-shaped (:meth:`newtree` / :meth:`extend`).
+    """A columnar HIPO writer (:meth:`new_bank` / :meth:`extend` / :meth:`close`).
 
     Build a fresh file with :func:`create`, or *decorate* an existing one (copy
     its events, attaching new banks) with :func:`recreate`. Declare each new
-    bank with :meth:`newtree`, feed columnar batches (NumPy or Awkward) with
+    bank with :meth:`new_bank`, feed columnar batches (NumPy or Awkward) with
     :meth:`extend`, then :meth:`close` — or use it as a context manager.
 
     Array columns (``T#N``) are not yet supported by the writer; existing array
@@ -1025,7 +1025,7 @@ class Writer:
             raise ValueError("operation on a closed Writer")
         return self._w
 
-    def newtree(
+    def new_bank(
         self,
         bank: str,
         columns: "dict[str, str] | Sequence[tuple[str, str]]",
@@ -1033,8 +1033,8 @@ class Writer:
         item: int | None = None,
     ) -> None:
         """Declare a new bank. ``columns`` maps ``name → typechar`` (or a list of
-        ``(name, typechar)``); typechar ∈ ``B/S/I/L/F/D``. ``item`` (the unique
-        bank id) auto-assigns when omitted. Mirrors uproot's ``newtree``."""
+        ``(name, typechar)``); typechar ∈ ``B/S/I/L/F/D`` (byte/short/int/long/
+        float/double). ``item`` (the unique bank id) auto-assigns when omitted."""
         cols: list[tuple[str, str]] = (
             list(columns.items())
             if isinstance(columns, dict)
@@ -1082,7 +1082,7 @@ class Writer:
 
 def create(path: StrPath, compression: str = "lz4percolumn") -> Writer:
     """Open a new HIPO file for writing (overwrites). Declare banks with
-    :meth:`Writer.newtree`, feed batches with :meth:`Writer.extend`, then
+    :meth:`Writer.new_bank`, feed batches with :meth:`Writer.extend`, then
     :meth:`Writer.close`. Compression is one of ``none`` / ``lz4`` / ``lz4best``
     / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``."""
     return Writer(path, compression=compression)
@@ -1092,7 +1092,7 @@ def recreate(
     source: StrPath, dst: StrPath | None = None, compression: str = "lz4percolumn"
 ) -> Writer:
     """Decorate an existing file: copy every event of ``source`` and attach the
-    new banks you :meth:`~Writer.newtree` + :meth:`~Writer.extend` (which must
+    new banks you :meth:`~Writer.new_bank` + :meth:`~Writer.extend` (which must
     align 1:1 with the source events). Existing banks are copied through
     verbatim. Writes to ``dst``; if ``dst`` is ``None``, replaces ``source`` in
     place via a temp file."""

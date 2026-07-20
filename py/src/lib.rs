@@ -493,7 +493,7 @@ struct PyWriter {
     compression: Compression,
     /// Accumulated schemas: the new banks (fresh) or source + new (decorate).
     dict: Dict,
-    /// Next auto-assigned (unique) item number for `newtree` without an explicit item.
+    /// Next auto-assigned (unique) item number for `new_bank` without an explicit item.
     next_item: u8,
     writer: Option<Writer>,
     /// Decorate mode: the source event stream, merged event-by-event.
@@ -545,8 +545,9 @@ impl PyWriter {
         })
     }
 
-    /// Declare a bank schema (uproot `newtree`). `cols` is `[(name, typechar)]`
-    /// with typechar in B/S/I/L/F/D. `item` auto-assigns (unique) if omitted.
+    /// Declare a bank schema (the Python `Writer.new_bank`). `cols` is
+    /// `[(name, typechar)]` with typechar in B/S/I/L/F/D; `item` auto-assigns
+    /// (unique) if omitted.
     #[pyo3(signature = (name, cols, group=1, item=None))]
     fn add_schema(
         &mut self,
@@ -593,7 +594,7 @@ impl PyWriter {
                 .get(name)
                 .ok_or_else(|| {
                     pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown bank {name:?}; declare it with newtree() first"
+                        "unknown bank {name:?}; declare it with new_bank() first"
                     ))
                 })?
                 .clone();

@@ -189,7 +189,7 @@ kinematic) without rewriting the physics banks:
 
 ```python
 w = ox.recreate("dst.hipo", "decorated.hipo")   # copies every event verbatim
-w.newtree("ML::pred", {"score": "F"})            # declare a new bank
+w.new_bank("ML::pred", {"score": "F"})            # declare a new bank
 w.extend({"ML::pred": {"score": scores}})        # one float32 per event
 w.close()
 ```
