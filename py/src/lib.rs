@@ -95,7 +95,7 @@ impl PyChain {
         };
         // Blocking I/O (open + header + dictionary + trailer) with GIL released.
         let inner = py
-            .allow_threads(|| match src {
+            .detach(|| match src {
                 Source::One(s) => oxihipo::Chain::open(s),
                 Source::Many(v) => oxihipo::Chain::open(v),
             })
@@ -202,7 +202,7 @@ impl PyChain {
 
         // Heavy work off the GIL — the closure captures no Python handle.
         let bufs = py
-            .allow_threads(|| self.inner.read_columns(&sel, range, threads))
+            .detach(|| self.inner.read_columns(&sel, range, threads))
             .map_err(to_pyerr)?;
 
         // Re-acquired GIL: move each owned buffer into NumPy (zero-copy).
@@ -253,7 +253,7 @@ impl PyChain {
     ) -> PyResult<Bound<'py, PyDict>> {
         let comp = parse_compression(compression)?;
         let summary = py
-            .allow_threads(|| self.inner.skim(&dst, comp))
+            .detach(|| self.inner.skim(&dst, comp))
             .map_err(to_pyerr)?;
         let out = PyDict::new(py);
         out.set_item("events", summary.events)?;
@@ -282,7 +282,7 @@ impl PyChain {
     /// Decompressed payload bytes per record (same order as `record_spans`) —
     /// for sizing byte-based streaming batches.
     fn record_decompressed_sizes(&self, py: Python<'_>) -> PyResult<Vec<u64>> {
-        py.allow_threads(|| self.inner.record_decompressed_sizes())
+        py.detach(|| self.inner.record_decompressed_sizes())
             .map_err(to_pyerr)
     }
 }

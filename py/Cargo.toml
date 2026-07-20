@@ -16,21 +16,20 @@ crate-type = ["cdylib", "rlib"]
 # C LZ4 / HC compression path.
 oxihipo = { path = "..", default-features = false }
 # abi3-py313: one cp313-abi3 wheel per (OS, arch), matching `requires-python =
-# ">=3.13"` (pyproject.toml) exactly — pyo3 0.24 is the first release to offer an
-# abi3-py313 floor.
+# ">=3.13"` (pyproject.toml) exactly.
 # `generate-import-lib` lets the **Windows** wheel build *without* a Python
 # interpreter: on the CI runner maturin finds no `>=3.13` interpreter that
 # `requires-python` accepts, so it builds interpreter-free (which abi3 supports
 # via python3-dll-a). Without this feature that path errors ("Need a Python
 # interpreter to compile for Windows …"). No-op on Linux/macOS.
-pyo3 = { version = "0.24", features = [
+pyo3 = { version = "0.29", features = [
     "abi3-py313",
     "extension-module",
     "generate-import-lib",
 ] }
-# rust-numpy tracks pyo3; 0.24 pairs with pyo3 0.24 and exposes the stable
+# rust-numpy tracks pyo3; 0.29 pairs with pyo3 0.29 and exposes the stable
 # `Vec::into_pyarray(py) -> Bound<PyArray>` zero-copy move.
-numpy = "0.24"
+numpy = "0.29"
 
 # PyO3's trampoline can only *catch* an unwinding panic; a `panic = "abort"`
 # cdylib would abort the whole interpreter. This crate is its own workspace
