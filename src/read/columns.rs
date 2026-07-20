@@ -470,6 +470,70 @@ fn process_record_columns(
     Ok(RecordChunk { banks })
 }
 
+/// Collect the per-event tag (`EH_TAG`) of every surviving event in one record,
+/// in order — the tag-only analogue of [`process_record_columns`]. Reads the
+/// tag from the event header or the record directory; never inflates a bank.
+#[allow(clippy::too_many_arguments)]
+fn record_event_tags(
+    inner: &Arc<FileInner>,
+    ri: usize,
+    file_base: u64,
+    filter: Option<&Filter>,
+    filter_active: bool,
+    range: Option<&Range<u64>>,
+    record: &mut Record,
+    read_buf: &mut Vec<u8>,
+) -> Result<Vec<u32>> {
+    let span = &inner.index.records()[ri];
+    let global_first = file_base + span.first_event;
+    if let Some(r) = range {
+        let rec_end = global_first + u64::from(span.event_count);
+        if rec_end <= r.start || global_first >= r.end {
+            return Ok(Vec::new());
+        }
+    }
+
+    let header = inner.read_record_into(span.file_offset, read_buf)?;
+    let mut tags = Vec::new();
+    if header.compression.is_by_bank() {
+        let rec = ByBankRecord::parse(read_buf)?;
+        for e in 0..rec.event_count() {
+            if !in_range(range, global_first + u64::from(e)) {
+                continue;
+            }
+            if filter_active && filter.is_some_and(|f| !f.check_by_bank(&rec, e)) {
+                continue;
+            }
+            tags.push(rec.event_tag(e));
+        }
+    } else if header.compression.is_per_column() {
+        let rec = PerColumnRecord::parse(read_buf)?;
+        for e in 0..rec.event_count() {
+            if !in_range(range, global_first + u64::from(e)) {
+                continue;
+            }
+            if filter_active && filter.is_some_and(|f| !f.check_per_column(&rec, e)) {
+                continue;
+            }
+            tags.push(rec.event_tag(e));
+        }
+    } else {
+        record.load_with_header(read_buf, header)?;
+        for e in 0..record.event_count() {
+            if !in_range(range, global_first + u64::from(e)) {
+                continue;
+            }
+            let Some(raw) = record.event(e) else { continue };
+            let event = Event::new(raw);
+            if filter_active && filter.is_some_and(|f| !f.check(&event)) {
+                continue;
+            }
+            tags.push(event.tag());
+        }
+    }
+    Ok(tags)
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -546,6 +610,63 @@ impl Chain {
         };
 
         Ok(merge_chunks(&plan, chunks))
+    }
+
+    /// Every surviving event's per-event tag (`EH_TAG`), in global event order —
+    /// the tag column aligned 1:1 with [`Self::read_columns`] over the same
+    /// `range` and chain filter. Cheap: the tag is read from the event header or
+    /// the record directory, never inflating a bank. `threads`: `0` = rayon's
+    /// global pool, `1` = sequential, `n` = an `n`-thread pool.
+    pub fn event_tags(&self, range: Option<Range<u64>>, threads: usize) -> Result<Vec<u32>> {
+        let tasks = self.build_tasks();
+        let files = self.files_inner();
+        let offsets = self.event_offsets();
+        let filter = self.filter_ref();
+        let filter_active = filter.is_some_and(Filter::is_active);
+        let range = range.as_ref();
+
+        let run_one = |record: &mut Record, read_buf: &mut Vec<u8>, fi: usize, ri: usize| {
+            record_event_tags(
+                &files[fi],
+                ri,
+                offsets[fi],
+                filter,
+                filter_active,
+                range,
+                record,
+                read_buf,
+            )
+        };
+
+        let per_record: Vec<Vec<u32>> = if threads == 1 {
+            let mut record = Record::new();
+            let mut read_buf = Vec::new();
+            tasks
+                .iter()
+                .map(|&(fi, ri)| run_one(&mut record, &mut read_buf, fi, ri))
+                .collect::<Result<_>>()?
+        } else {
+            let run = || {
+                tasks
+                    .par_iter()
+                    .map_init(
+                        || (Record::new(), Vec::new()),
+                        |(record, read_buf), &(fi, ri)| run_one(record, read_buf, fi, ri),
+                    )
+                    .collect::<Result<Vec<_>>>()
+            };
+            if threads == 0 {
+                run()?
+            } else {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .map_err(|_| HipoError::Compression("rayon thread pool init failed"))?;
+                pool.install(run)?
+            }
+        };
+
+        Ok(per_record.into_iter().flatten().collect())
     }
 
     /// Typed single-column read: `(offsets, content)` where `content` is a

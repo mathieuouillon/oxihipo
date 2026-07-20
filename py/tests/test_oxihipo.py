@@ -468,3 +468,21 @@ def test_event_tag_filter_survives_workers(chain):
     single = ak.to_list(g.arrays("REC::Event", ["evno"]).evno)
     par = ak.to_list(g.arrays("REC::Event", ["evno"], workers=2).evno)
     assert par == single == [[1000], [1003], [1006]]
+
+
+def test_event_tags_column(chain):
+    # per-event tag as a flat uint32 column, aligned with arrays().
+    ak = pytest.importorskip("awkward")
+    tags = chain.event_tags()
+    assert tags.dtype == np.uint32
+    assert tags.tolist() == [1, 2, 4, 1, 2, 4, 1, 2]  # 1 << (i % 3)
+
+    # lines up 1:1 with the event axis of arrays(), so it can cut on it.
+    p = chain.arrays("REC::Event", ["evno"])
+    assert len(tags) == len(p)
+    evno = ak.to_numpy(ak.flatten(p.evno))
+    assert evno[(tags & 1) != 0].tolist() == [1000, 1003, 1006]  # tag bit 0 set
+
+    # tracks the chain filter, and honors entry_start/entry_stop.
+    assert chain.filtered(event_tag=[4]).event_tags().tolist() == [4, 4]
+    assert chain.event_tags(entry_start=2, entry_stop=5).tolist() == [4, 1, 2]

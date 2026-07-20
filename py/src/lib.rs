@@ -220,6 +220,25 @@ impl PyChain {
             .collect())
     }
 
+    /// Per-event tag column (`EH_TAG`): one `uint32` per surviving event in
+    /// global event order, aligned 1:1 with `read_columns` / `arrays` over the
+    /// same filter and range. Read from the event header or record directory —
+    /// no bank is inflated.
+    #[pyo3(signature = (entry_start=None, entry_stop=None, threads=0))]
+    fn event_tags<'py>(
+        &self,
+        py: Python<'py>,
+        entry_start: Option<u64>,
+        entry_stop: Option<u64>,
+        threads: usize,
+    ) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let range = mk_range(entry_start, entry_stop);
+        let tags = py
+            .detach(|| self.inner.event_tags(range, threads))
+            .map_err(to_pyerr)?;
+        Ok(tags.into_pyarray(py))
+    }
+
     /// A new `Chain` restricted to events carrying every bank in `require`,
     /// whose record tag is in `record_tag`, and whose per-event tag is in
     /// `event_tag` (or overlaps the `event_tag_any` bitmask). Cheap — clones

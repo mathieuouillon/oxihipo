@@ -349,6 +349,26 @@ class Chain:
         _, values, inner_len = cols[0]
         return NumpyColumn(values, offsets, inner_len)
 
+    def event_tags(
+        self,
+        *,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 0,
+    ) -> "np.ndarray":
+        """The per-event tag (``EH_TAG``) as a flat ``uint32`` NumPy array — one
+        per event, in the same order and under the same filter as
+        :meth:`arrays` / :meth:`numpy`. So ``f.event_tags()`` lines up 1:1 with
+        ``f.arrays(...)`` for per-event cuts and histograms::
+
+            p = f.arrays("REC::Particle", ["px"])
+            t = f.event_tags()          # one uint32 per event, aligned with p
+            dvcs = p[(t & DVCS) != 0]   # select DVCS events
+
+        Honors ``entry_start`` / ``entry_stop`` and the chain filter; the tag is
+        read from the header/directory without inflating any bank."""
+        return self._reader().event_tags(entry_start, entry_stop, threads)
+
     # --- the Awkward path --------------------------------------------------
     def array(
         self,

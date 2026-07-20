@@ -45,6 +45,12 @@ class Chain:
         entry_stop: int | None = ...,
         threads: int = ...,
     ) -> list[_BankColumns]: ...
+    def event_tags(
+        self,
+        entry_start: int | None = ...,
+        entry_stop: int | None = ...,
+        threads: int = ...,
+    ) -> NDArray[np.uint32]: ...
     def filtered(
         self,
         require: Sequence[str] | None = ...,

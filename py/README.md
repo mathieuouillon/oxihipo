@@ -32,6 +32,7 @@ benchmarks).
 | `f.arrays([bankA, bankB])` / `f.arrays(filter_name="REC::*")` | record with one field per bank |
 | `f.array(bank, col)` | one column, `N * var * T` |
 | `f.numpy(bank, col)` | `(values, offsets, inner_len)` — plain NumPy, no Awkward import |
+| `f.event_tags()` | per-event tag (`EH_TAG`) as `uint32[n_events]` — aligned 1:1 with `arrays()` |
 | `f["REC::Particle"]` | a **bank proxy**: `.keys()`, `.typenames()`, `.array(col)`, `["col"]` |
 | `f["REC::Particle/px"]` | the `px` column |
 

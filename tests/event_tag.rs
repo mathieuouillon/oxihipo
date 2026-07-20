@@ -170,3 +170,47 @@ fn event_tag_any_is_a_bitmask_and_ands_with_require() {
         );
     }
 }
+
+#[test]
+fn event_tags_column_aligns_with_read_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let all: Vec<u32> = (0..N).map(tag_of).collect();
+    for (name, comp) in FORMATS {
+        let path = dir.path().join(format!("{name}.hipo"));
+        write_tagged(&path, *comp).unwrap();
+        let chain = Chain::open(&path).unwrap();
+
+        // Unfiltered: every event's tag, in order; sequential and parallel agree.
+        assert_eq!(
+            chain.event_tags(None, 1).unwrap(),
+            all,
+            "{name}: event_tags"
+        );
+        assert_eq!(
+            chain.event_tags(None, 0).unwrap(),
+            all,
+            "{name}: event_tags (parallel)"
+        );
+
+        // Range [10, 20): exactly those events' tags.
+        let want_range: Vec<u32> = (10..20).map(tag_of).collect();
+        assert_eq!(
+            chain.event_tags(Some(10..20), 1).unwrap(),
+            want_range,
+            "{name}: event_tags range"
+        );
+
+        // Under a filter, the tag column is 1:1 with read_columns' event axis.
+        let g = chain.with_filter(Filter::new().event_tag([1_u32])).unwrap();
+        let tags = g.event_tags(None, 0).unwrap();
+        assert!(tags.iter().all(|&t| t == 1), "{name}: only tag-1 survive");
+        let bufs = g
+            .read_columns(&[("REC::Event", &["evno"])], None, 1)
+            .unwrap();
+        assert_eq!(
+            tags.len(),
+            bufs[0].offsets.len() - 1,
+            "{name}: event_tags aligns with read_columns"
+        );
+    }
+}
