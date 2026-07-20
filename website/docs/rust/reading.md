@@ -107,7 +107,7 @@ let px:  f32 = b.get("px",  row);
 ### `col` — the whole column, usually without copying
 
 ```rust
-let px: std::borrow::Cow<[f32]> = b.col::<f32>("px");
+let px: std::borrow::Cow<[f32]> = b.col::<f32>("px")?;
 ```
 
 Returns `Cow<[T]>`: **zero-copy** when the bank's bytes are aligned to `T`
@@ -125,8 +125,22 @@ let h = schema.handle::<f32>("px");
 let px = bank.read(h);
 ```
 
-Fixed-length array columns (declared `name/T#N`) read as `[T; N]` via
-`array_at`.
+### Array columns
+
+A column declared `name/T#N` (see [Writing](./writing.md#array-columns)) holds a
+fixed-length array per row. Read it three ways:
+
+```rust
+let cov = bank.col::<[f32; 3]>("cov")?;          // whole column — one [f32; 3] per row
+let one = bank.get::<[f32; 3]>("cov", row);       // one row's array (infallible; default on mismatch)
+let dynamic = bank.array_at::<f32>("cov", row)?;  // runtime length → Cow<[f32]>
+```
+
+`col` / `get` take the length as a const generic — the same zero-copy fast path
+as the scalar reads, and `get` can be inferred from the binding
+(`let cov: [f32; 3] = bank.get("cov", row);`). `array_at` is the escape hatch for
+when `N` isn't known at compile time (e.g. a generic dump tool walking a
+dictionary): it returns a `Cow<[T]>` slice.
 
 ## Typed rows
 

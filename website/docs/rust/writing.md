@@ -73,6 +73,58 @@ If you're deciding between them, read
 `Lz4PerBank` is usually the one you want, and `Lz4PerColumn` (what `skim`
 defaults to) squeezes the file smaller still.
 
+## Array columns
+
+A column can hold a **fixed-length array** instead of a scalar. In schema text a
+column type is a type letter optionally followed by `#N`: `F#3` is three
+`float32` per row, `S#2` two `int16` (`F`=f32, `D`=f64, `I`=i32, `S`=i16,
+`B`=i8, `L`=i64). Declare it as text, or from `(name, type, length)` triples
+where `length > 1` makes the column an array:
+
+```rust
+use oxihipo::{DataType, Schema};
+
+// text form — name/T#N
+Schema::parse_text("{REC::Traj/100/1}{trk_id/I,cov/F#6,hits/S#3}")?;
+
+// or programmatically
+Schema::from_columns(
+    "REC::Traj",
+    100,
+    1,
+    [
+        ("trk_id".into(), DataType::Int, 1),
+        ("cov".into(), DataType::Float, 6),
+        ("hits".into(), DataType::Short, 3),
+    ],
+);
+```
+
+Write a row's array with the same `set` you use for scalars — pass the array,
+and its length must match the declared `N`:
+
+```rust
+b.row(|r| {
+    r.set("trk_id", 7_i32)?;
+    r.set("cov", [0.0_f32, 0.1, 0.2, 0.3, 0.4, 0.5])?;
+    r.set("hits", [1_i16, 2, 3])?;
+    Ok(())
+})?;
+```
+
+Reading them back is covered in
+[Reading · Array columns](./reading.md#array-columns); from Python they arrive
+as fixed-size sublists — see
+[Python · Array columns](../python/reading.md#array-columns). A runnable
+end-to-end example is
+[`examples/write_array.rs`](https://github.com/mathieuouillon/oxihipo/blob/main/examples/write_array.rs).
+
+:::note Fixed length only
+Every row of a `T#N` column has the same `N`. Genuinely ragged per-row lengths
+aren't a column type — model those as separate bank rows cross-referenced by an
+index column (the CLAS12 `pindex` pattern).
+:::
+
 ## Copying events verbatim
 
 `append_raw(&[u8])` writes an already-encoded event through unchanged. This is

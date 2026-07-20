@@ -65,6 +65,34 @@ traceback.
 `columns=` is only valid with a single bank name. To select columns across
 several banks, use `filter_name="BANK/col*"`.
 
+## Array columns
+
+A fixed-length array column (declared `cov/F#3` on the Rust side — three
+`float32` per row) comes back as an extra **fixed-size axis** nested inside the
+jagged array. Indexing goes event → row → the cell:
+
+```python
+p = f.arrays("REC::Track", ["cov"])
+p.cov                             # N * var * 3 * float32  (a RegularArray inside the per-event list)
+p.cov[3, 0]                       # event 3, track 0 → a length-3 subarray
+ak.sum(p.cov, axis=-1)            # reduce the innermost (size-3) axis
+
+f.typenames()["REC::Track/cov"]   # 'float32[3]'
+```
+
+Through NumPy the fixed length surfaces as `inner_len`, and the values buffer is
+flattened while the shared `offsets` still index by row:
+
+```python
+col = f.numpy("REC::Track", "cov")
+col.inner_len                     # 3  (1 for a scalar column, N for a T#N array)
+col.values                        # float32, length = total_rows * 3
+```
+
+The nesting carries through every `library=` backend. Because the array axis is
+**regular** (every cell the same length), reductions like `ak.sum(..., axis=-1)`
+and NumPy reshapes are exact — no ragged handling needed.
+
 ## Discovery
 
 ```python
