@@ -2,11 +2,12 @@
 
 [![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/docs/python/reading)
 
-Fast, **columnar** reading of HIPO (CLAS12) files, powered by the Rust
-`oxihipo` core. A HIPO bank reads like a
+Fast, **columnar** reading *and writing* of HIPO (CLAS12) files, powered by the
+Rust `oxihipo` core. A HIPO bank reads like a
 [uproot](https://uproot.readthedocs.io) jagged branch, and columns come back as
 [Awkward](https://awkward-array.org) arrays — built *zero-copy* from buffers the
-Rust side fills with the GIL released.
+Rust side fills with the GIL released. Writing is columnar too: `create` a new
+file, or `recreate` to decorate an existing one with a derived bank.
 
 ```python
 import oxihipo as ox
@@ -102,18 +103,62 @@ for chunk in ox.iterate("/volatile/run5042/*.hipo", "REC::Particle", step_size="
 > Rust's thread pool exists is unsafe), so each re-imports your script; without
 > the guard it would re-run at import. See [`examples/parallel.py`](examples/parallel.py).
 
-## Selecting and writing
+## Filtering and skimming
 
 ```python
 g = f.filtered(require=["REC::Particle"])           # events carrying a bank
 g = f.filtered(record_tag=[0x42])                   # by record tag
 g = f.filtered(event_tag=[1, 4])                    # by per-event tag (EH_TAG)
-g = f.filtered(event_tag_any=0b101)                 # tag bitmask: any of these bits set
+g = f.filtered(event_tag="dvcs")                    # by tag name (if the file has a registry)
 summary = g.skim("electrons.hipo", compression="lz4percolumn")   # SkimSummary(events, records, bytes)
 ```
 
 `filtered()` returns a new chain; the filter reduces what `arrays()` / `skim()`
 yield (its `num_entries` stays the pre-filter total, as in uproot).
+
+## Writing
+
+`create` opens a new file; `recreate` *decorates* an existing one. Both return a
+columnar `Writer` with an uproot-style `new_bank` / `extend` / `close` API —
+columns are written **zero-copy** from NumPy or Awkward, with the GIL released.
+
+```python
+with ox.create("out.hipo", compression="lz4percolumn") as w:
+    w.new_bank("NEW::bank", {"px": "F", "pid": "I", "cov": "F#3"})   # scalars + T#N arrays
+    w.extend({"NEW::bank": {                                          # a batch of events
+        "px":  ak.Array([[1.0, 2.0], [], [3.0]]),                    # jagged: rows per event
+        "pid": ak.Array([[11, -11], [], [211]]),
+        "cov": ak.Array([[[1, 2, 3], [4, 5, 6]], [], [[7, 8, 9]]]),  # 3-vector per row
+    }})
+```
+
+- `new_bank(bank, {col: typechar})` — declare a bank; `typechar` ∈ `B/S/I/L/F/D`,
+  optionally `#N` for a fixed-length array column (`"F#3"`). The unique `item`
+  auto-assigns.
+- `extend({bank: data})` — append a batch. `data` is an `ak.Array` record (what
+  `arrays(bank)` returns) or a dict of columns — a jagged `ak.Array` per column,
+  or a 1-D NumPy array for a scalar-per-event bank. Call it in a loop to stream
+  large outputs in bounded memory.
+- `close()` (or leaving the `with`) writes the trailer index and returns a
+  `SkimSummary`.
+
+**Decorate — add a bank to a cooked file** without rewriting the physics banks
+(an ML score, a computed kinematic):
+
+```python
+f = ox.open("dst.hipo")
+scores = model.predict(f.arrays("REC::Particle")).astype("float32")   # one per event
+
+w = ox.recreate("dst.hipo", "decorated.hipo")   # or dst=None to replace in place
+w.new_bank("ML::pred", {"score": "F"})
+w.extend({"ML::pred": {"score": scores}})        # aligned 1:1 with the source events
+w.close()
+```
+
+Every source event is copied verbatim (existing banks, array columns included),
+with the new banks attached; they must cover all source events (`close` errors
+otherwise). Full guide:
+[Writing](https://mathieuouillon.github.io/oxihipo/docs/python/writing).
 
 ## Discovery
 

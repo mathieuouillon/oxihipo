@@ -124,6 +124,9 @@ summary = g.skim("electrons.hipo", compression="lz4percolumn")   # SkimSummary(e
 `filtered()` returns a new chain; the filter reduces what `arrays()` / `skim()`
 yield. Its `num_entries` stays the **pre-filter** total, as in uproot.
 
+To *author* files — write new banks columnarly, or decorate an existing file
+with a derived bank — see [Writing](./writing.md).
+
 ### Filtering by tag name
 
 If the file carries a **tag registry** (written by the producer — see the Rust

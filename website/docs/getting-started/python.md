@@ -60,6 +60,20 @@ for chunk in f.iterate("REC::Particle", ["px"], step_size="200 MB"):
     hist.fill(ak.flatten(chunk.px))
 ```
 
+Write a file, or *decorate* an existing one with a derived bank:
+
+```python
+with ox.create("out.hipo") as w:
+    w.new_bank("NEW::bank", {"px": "F", "pid": "I"})
+    w.extend({"NEW::bank": {"px": p.px, "pid": p.pid}})   # columnar, zero-copy
+
+# add an ML score to a cooked file without rewriting the physics banks:
+w = ox.recreate("dst.hipo", "decorated.hipo")
+w.new_bank("ML::pred", {"score": "F"})
+w.extend({"ML::pred": {"score": scores}})                 # one per source event
+w.close()
+```
+
 Runnable scripts live in
 [`py/examples/`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples)
 (`quickstart.py`, `analysis.py`, `streaming.py`, `parallel.py`).
@@ -67,6 +81,7 @@ Runnable scripts live in
 ## Where to go next
 
 - [Reading](../python/reading.md) — `arrays`, `array`, `numpy`, bank proxies, `library=`
+- [Writing](../python/writing.md) — `create` / `recreate`, `new_bank` / `extend`, decorate
 - [Streaming](../python/streaming.md) — `iterate` and `step_size`
 - [Parallel reading](../python/parallel.md) — `workers=N` for I/O-bound filesystems
 - [How it works](../python/how-it-works.md) — the zero-copy path, and what it costs
