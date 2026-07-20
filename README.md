@@ -194,6 +194,17 @@ w.extend({"ML::pred": {"score": scores}})        # one float32 per event
 w.close()
 ```
 
+And for ROOT users, `rdataframe` hands a selection to
+[RDataFrame](https://root.cern/manual/data_frame/) via Awkward's generated
+`RDataSource` — jagged banks become `RVec` columns, no copy (`iterate_rdataframe`
+streams it for bigger-than-RAM inputs). Needs ROOT + `oxihipo[root]`:
+
+```python
+df = ox.rdataframe("run5042.hipo", "REC::Particle", ["px", "py", "pid"])
+df.Define("pt", "sqrt(REC_Particle_px*REC_Particle_px + REC_Particle_py*REC_Particle_py)") \
+  .Histo1D("pt")                                   # REC::Particle/px → REC_Particle_px
+```
+
 Build with [maturin](https://www.maturin.rs) (`cd py && maturin develop
 --release`); see the [Python guide](https://mathieuouillon.github.io/oxihipo/docs/python/reading),
 [`py/README.md`](py/README.md), and [`py/examples/`](py/examples/). Design notes:

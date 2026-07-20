@@ -22,8 +22,8 @@ ak.sum(p.px, axis=1)                         # per-event reductions, no Python l
 ```
 
 See [`examples/`](examples/) for runnable scripts (`quickstart.py`,
-`analysis.py`, `streaming.py`, `parallel.py`, and the `bench_*.py`
-benchmarks).
+`analysis.py`, `streaming.py`, `parallel.py`, `rdataframe.py`, and the
+`bench_*.py` benchmarks).
 
 ## Reading
 
@@ -160,6 +160,33 @@ with the new banks attached; they must cover all source events (`close` errors
 otherwise). Full guide:
 [Writing](https://mathieuouillon.github.io/oxihipo/docs/python/writing).
 
+## RDataFrame (ROOT)
+
+`rdataframe` hands a selection to ROOT's
+[RDataFrame](https://root.cern/manual/data_frame/) through Awkward's generated
+`RDataSource` — a jagged bank column becomes an `RVec<T>`, a `T#N` array column
+a nested `RVec`, no copy of the view. Column names are the `bank/column` keys
+sanitized to C++ identifiers (`REC::Particle/px` → `REC_Particle_px`).
+
+```python
+df = ox.rdataframe("run5042.hipo", "REC::Particle", ["px", "py", "pid"])
+h = df.Define("pt", "sqrt(REC_Particle_px*REC_Particle_px"
+                   " + REC_Particle_py*REC_Particle_py)").Histo1D("pt")
+
+# bigger than RAM: one RDataFrame per chunk, merge histograms across chunks
+total = None
+for chunk in ox.iterate_rdataframe("run5042.hipo", "REC::Particle", ["px"], step_size="1 GB"):
+    h = chunk.Histo1D(("pt", "", 100, 0, 10), "REC_Particle_px").GetValue()
+    total = h.Clone() if total is None else (total.Add(h) or total)
+    total.SetDirectory(0)
+```
+
+Needs a working ROOT/PyROOT (not on PyPI — conda-forge or system) plus
+`awkward`; `pip install oxihipo[root]` covers the awkward side. `filter_name`,
+`entry_start`/`entry_stop`, and `.filtered(...)` all carry through. See
+[`examples/rdataframe.py`](examples/rdataframe.py) and the
+[RDataFrame guide](https://mathieuouillon.github.io/oxihipo/docs/python/rdataframe).
+
 ## Discovery
 
 ```python
@@ -217,4 +244,6 @@ Each extra pulls in everything its backend actually imports, so a single
 - `oxihipo[pandas]` — awkward + pandas, for `library="pd"`
 - `oxihipo[arrow]` — `pyarrow >= 14`, for `library="arrow"` (assembled directly
   with pyarrow — no awkward needed on the polars / duckdb path)
+- `oxihipo[root]` — `awkward` for `rdataframe` / `iterate_rdataframe`; **plus** a
+  working ROOT/PyROOT, which is not on PyPI (install via conda-forge or system)
 - `oxihipo[all]` — awkward + pandas + pyarrow

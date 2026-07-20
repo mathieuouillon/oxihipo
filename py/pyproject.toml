@@ -33,6 +33,10 @@ dependencies = ["numpy>=1.24"]
 awkward = ["awkward>=2.6"]
 pandas = ["awkward>=2.6", "pandas>=2.0"]
 arrow = ["pyarrow>=14"]
+# `root` = the ROOT RDataFrame bridge. Awkward's ROOT interop generates the
+# RDataSource, so it's the pip-installable part; ROOT/PyROOT itself is NOT on
+# PyPI — install it via conda-forge or your system so `import ROOT` works.
+root = ["awkward>=2.6"]
 all = ["awkward>=2.6", "pandas>=2.0", "pyarrow>=14"]
 
 [project.urls]

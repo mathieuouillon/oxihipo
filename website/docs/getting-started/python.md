@@ -82,6 +82,7 @@ Runnable scripts live in
 
 - [Reading](../python/reading.md) — `arrays`, `array`, `numpy`, bank proxies, `library=`
 - [Writing](../python/writing.md) — `create` / `recreate`, `new_bank` / `extend`, decorate
+- [RDataFrame](../python/rdataframe.md) — `rdataframe` / `iterate_rdataframe`, ROOT's declarative dataframe over HIPO
 - [Streaming](../python/streaming.md) — `iterate` and `step_size`
 - [Parallel reading](../python/parallel.md) — `workers=N` for I/O-bound filesystems
 - [How it works](../python/how-it-works.md) — the zero-copy path, and what it costs

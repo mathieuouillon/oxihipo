@@ -65,6 +65,12 @@ rather than an error — a typo'd glob gives you back an empty array, not a
 traceback.
 :::
 
+:::tip Feeding ROOT's RDataFrame
+For ROOT users, `f.rdataframe(bank, cols)` (and the streaming
+`iterate_rdataframe`) hands the same selection to
+[RDataFrame](./rdataframe.md) — jagged banks become `RVec` columns.
+:::
+
 `columns=` is only valid with a single bank name. To select columns across
 several banks, use `filter_name="BANK/col*"`.
 

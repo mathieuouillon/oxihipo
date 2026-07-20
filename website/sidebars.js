@@ -21,6 +21,7 @@ const sidebars = {
       items: [
         'python/reading',
         'python/writing',
+        'python/rdataframe',
         'python/streaming',
         'python/parallel',
         'python/how-it-works',

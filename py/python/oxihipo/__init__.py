@@ -46,6 +46,8 @@ __all__ = [
     "recreate",
     "iterate",
     "arrays",
+    "rdataframe",
+    "iterate_rdataframe",
     "Report",
     "NumpyColumn",
     "SkimSummary",
@@ -152,6 +154,76 @@ def _bank_record(ak, offsets, cols):
         contents.append(node)
     rec = ak.contents.RecordArray(contents, fields)
     return ak.contents.ListOffsetArray(ak.index.Index64(offsets), rec)
+
+
+# --------------------------------------------------------------------------
+# ROOT RDataFrame bridge (lazy `import awkward`; ROOT is pulled in by awkward's
+# `to_rdataframe`, only when the helper is actually called)
+# --------------------------------------------------------------------------
+_RDF_IDENT_RE = re.compile(r"\W+")  # runs of non-[A-Za-z0-9_] → one '_'
+
+
+def _rdf_name(source_key: str) -> str:
+    """A ``bank/column`` key → a valid C++ identifier for RDataFrame.
+
+    RDataFrame JIT-compiles column names, so ``::`` and ``/`` (and any other
+    non-word char) collapse to ``_`` — ``REC::Particle/px`` → ``REC_Particle_px``
+    — and a leading digit gets an ``_`` prefix."""
+    name = _RDF_IDENT_RE.sub("_", source_key)
+    if not name or name[0].isdigit():
+        name = "_" + name
+    return name
+
+
+def _rdf_columns(rec, selection, single):
+    """An ``ak.Array`` from :meth:`Chain.arrays` → ``{cpp_name: ak.Array}`` for
+    ``ak.to_rdataframe``. Keys are ``bank/column`` sanitized to C++ identifiers;
+    two source columns mapping to one name is a hard error, not a silent drop."""
+    cols: "dict[str, Any]" = {}
+
+    def add(source_key: str, array) -> None:
+        name = _rdf_name(source_key)
+        if name in cols:
+            raise ValueError(
+                f"RDataFrame column-name collision: {source_key!r} and another "
+                f"source column both map to {name!r} — rename a bank or column"
+            )
+        cols[name] = array
+
+    if single:  # one bank → arrays() dropped the bank level; re-attach its name
+        bank = selection[0][0]
+        for field in rec.fields:
+            add(f"{bank}/{field}", rec[field])
+    else:  # a record with one sub-record per bank
+        for bank in rec.fields:
+            sub = rec[bank]
+            for field in sub.fields:
+                add(f"{bank}/{field}", sub[field])
+    return cols
+
+
+def _to_rdataframe(cols):
+    """``{name: ak.Array}`` → ``ROOT.RDataFrame`` through Awkward's generated
+    ``RDataSource``, with a friendly error when ROOT/awkward isn't importable."""
+    if not cols:
+        raise ValueError(
+            "no columns selected for RDataFrame (the bank/filter matched nothing)"
+        )
+    try:
+        import awkward as ak
+    except ModuleNotFoundError as e:  # awkward itself missing
+        raise ModuleNotFoundError(
+            "oxihipo.rdataframe needs awkward (with ROOT interop) and a working "
+            "ROOT — `pip install oxihipo[root]` plus an importable ROOT"
+        ) from e
+    try:
+        return ak.to_rdataframe(cols)
+    except ModuleNotFoundError as e:  # awkward is here but `import ROOT` failed
+        raise ModuleNotFoundError(
+            "oxihipo.rdataframe needs ROOT (PyROOT) importable in this "
+            "interpreter. Install ROOT so `import ROOT` works (e.g. "
+            "`conda install -c conda-forge root`), then `pip install oxihipo[root]`"
+        ) from e
 
 
 class _BankProxy:
@@ -573,6 +645,95 @@ class Chain:
         }
         return next(iter(frames.values())) if len(frames) == 1 else frames
 
+    # --- the ROOT RDataFrame path ------------------------------------------
+    def rdataframe(
+        self,
+        banks: str | Sequence[str] | None = None,
+        columns: Sequence[str] | None = None,
+        *,
+        filter_name: str | None = None,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 0,
+    ) -> "Any":
+        """Read the selection into a ROOT ``RDataFrame`` (needs ROOT + awkward).
+
+        The columns are read into oxihipo's buffers with the GIL released, then
+        handed to RDataFrame through Awkward's generated ``RDataSource`` — a
+        jagged bank column becomes an ``RVec<T>`` column, a ``T#N`` array column
+        a nested ``RVec``, *without copying the view*. Column names are the
+        ``bank/column`` keys sanitized to valid C++ identifiers::
+
+            REC::Particle/px   ->   REC_Particle_px
+
+        so a per-event define reads naturally::
+
+            df = f.rdataframe("REC::Particle", ["px", "py"])
+            df.Define("pt", "sqrt(REC_Particle_px*REC_Particle_px"
+                            " + REC_Particle_py*REC_Particle_py)").Histo1D("pt")
+
+        The whole selection is materialized into memory first; RDF then runs its
+        implicit-MT loop over that in-memory view — ideal for a per-run analysis
+        that fits in RAM. For bigger-than-RAM inputs stream with
+        :meth:`iterate_rdataframe`. ``filter_name`` / ``entry_start`` /
+        ``entry_stop`` / ``threads`` behave exactly as in :meth:`arrays`, and any
+        :meth:`filtered` chain filter carries through."""
+        selection, single = self._resolve(banks, columns, filter_name)
+        rec = self.arrays(
+            banks, columns, filter_name=filter_name, library="ak",
+            entry_start=entry_start, entry_stop=entry_stop, threads=threads,
+        )
+        return _to_rdataframe(_rdf_columns(rec, selection, single))
+
+    def iterate_rdataframe(
+        self,
+        banks: str | Sequence[str] | None = None,
+        columns: Sequence[str] | None = None,
+        *,
+        step_size: int | str = 100_000,
+        filter_name: str | None = None,
+        report: bool = False,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 0,
+    ) -> "Iterator[Any]":
+        """Stream the selection as one ROOT ``RDataFrame`` per bounded-memory
+        chunk — :meth:`iterate` composed with :meth:`rdataframe`, for inputs
+        bigger than RAM.
+
+        Each chunk (≈ one ``step_size`` of events, record- and file-aligned) is
+        read, presented as its own small ``RDataFrame``, and yielded; it is
+        dropped before the next, so resident memory stays ≈ one chunk. Because
+        each chunk is an independent RDF, you book a result per chunk and merge
+        across chunks yourself — histograms with ``Add``, counts by summing.
+        Clone the first result and detach it so it outlives its chunk::
+
+            total = None
+            for df in f.iterate_rdataframe("REC::Particle", ["px"], step_size="1 GB"):
+                h = df.Histo1D(("pt", "", 100, 0, 10), "REC_Particle_px").GetValue()
+                if total is None:
+                    total = h.Clone()
+                    total.SetDirectory(0)     # detach: outlive this chunk's RDF
+                else:
+                    total.Add(h)
+
+        With ``report=True`` each item is ``(df, Report)``. Column naming and the
+        ROOT requirement are exactly as for :meth:`rdataframe`."""
+        selection, single = self._resolve(banks, columns, filter_name)
+        # Widen `self` so forwarding a plain-`bool` `report` doesn't re-run
+        # iterate's overload resolution (same idiom as the module-level funcs).
+        src: Any = self
+        for item in src.iterate(
+            banks, columns, step_size=step_size, filter_name=filter_name,
+            library="ak", report=report, entry_start=entry_start,
+            entry_stop=entry_stop, threads=threads,
+        ):
+            if report:
+                chunk, rep = item
+                yield _to_rdataframe(_rdf_columns(chunk, selection, single)), rep
+            else:
+                yield _to_rdataframe(_rdf_columns(item, selection, single))
+
     # --- bounded-memory streaming -----------------------------------------
     # Overloads capture the useful distinction: ``report=True`` yields
     # ``(chunk, Report)`` pairs, otherwise bare chunks. The chunk itself is
@@ -934,6 +1095,49 @@ def arrays(
         banks, columns, filter_name=filter_name, library=library,
         entry_start=entry_start, entry_stop=entry_stop, threads=threads,
         workers=workers,
+    )
+
+
+def rdataframe(
+    source: Source,
+    banks: str | Sequence[str] | None = None,
+    columns: Sequence[str] | None = None,
+    *,
+    filter_name: str | None = None,
+    entry_start: int | None = None,
+    entry_stop: int | None = None,
+    threads: int = 0,
+) -> "Any":
+    """Read a file/dir/glob/list into a ROOT ``RDataFrame`` — the module-level
+    shortcut for ``open(source).rdataframe(...)``. Needs ROOT + awkward; see
+    :meth:`Chain.rdataframe` for the column naming and jagged→``RVec`` mapping."""
+    chain: Any = open(source)
+    return chain.rdataframe(
+        banks, columns, filter_name=filter_name, entry_start=entry_start,
+        entry_stop=entry_stop, threads=threads,
+    )
+
+
+def iterate_rdataframe(
+    source: Source,
+    banks: str | Sequence[str] | None = None,
+    columns: Sequence[str] | None = None,
+    *,
+    step_size: int | str = 100_000,
+    filter_name: str | None = None,
+    report: bool = False,
+    entry_start: int | None = None,
+    entry_stop: int | None = None,
+    threads: int = 0,
+) -> "Iterator[Any]":
+    """Stream a file/dir/glob/list as one ROOT ``RDataFrame`` per chunk — the
+    module-level ``open(source).iterate_rdataframe(...)``, for bigger-than-RAM
+    inputs. See :meth:`Chain.iterate_rdataframe` for the per-chunk merge idiom."""
+    chain: Any = open(source)
+    return chain.iterate_rdataframe(
+        banks, columns, step_size=step_size, filter_name=filter_name,
+        report=report, entry_start=entry_start, entry_stop=entry_stop,
+        threads=threads,
     )
 
 

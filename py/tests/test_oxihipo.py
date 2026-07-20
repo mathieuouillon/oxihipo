@@ -590,6 +590,133 @@ def test_set_event_tag_rejects_compressed(tmp_path):
 
 
 # -------------------------------------------------------------------------
+# ROOT RDataFrame bridge
+# -------------------------------------------------------------------------
+def _skip_without_root():
+    """Skip unless both awkward and ROOT import; returns the awkward module
+    (what the value-checking tests need)."""
+    ak = pytest.importorskip("awkward")
+    pytest.importorskip("ROOT")
+    return ak
+
+
+def _colnames(df) -> set[str]:
+    """RDataFrame column names as plain ``str`` (they come back as cppyy
+    ``std::string``, whose hashing/``bytes`` comparison is fragile in sets)."""
+    return {str(n) for n in df.GetColumnNames()}
+
+
+def test_rdataframe_single_bank(chain):
+    ak = _skip_without_root()
+    df = chain.rdataframe("REC::Particle", ["pid", "px"])
+    # Names are sanitized to C++ identifiers (`::` and `/` → `_`).
+    assert _colnames(df) == {"REC_Particle_pid", "REC_Particle_px"}
+    assert df.Count().GetValue() == 8  # one RDF entry per event
+
+    # The jagged column is an RVec: per-event .size() reproduces the counts.
+    h = df.Define("n", "(int) REC_Particle_pid.size()").Histo1D(
+        ("n", "", 4, 0, 4), "n"
+    ).GetValue()
+    assert h.GetEntries() == 8
+    assert h.GetMean() == pytest.approx(1.5)  # mean of 0,1,2,3,0,1,2,3
+
+    # Values flow through unchanged: Σ px over all particles matches Awkward.
+    expected = float(ak.sum(chain.array("REC::Particle", "px")))
+    got = df.Define("s", "Sum(REC_Particle_px)").Sum("s").GetValue()
+    assert got == pytest.approx(expected)
+
+
+def test_rdataframe_array_column_survives(chain):
+    # A T#N array column (cov/F#3) crosses the bridge as a nested RVec.
+    _skip_without_root()
+    df = chain.rdataframe("REC::Particle", ["cov"])
+    assert "REC_Particle_cov" in _colnames(df)
+    assert df.Count().GetValue() == 8
+    assert "RegularArray" in df.GetColumnType("REC_Particle_cov")
+
+
+def test_rdataframe_multi_bank(chain):
+    _skip_without_root()
+    df = chain.rdataframe(["REC::Particle", "REC::Event"])
+    names = _colnames(df)
+    assert "REC_Event_evno" in names
+    assert any(n.startswith("REC_Particle_") for n in names)
+    assert df.Count().GetValue() == 8
+
+
+def test_rdataframe_filtered_and_filter_name(chain):
+    _skip_without_root()
+    # A chain filter carries through: only events with REC::Particle survive.
+    g = chain.filtered(require=["REC::Particle"])
+    assert g.rdataframe("REC::Particle", ["px"]).Count().GetValue() == len(SURV)
+    # filter_name selects columns across banks (bank/col keys, sanitized).
+    df = chain.rdataframe(filter_name="REC::Particle/p*")
+    assert _colnames(df) == {"REC_Particle_pid", "REC_Particle_px"}
+
+
+def test_rdataframe_empty_selection_raises(chain):
+    _skip_without_root()
+    # Unlike arrays() (which yields an empty array), an RDataFrame with no
+    # columns is useless — so a non-matching selection is a hard error.
+    with pytest.raises(ValueError):
+        chain.rdataframe(filter_name="NOPE::*")
+
+
+def test_rdataframe_module_level():
+    _skip_without_root()
+    df = oxihipo.rdataframe(os.path.join(DATA, "sample.hipo"), "REC::Event", ["evno"])
+    assert df.Count().GetValue() == 8
+    assert "REC_Event_evno" in _colnames(df)
+
+
+def test_iterate_rdataframe_streams_and_merges(chain):
+    _skip_without_root()
+
+    def size_hist(df):
+        return df.Define("n", "(int) REC_Particle_px.size()").Histo1D(
+            ("n", "", 4, 0, 4), "n"
+        )
+
+    ref = size_hist(chain.rdataframe("REC::Particle", ["px"])).GetValue()
+
+    total = None
+    nchunks = 0
+    for df in chain.iterate_rdataframe("REC::Particle", ["px"], step_size=2):
+        nchunks += 1
+        h = size_hist(df).GetValue()
+        if total is None:
+            total = h.Clone()
+            total.SetDirectory(0)  # detach so it outlives the chunk's RDF
+        else:
+            total.Add(h)
+
+    assert nchunks == 3  # 3 records → 3 record-aligned chunks
+    assert total.GetEntries() == ref.GetEntries() == 8
+    assert total.GetMean() == pytest.approx(ref.GetMean())
+
+
+def test_iterate_rdataframe_report(chain):
+    _skip_without_root()
+    seen = 0
+    for df, rep in chain.iterate_rdataframe(
+        "REC::Event", ["evno"], step_size=3, report=True
+    ):
+        assert isinstance(rep, oxihipo.Report)
+        assert rep.file_path.endswith(".hipo")
+        seen += df.Count().GetValue()
+    assert seen == 8
+
+
+def test_rdf_name_sanitization():
+    # The naming rule is a pure function — check it directly (no ROOT needed).
+    from oxihipo import _rdf_name
+
+    assert _rdf_name("REC::Particle/px") == "REC_Particle_px"
+    assert _rdf_name("RUN::config/torus") == "RUN_config_torus"
+    assert _rdf_name("9bank/x").startswith("_")  # leading digit gets a prefix
+
+
+# -------------------------------------------------------------------------
 # Writing
 # -------------------------------------------------------------------------
 def test_writer_roundtrip_jagged(tmp_path):
