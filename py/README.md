@@ -21,7 +21,8 @@ ak.sum(p.px, axis=1)                         # per-event reductions, no Python l
 ```
 
 See [`examples/`](examples/) for runnable scripts (`quickstart.py`,
-`analysis.py`, `streaming.py`).
+`analysis.py`, `streaming.py`, `parallel.py`, and the `bench_*.py`
+benchmarks).
 
 ## Reading
 

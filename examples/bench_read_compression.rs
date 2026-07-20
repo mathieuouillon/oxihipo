@@ -10,12 +10,13 @@
 //! - **all** — every populated bank (≈ 73 on real CLAS12 data).
 //!
 //! The per-bank / per-column formats decode only the banks — and, for
-//! `Lz4PerColumn`, the columns — each scope names; the `Bytes`-backed formats
-//! (None/Lz4/Lz4Best/Gzip/Lz4Chunked) inflate the whole record regardless.
+//! `Lz4PerColumn`, the columns — each scope names; the whole-record formats
+//! (None/Lz4/Lz4Best/Gzip) inflate the whole record regardless.
 //!
-//! Reports best-of-`iters` per pass (min = least noise). Numbers are
-//! single-thread, warm-cache, on the running machine — relative throughput
-//! between formats is the point, not absolute MB/s.
+//! The `size MB` column is the on-disk file size and `ratio` is versus the
+//! `None` (uncompressed) size. Read passes report best-of-`iters` (min = least
+//! noise). Numbers are single-thread, warm-cache, on the running machine —
+//! relative throughput between formats is the point, not absolute MB/s.
 //!
 //! ```sh
 //! # synthetic data (default 100k events, 5 iters):
@@ -23,6 +24,10 @@
 //! cargo run --release --example bench_read_compression -- 200000 7
 //! # or a real file (first `cap` events, `iters` passes):
 //! cargo run --release --example bench_read_compression -- /path/to/rec.hipo 5 100000
+//!
+//! # keep the per-format files (so another tool can read them) instead of a
+//! # temp dir that's cleaned up on exit:
+//! OXIHIPO_BENCH_KEEP=/tmp/fmt cargo run --release --example bench_read_compression -- rec.hipo 5 200000
 //! ```
 
 use std::collections::BTreeSet;
@@ -287,8 +292,22 @@ fn print_schema(chain: &Chain, bank: &str) {
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let dir = tempfile::tempdir()?;
-    let dpath = dir.path();
+    // Per-format files land in a temp dir (cleaned up) unless
+    // `OXIHIPO_BENCH_KEEP=<dir>` asks to persist them for another tool to read.
+    let keep = env::var_os("OXIHIPO_BENCH_KEEP").map(std::path::PathBuf::from);
+    let tmp = if keep.is_none() {
+        Some(tempfile::tempdir()?)
+    } else {
+        None
+    };
+    let dpath: &Path = match (&keep, &tmp) {
+        (Some(d), _) => {
+            std::fs::create_dir_all(d)?;
+            d.as_path()
+        }
+        (None, Some(t)) => t.path(),
+        _ => unreachable!(),
+    };
     let base_path = dpath.join("base.hipo");
     let iters: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
 
@@ -335,18 +354,35 @@ fn main() -> Result<()> {
         base.skim(dpath.join(format!("{name}.hipo")), *comp)?;
     }
 
+    // Time every format first, then print with a size ratio against `None`.
+    let stats: Vec<(&str, Stats)> = variants
+        .iter()
+        .map(|(name, _)| {
+            Ok((
+                *name,
+                bench_one(&dpath.join(format!("{name}.hipo")), iters)?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let base_bytes = stats
+        .iter()
+        .find(|(n, _)| *n == "None")
+        .map(|(_, s)| s.file_bytes)
+        .unwrap_or(0)
+        .max(1);
+
     println!(
-        "{:<12} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "format", "size MB", "sel", "full", "10 bk", "20 bk", "40 bk", "all"
+        "{:<12} {:>8} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "format", "size MB", "ratio", "sel", "full", "10 bk", "20 bk", "40 bk", "all"
     );
-    println!("{}", "-".repeat(76));
-    for (name, _) in &variants {
-        let st = bench_one(&dpath.join(format!("{name}.hipo")), iters)?;
+    println!("{}", "-".repeat(84));
+    for (name, st) in &stats {
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         println!(
-            "{:<12} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1}",
+            "{:<12} {:>8.1} {:>5.2}x {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1} {:>8.1}",
             name,
             st.file_bytes as f64 / 1e6,
+            st.file_bytes as f64 / base_bytes as f64,
             ms(st.sel),
             ms(st.full),
             ms(st.b10),
@@ -356,11 +392,16 @@ fn main() -> Result<()> {
         );
     }
     println!(
-        "\nnote: single-thread, best-of-{iters}, warm cache; ms to read *every value of every\n\
-         column* of that many banks, for every event. sel = REC::Event (1 bank); full =\n\
-         REC::Particle + REC::Event (2, all their columns); then the first 10 / 20 / 40 populated\n\
-         banks; then all of them. Per-bank/column formats pay only for banks/columns touched;\n\
-         whole-record formats inflate the whole record regardless of scope."
+        "\nnote: single-thread, best-of-{iters}, warm cache. `ratio` = file size vs `None`\n\
+         (smaller is better). Read columns give ms to read *every value of every column* of\n\
+         that many banks, for every event: sel = REC::Event (1 bank); full = REC::Particle +\n\
+         REC::Event (2, all their columns); then the first 10 / 20 / 40 populated banks; then\n\
+         all of them. Per-bank/column formats pay only for banks/columns touched; whole-record\n\
+         formats inflate the whole record regardless of scope."
     );
+
+    if let Some(d) = &keep {
+        println!("\nkept per-format files in {}", d.display());
+    }
     Ok(())
 }

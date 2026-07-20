@@ -55,20 +55,51 @@ Reading the matrix:
 - **Thread scaling is linear well past `num_cpus`** for the by-bank format on
   Lustre.
 
-## Format comparison on a local SSD
+## Compression modes — all formats
 
-1.1 GB CLAS12 file (`rec0.hipo`, 289 k events, 195 records, local SSD).
-`bench_par` reads `REC::Particle.rows()` only.
+50,000 events of a real CLAS12 file (`rec_clas_022083`, 274 banks) re-encoded
+into every format; Apple M4 Pro, single thread, warm cache, best-of-3. `Ratio`
+is file size versus `None` (smaller is better). The read columns give the ms to
+read *every value of every column* of that many banks, for every event — `sel` =
+1 bank, up to `all` = all 274.
 
-| Format | Sequential | Parallel | Size |
-|---|---:|---:|---:|
-| `Lz4` baseline | 980 kev/s | 5,073 kev/s | 1,135 MB |
-| **by-bank** | **4,025 kev/s (4.1×)** | **15,675 kev/s (3.1×)** | **1,225 MB (+8%)** |
+**Rust** ([`bench_read_compression`](https://github.com/mathieuouillon/oxihipo/blob/main/examples/bench_read_compression.rs)):
 
-That 4×/3× gap over whole-record `Lz4` is the whole thesis of
-[the compression page](./compression.md): not decompressing the ~85% of banks
-you never read beats decompressing them faster. (Same-variant caveat as above —
-`Lz4ByBankV2` reads at this speed and writes smaller.)
+| Format | Size MB | Ratio | sel (1 bk) | 40 bk | all (274) |
+|---|---:|---:|---:|---:|---:|
+| `None` | 1734 | 1.00× | 158 | 931 | 1589 |
+| `Lz4` | 1081 | 0.62× | 396 | 1203 | 1817 |
+| `Lz4Best` | 922 | 0.53× | 395 | 1198 | 1826 |
+| `Gzip` | 852 | 0.49× | 2878 | 3717 | 4348 |
+| **`Lz4ByBankV2`** | 872 | 0.50× | **86** | 1032 | 1529 |
+| **`Lz4PerColumn`** | **813** | **0.47×** | **75** | **839** | **1280** |
+
+*(read columns in ms)*
+
+Two things stand out: `Lz4PerColumn` is the **smallest file** (0.47×, beating
+even Gzip) *and* the **fastest read at every scope** — reading one bank is ~5×
+faster than whole-record `Lz4` (75 ms vs 396 ms) because it inflates only that
+bank's columns, not the record. `Gzip` packs tightly but is an order of magnitude
+slower to inflate.
+
+**Python** ([`bench_compression.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/bench_compression.py),
+reading the same files through the binding — `sel` = `arrays("REC::Particle")`,
+`all` = `arrays(filter_name="*")`, 20k-event window):
+
+| Format | Size MB | Ratio | sel (1 bk) | all (274) |
+|---|---:|---:|---:|---:|
+| `None` | 1734 | 1.00× | 23 | 250 |
+| `Lz4` | 1081 | 0.62× | 48 | 271 |
+| `Lz4Best` | 922 | 0.53× | 36 | 260 |
+| `Gzip` | 852 | 0.49× | 126 | 343 |
+| **`Lz4ByBankV2`** | 872 | 0.50× | **12** | 171 |
+| **`Lz4PerColumn`** | **813** | **0.47×** | **12** | 172 |
+
+*(read columns in ms)*
+
+The partial-decompression win reaches Python too: `arrays("REC::Particle")` is
+~4× faster on the per-bank / per-column formats (12 ms) than on whole-record
+`Lz4` (48 ms).
 
 ## Python vs Rust
 
@@ -116,4 +147,12 @@ cargo run --release --example bench_par -- out_by_bank.hipo 0
 # Python vs Rust columnar read
 cargo run --release --example bench_columns -- /path/to/file.hipo
 python py/examples/bench_columns.py /path/to/file.hipo
+
+# All compression modes: size + read speed at growing scope.
+# Rust — the first 50k events, best-of-3; keep the per-format files so the
+# Python side can read the exact same data:
+OXIHIPO_BENCH_KEEP=/tmp/fmt \
+  cargo run --release --example bench_read_compression -- /path/to/file.hipo 3 50000
+# Python — read those same files through the binding (20k-event window):
+python py/examples/bench_compression.py /tmp/fmt 20000 3
 ```
