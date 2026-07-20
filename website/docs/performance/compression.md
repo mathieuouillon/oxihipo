@@ -162,6 +162,31 @@ Drop to 16 MB for marginally faster reads, or raise it for maximum ratio, via
 `WriterBuilder::max_record_bytes`.
 :::
 
+## Head-to-head — all formats
+
+The same 50,000 events of a real CLAS12 file (`rec_clas_022083`, 274 banks)
+re-encoded into every format (Apple M4 Pro, single thread, warm cache,
+best-of-3). `Ratio` is file size versus `None` (smaller is better); `sel` / `all`
+are the ms to read every column of one bank / all 274:
+
+| Format | Size MB | Ratio | sel (1 bk) | all (274) |
+|---|---:|---:|---:|---:|
+| `None` | 1734 | 1.00× | 158 | 1589 |
+| `Lz4` | 1081 | 0.62× | 396 | 1817 |
+| `Lz4Best` | 922 | 0.53× | 395 | 1826 |
+| `Gzip` | 852 | 0.49× | 2878 | 4348 |
+| **`Lz4ByBankV2`** | 872 | 0.50× | **86** | 1529 |
+| **`Lz4PerColumn`** | **813** | **0.47×** | **75** | **1280** |
+
+*(read columns in ms)*
+
+`Lz4PerColumn` is the **smallest file** — beating even `Gzip` — *and* the
+**fastest read at every scope**: one bank is ~5× faster than whole-record `Lz4`
+(75 ms vs 396 ms) because it inflates only that bank's columns. `Gzip` packs
+tightly but inflates an order of magnitude slower. The full breakdown — an extra
+read scope plus the matching Python numbers — is on the
+[Benchmarks](./benchmarks.md) page.
+
 ## Converting existing files
 
 The `recook_by_bank` example re-emits an existing file as `Lz4ByBankV2`, for A/B
