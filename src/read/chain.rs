@@ -29,6 +29,8 @@ use crate::read::source::IntoSources;
 use crate::schema::Dict;
 use crate::tag::TagRegistry;
 use crate::wire::by_bank::ByBankRecord;
+use crate::wire::bytes::write_u32_le;
+use crate::wire::constants::EH_TAG;
 use crate::wire::per_column::PerColumnRecord;
 use crate::wire::record::{Record, decode_record_into};
 use crate::write::{Compression, WriteSummary, Writer};
@@ -500,6 +502,66 @@ impl Chain {
             w.append_raw(ev?.bytes())?;
             written += 1;
             progress(written);
+        }
+        w.finish()
+    }
+
+    /// Copy the (filtered) chain to `dst` like [`Self::skim`], but **retag**
+    /// every event: `tag_fn` is called on each surviving event and its return
+    /// (a raw `u32` or a [`TagSet`](crate::TagSet)) overwrites the event's
+    /// per-event `EH_TAG`. `tag_names` records the output's [`TagRegistry`] —
+    /// pass a `tag_flags!` type's `NAMES` so the DST is self-describing, or
+    /// `&[]` for none. The source file's own
+    /// registry is **not** carried over, since the closure defines a fresh tag
+    /// scheme.
+    ///
+    /// This closes the select→label→write→reread loop: filter the chain, label
+    /// each survivor, and the written DST rereads with
+    /// [`Filter::event_tag_any`](crate::read::Filter::event_tag_any) (or
+    /// `filtered(event_tag="…")` from Python). Retagging touches only the event
+    /// header — banks are copied through unchanged (no decode/re-encode of the
+    /// payload beyond the target compression), so it is as cheap as [`Self::skim`].
+    ///
+    /// ```no_run
+    /// use oxihipo::{Chain, Compression};
+    /// oxihipo::tag_flags! { pub Cat { Dvcs = 0, Sidis = 1 } }
+    ///
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("run.hipo")?;
+    /// chain.skim_tagged("tagged.hipo", Compression::Lz4PerColumn, Cat::NAMES, |ev| {
+    ///     // classify from the event's banks…
+    ///     if ev.bank("REC::Particle").is_some() { Cat::Dvcs } else { Cat::Sidis }
+    /// })?;
+    /// // …then reread by name: Chain::open("tagged.hipo")? has the Cat registry.
+    /// # Ok(()) }
+    /// ```
+    pub fn skim_tagged<T, F>(
+        &self,
+        dst: impl AsRef<Path>,
+        compression: Compression,
+        tag_names: &[(&str, u32)],
+        mut tag_fn: F,
+    ) -> Result<WriteSummary>
+    where
+        T: Into<u32>,
+        F: FnMut(&EventCtx<'_>) -> T,
+    {
+        let mut w = Writer::create(dst)
+            .schemas(self.schemas())
+            .tag_names(tag_names)
+            .compression(compression)
+            .build()?;
+        let mut buf = Vec::new();
+        for ev in self.events() {
+            let ev = ev?;
+            let tag: u32 = tag_fn(&ev.ctx()).into();
+            buf.clear();
+            buf.extend_from_slice(ev.bytes());
+            // Overwrite EH_TAG (event-header byte 8) in the copy; the writer
+            // reads it back from here to build the per-column / by-bank tag
+            // directory as well as the event header.
+            write_u32_le(&mut buf, EH_TAG, tag);
+            w.append_raw(&buf)?;
         }
         w.finish()
     }

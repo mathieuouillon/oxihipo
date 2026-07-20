@@ -175,4 +175,8 @@ cross-referencing patterns.
 let summary = chain.skim("electrons.hipo", oxihipo::Compression::Lz4PerColumn)?;
 ```
 
+`skim_tagged` is the same copy but **retags** each event from a classifier
+closure (and records an output tag registry) — the way to *write* a tagged DST.
+See [Writing · Tagging events](./writing.md#tagging-events).
+
 See [Writing](./writing.md) for full control over the output.

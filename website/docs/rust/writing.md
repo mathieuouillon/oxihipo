@@ -104,6 +104,32 @@ Python. The registry is additive (readers that don't know it skip it) and `skim`
 copies it through, so a tagged DST stays self-describing. Writing no registry
 leaves the output byte-for-byte as before.
 
+### Writing tagged DSTs
+
+To *produce* a tagged file — classify each event and stamp the result — use
+`Chain::skim_tagged`. It copies the (filtered) chain like `skim`, but a
+classifier closure computes each event's new `EH_TAG`, and `tag_names` records
+the output registry so the DST rereads by name. This closes the
+select→label→write→reread loop:
+
+```rust
+oxihipo::tag_flags! { pub Cat { Dvcs = 0, Sidis = 1 } }
+
+Chain::open("run.hipo")?
+    .with_filter(Filter::require(["REC::Particle"]))?     // select
+    .skim_tagged("dvcs.hipo", Compression::Lz4PerColumn, Cat::NAMES, |ev| {
+        if is_dvcs(ev) { Cat::Dvcs } else { Cat::Sidis }  // label
+    })?;                                                  // write
+
+// reread: Chain::open("dvcs.hipo")? carries the Cat registry, so
+// Filter::event_tag_any(Cat::Dvcs) — or filtered(event_tag="dvcs") in Python.
+```
+
+The retag touches only the event header; banks are copied through unchanged, so
+it is as cheap as a plain skim. The source file's own registry is *not* carried
+over (the closure defines a fresh scheme). A runnable end-to-end demo is
+[`examples/tag_and_skim.rs`](https://github.com/mathieuouillon/oxihipo/blob/main/examples/tag_and_skim.rs).
+
 ## Array columns
 
 A column can hold a **fixed-length array** instead of a scalar. In schema text a

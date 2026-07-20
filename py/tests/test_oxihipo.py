@@ -524,3 +524,27 @@ def test_event_tag_filter_by_name_survives_workers(chain):
     single = ak.to_list(g.arrays("REC::Event", ["evno"]).evno)
     par = ak.to_list(g.arrays("REC::Event", ["evno"], workers=2).evno)
     assert par == single == [[1000], [1003], [1006]]
+
+
+def test_skim_tagged(chain, tmp_path):
+    # Retag each event with a fresh scheme (even → dvcs, odd → sidis), record a
+    # registry, and reread the tagged DST by name — the whole loop.
+    ak = pytest.importorskip("awkward")
+    n = chain.num_entries
+    tags = np.array([1 if i % 2 == 0 else 2 for i in range(n)], dtype=np.uint32)
+    dst = str(tmp_path / "tagged.hipo")
+    summary = chain.skim(dst, tags=tags, tag_names={"dvcs": 0, "sidis": 1})
+    assert summary.events == n
+
+    out = oxihipo.open(dst)
+    assert out.tag_names == {"dvcs": 0, "sidis": 1}          # self-describing
+    assert out.event_tags().tolist() == tags.tolist()         # retagged
+    # banks copied through intact
+    assert ak.to_list(out.arrays("REC::Event", ["evno"]).evno) == [[1000 + i] for i in range(n)]
+    # rereads by name: dvcs bit → even events
+    dvcs = ak.to_list(out.filtered(event_tag="dvcs").array("REC::Event", "evno"))
+    assert dvcs == [[1000 + i] for i in range(n) if i % 2 == 0]
+
+    # a tags length that doesn't match the events written is a ValueError
+    with pytest.raises(ValueError):
+        chain.skim(str(tmp_path / "bad.hipo"), tags=np.array([1, 2], dtype=np.uint32))

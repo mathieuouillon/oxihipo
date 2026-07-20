@@ -3,7 +3,7 @@
 //! the Pythonic `array`/`arrays`/`numpy` ergonomics and Awkward assembly live
 //! in the pure-Python `oxihipo` package layered on top of `read_columns`.
 
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use oxihipo::{ColumnData, DataType};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -284,17 +284,55 @@ impl PyChain {
     /// Copy the (filtered) chain to `dst`, re-compressing with `compression`
     /// (`"none"`, `"lz4"`, `"lz4best"`, `"gzip"`, `"lz4perbank"`,
     /// `"lz4percolumn"`). Returns `{"events", "records", "bytes"}`.
-    #[pyo3(signature = (dst, compression="lz4percolumn"))]
+    ///
+    /// With `tags` (a `uint32` array aligned 1:1 with the events this chain
+    /// yields — same order/length as `event_tags()` / `arrays()`), each event's
+    /// per-event tag is **overwritten** with the corresponding value, producing
+    /// a tagged DST; `tag_names` (a `[(name, bit)]` list) records the output's
+    /// tag registry so the DST is self-describing. A length mismatch raises
+    /// `ValueError`.
+    #[pyo3(signature = (dst, compression="lz4percolumn", tags=None, tag_names=None))]
     fn skim<'py>(
         &self,
         py: Python<'py>,
         dst: String,
         compression: &str,
+        tags: Option<PyReadonlyArray1<'py, u32>>,
+        tag_names: Option<Vec<(String, u32)>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let comp = parse_compression(compression)?;
-        let summary = py
-            .detach(|| self.inner.skim(&dst, comp))
-            .map_err(to_pyerr)?;
+        let summary = match tags {
+            None => py
+                .detach(|| self.inner.skim(&dst, comp))
+                .map_err(to_pyerr)?,
+            Some(arr) => {
+                // Copy the tags out so the heavy skim runs with the GIL released
+                // and no borrow into the NumPy buffer crosses the boundary.
+                let tags_vec: Vec<u32> = arr.as_slice()?.to_vec();
+                let tags_len = tags_vec.len();
+                let names_owned: Vec<(String, u32)> = tag_names.unwrap_or_default();
+                let summary = py
+                    .detach(|| {
+                        let names: Vec<(&str, u32)> =
+                            names_owned.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+                        let mut i = 0usize;
+                        self.inner.skim_tagged(&dst, comp, &names, |_ev| {
+                            let t = tags_vec.get(i).copied().unwrap_or(0);
+                            i += 1;
+                            t
+                        })
+                    })
+                    .map_err(to_pyerr)?;
+                if summary.events as usize != tags_len {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "tags has {tags_len} entries but the (filtered) chain yields {} events; \
+                         compute tags from the same chain/filter (e.g. f.event_tags() or f.arrays())",
+                        summary.events
+                    )));
+                }
+                summary
+            }
+        };
         let out = PyDict::new(py);
         out.set_item("events", summary.events)?;
         out.set_item("records", summary.records)?;

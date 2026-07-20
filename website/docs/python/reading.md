@@ -142,6 +142,25 @@ Names resolve in the parent process, so `workers=` reads inherit the filter for
 free. An unknown name raises `KeyError`. A file written without a registry has
 an empty `f.tag_names`, and the numeric forms above still work.
 
+### Tag-and-skim
+
+To *write* a tagged file, compute one `uint32` tag per event (vectorized, with
+NumPy/Awkward over the columns you read) and pass it to `skim` as `tags=`, with
+`tag_names=` to record the registry. The `tags` array must align 1:1 with the
+events the chain yields — same order and length as `event_tags()` / `arrays()`:
+
+```python
+f = ox.open("run.hipo").filtered(require=["REC::Particle"])
+p = f.arrays("REC::Particle", ["px"])
+tags = np.where(p.px[:, 0] > 2, 1, 0).astype(np.uint32)   # one per event
+f.skim("dvcs.hipo", tags=tags, tag_names={"dvcs": 0})     # label + write
+
+ox.open("dvcs.hipo").filtered(event_tag="dvcs")           # reread by name
+```
+
+This closes the select→label→write→reread loop. A `tags` length that doesn't
+match the events written raises `ValueError`.
+
 ## Resource management
 
 The chain closes itself when it goes out of scope — the core reads with

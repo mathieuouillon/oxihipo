@@ -9,7 +9,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxihipo::{
-    Chain, Compression, DataType, Dict, Filter, Result, Schema, TagRegistry, TagSet, Writer,
+    Chain, Compression, DataType, Dict, EventCtx, Filter, Result, Schema, TagRegistry, TagSet,
+    Writer,
 };
 
 // Named flags via the `tag_flags!` macro — the Phase 2 ergonomics.
@@ -356,4 +357,82 @@ fn tag_registry_persists_and_survives_skim() {
     let plain = dir.path().join("plain.hipo");
     write_tagged(&plain, Compression::Lz4PerColumn).unwrap();
     assert!(Chain::open(&plain).unwrap().tag_registry().is_empty());
+}
+
+/// Phase 3: `skim_tagged` retags each surviving event via a classifier and
+/// records a fresh output registry — the select→label→write→reread loop.
+#[test]
+fn skim_tagged_retags_records_registry_and_rereads_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let want_reg = TagRegistry::from_names(Cat::NAMES.iter().copied());
+
+    // A fresh scheme, unrelated to the source tags: carries REC::Particle
+    // (evno even) → Dvcs, else Sidis. Non-capturing ⇒ `Copy`, reusable.
+    let classify = |ev: &EventCtx<'_>| -> TagSet {
+        if ev.bank("REC::Particle").is_some() {
+            Cat::Dvcs
+        } else {
+            Cat::Sidis
+        }
+    };
+    let new_tag = |evno: i64| if has_particle(evno) { 1 } else { 2 }; // Dvcs=1, Sidis=2
+
+    for (name, comp) in FORMATS {
+        let src_path = dir.path().join(format!("src_{name}.hipo"));
+        write_tagged(&src_path, *comp).unwrap();
+        assert!(Chain::open(&src_path).unwrap().tag_registry().is_empty());
+
+        let dst = dir.path().join(format!("tagged_{name}.hipo"));
+        let summary = Chain::open(&src_path)
+            .unwrap()
+            .skim_tagged(&dst, Compression::Lz4PerColumn, Cat::NAMES, classify)
+            .unwrap();
+        assert_eq!(summary.events, N as u64, "{name}: every event copied");
+
+        let out = Chain::open(&dst).unwrap();
+        // Self-describing: the fresh registry is recorded (source had none)…
+        assert_eq!(out.tag_registry(), &want_reg, "{name}: registry recorded");
+        assert_eq!(out.tag_registry().mask("Dvcs"), Some(1));
+        // …the new per-event tags are written…
+        let want_tags: Vec<u32> = (0..N).map(new_tag).collect();
+        assert_eq!(
+            out.event_tags(None, 1).unwrap(),
+            want_tags,
+            "{name}: events retagged"
+        );
+        // …banks are copied through intact…
+        assert_eq!(
+            surviving_evnos(&out),
+            (0..N).collect::<Vec<_>>(),
+            "{name}: banks intact"
+        );
+        // …and the DST rereads by name.
+        let mask = out.tag_registry().mask("Dvcs").unwrap();
+        let dvcs = out
+            .clone()
+            .with_filter(Filter::new().event_tag_any(mask))
+            .unwrap();
+        assert_eq!(
+            surviving_evnos(&dvcs),
+            (0..N).filter(|e| has_particle(*e)).collect::<Vec<_>>(),
+            "{name}: filter DST by name-resolved mask"
+        );
+    }
+
+    // A source filter applies *before* retagging: only tag-1 survivors
+    // (evno % 3 == 0) reach the DST, and `&[]` records no registry.
+    let src_path = dir.path().join("src_for_filter.hipo");
+    write_tagged(&src_path, Compression::None).unwrap();
+    let dst = dir.path().join("filtered_tagged.hipo");
+    let summary = Chain::open(&src_path)
+        .unwrap()
+        .with_filter(Filter::new().event_tag([1_u32]))
+        .unwrap()
+        .skim_tagged(&dst, Compression::Lz4PerColumn, &[], classify)
+        .unwrap();
+    let survivors: Vec<i64> = (0..N).filter(|e| tag_of(*e) == 1).collect();
+    assert_eq!(summary.events, survivors.len() as u64);
+    let out = Chain::open(&dst).unwrap();
+    assert!(out.tag_registry().is_empty(), "no names → empty registry");
+    assert_eq!(surviving_evnos(&out), survivors);
 }

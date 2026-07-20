@@ -724,10 +724,40 @@ class Chain:
                 mask |= int(x)
         return mask
 
-    def skim(self, dst: StrPath, compression: str = "lz4percolumn") -> SkimSummary:
+    def skim(
+        self,
+        dst: StrPath,
+        compression: str = "lz4percolumn",
+        *,
+        tags: "np.ndarray | Sequence[int] | None" = None,
+        tag_names: dict[str, int] | None = None,
+    ) -> SkimSummary:
         """Copy the (filtered) chain to ``dst``, re-compressing. Returns a
-        :class:`SkimSummary` (``events`` / ``records`` / ``bytes``)."""
-        d = self._reader().skim(str(dst), compression)
+        :class:`SkimSummary` (``events`` / ``records`` / ``bytes``).
+
+        Pass ``tags`` — a ``uint32`` array aligned 1:1 with the events this chain
+        yields (same order and length as :meth:`event_tags` / :meth:`arrays`) —
+        to **retag** each event as it is written, producing a tagged DST.
+        ``tag_names={"dvcs": 0, ...}`` records the output's tag registry so the
+        result is self-describing. Together they close the
+        select→label→write→reread loop::
+
+            f = ox.open("run.hipo").filtered(require=["REC::Particle"])
+            p = f.arrays("REC::Particle", ["px"])
+            tags = np.where(p.px[:, 0] > 2, 1, 0).astype(np.uint32)  # one per event
+            f.skim("dvcs.hipo", tags=tags, tag_names={"dvcs": 0})
+            ox.open("dvcs.hipo").filtered(event_tag="dvcs")          # rereads by name
+
+        A ``tags`` length that doesn't match the events written raises
+        ``ValueError``."""
+        if tags is None:
+            d = self._reader().skim(str(dst), compression)
+        else:
+            import numpy as np
+
+            t = np.ascontiguousarray(tags, dtype=np.uint32)
+            names = list(tag_names.items()) if tag_names else None
+            d = self._reader().skim(str(dst), compression, t, names)
         return SkimSummary(d["events"], d["records"], d["bytes"])
 
     def __getitem__(self, key: str | tuple[str, str | Sequence[str]]):
