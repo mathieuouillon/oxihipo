@@ -124,23 +124,16 @@ pub enum CompressionType {
     Lz4 = 1,
     Lz4Best = 2,
     Gzip = 3,
-    /// Records whose payload is split into multiple independently-LZ4-
-    /// compressed chunks. Layout described in `wire/record.rs`. Enables
-    /// intra-record parallel decompression and (future) partial decode.
-    /// **Not readable by the C++ `hipo4` reader** — new files written
-    /// with this tag are a Rust-only format extension.
-    Lz4Chunked = 4,
-    /// Records whose payload is split into one LZ4 stream per bank
-    /// type, plus a directory of which events have which banks. Layout
-    /// described in `wire/by_bank.rs`. Enables true partial
-    /// decompression — `ev.bank("name")` inflates only the requested
-    /// bank's stream. **Not readable by the C++ `hipo4` reader.**
-    Lz4ByBank = 5,
-    /// Version 2 of the by-bank format: the directory carries an explicit
+    // Tags 4 (`Lz4Chunked`) and 5 (`Lz4ByBank` v1) were removed — they are
+    // superseded by `Lz4ByBankV2` and `Lz4PerColumn`. Files carrying those
+    // tags are rejected at header parse (`from_word` returns `None`).
+    /// By-bank layout: one LZ4-HC stream per bank type, plus a directory of
+    /// which events have which banks. The directory carries an
     /// extension-format-version byte and is itself LZ4-compressed (the
-    /// per-event size matrix is highly redundant), shrinking the on-disk
-    /// directory. Bank streams are unchanged. Layout in `wire/by_bank.rs`.
-    /// **Not readable by the C++ `hipo4` reader.**
+    /// per-event size matrix is highly redundant). Enables true partial
+    /// decompression — `ev.bank("name")` inflates only the requested bank's
+    /// stream. Layout in `wire/by_bank.rs`. **Not readable by the C++ `hipo4`
+    /// reader.**
     Lz4ByBankV2 = 6,
     /// Per-*column* layout: one LZ4-HC stream per `(bank, column)`, laid
     /// out cross-event contiguous (all events' `px`, then all `py`, …).
@@ -158,18 +151,17 @@ impl CompressionType {
             1 => Some(Self::Lz4),
             2 => Some(Self::Lz4Best),
             3 => Some(Self::Gzip),
-            4 => Some(Self::Lz4Chunked),
-            5 => Some(Self::Lz4ByBank),
+            // 4/5 (removed Lz4Chunked / Lz4ByBank v1) → unknown ⇒ rejected.
             6 => Some(Self::Lz4ByBankV2),
             7 => Some(Self::Lz4PerColumn),
             _ => None,
         }
     }
 
-    /// True for both by-bank formats (v1 tag 5 and v2 tag 6) — the
-    /// reader treats them identically except for directory decoding.
+    /// True for the by-bank format (v2, tag 6) — decoded through
+    /// `ByBankRecord::parse` rather than the whole-record path.
     pub const fn is_by_bank(self) -> bool {
-        matches!(self, Self::Lz4ByBank | Self::Lz4ByBankV2)
+        matches!(self, Self::Lz4ByBankV2)
     }
 
     /// True for the per-column format (tag 7), which the reader decodes

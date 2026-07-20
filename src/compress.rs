@@ -88,11 +88,9 @@ pub fn decompress(
         }
         CompressionType::Lz4
         | CompressionType::Lz4Best
-        | CompressionType::Lz4Chunked
-        | CompressionType::Lz4ByBank
         | CompressionType::Lz4ByBankV2
         | CompressionType::Lz4PerColumn => {
-            // `Lz4Chunked` / `Lz4ByBank` reach this point only when their
+            // The by-bank / per-column formats reach this point only when their
             // record decoders hand us a single inner LZ4 block; their
             // record-level wrappers always pass `Lz4` explicitly. Routing
             // the tags through here keeps the match exhaustive.
@@ -235,8 +233,6 @@ pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) 
         }
         CompressionType::Lz4
         | CompressionType::Lz4Best
-        | CompressionType::Lz4Chunked
-        | CompressionType::Lz4ByBank
         | CompressionType::Lz4ByBankV2
         | CompressionType::Lz4PerColumn => {
             if expected == 0 {
@@ -319,14 +315,12 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
         }
         CompressionType::Lz4
         | CompressionType::Lz4Best
-        | CompressionType::Lz4Chunked
-        | CompressionType::Lz4ByBank
         | CompressionType::Lz4ByBankV2
         | CompressionType::Lz4PerColumn => {
-            // `Lz4Chunked` / `Lz4ByBank` are record-level format extensions;
+            // The by-bank / per-column formats are record-level extensions;
             // their inner compression units still flow through this same
-            // code path with `Lz4`. The tags route here to keep the match
-            // exhaustive.
+            // code path with `Lz4`/`Lz4Best`. The tags route here to keep the
+            // match exhaustive.
             //
             // Pure-Rust `lz4_flex` doesn't expose an HC (high-compression)
             // mode, so both Lz4 and Lz4Best produce the same output there.
@@ -539,39 +533,6 @@ mod tests {
         #[test]
         fn proptest_gzip_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..16384)) {
             round_trip(CompressionType::Gzip, &data);
-        }
-
-        // Chunked-record round-trip: build a chunked record, parse it
-        // back through the high-level Record API, and assert every
-        // event's bytes match.
-        #[test]
-        fn proptest_lz4_chunked_roundtrip(
-            events in proptest::collection::vec(
-                proptest::collection::vec(any::<u8>(), 0..512),
-                1..32,
-            ),
-            events_per_chunk in 1u32..16,
-        ) {
-            let refs: Vec<&[u8]> = events.iter().map(|e| e.as_slice()).collect();
-            let mut payload_buf = Vec::new();
-            let mut compress_buf = Vec::new();
-            let raw = crate::write::record::build_record_bytes(
-                &refs,
-                &crate::schema::Dict::default(),
-                0,
-                0,
-                crate::write::Compression::Lz4Chunked { events_per_chunk },
-                1,
-                &mut payload_buf,
-                &mut compress_buf,
-            ).unwrap();
-
-            let mut rec = crate::wire::record::Record::new();
-            rec.load(&raw).unwrap();
-            prop_assert_eq!(rec.event_count() as usize, events.len());
-            for (i, expected) in events.iter().enumerate() {
-                prop_assert_eq!(rec.event(i as u32).unwrap(), expected.as_slice());
-            }
         }
     }
 }

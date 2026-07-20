@@ -7,7 +7,7 @@
 //!    decompressed event bytes (EventHeader + concatenated bank
 //!    structures). `bank(name)` walks the bytes to find the requested
 //!    bank.
-//! 2. **`ByBank`** — `Lz4ByBank` path. Holds an `Arc<ByBankRecord>` plus
+//! 2. **`ByBank`** — by-bank path. Holds an `Arc<ByBankRecord>` plus
 //!    an event index. `bank(name)` looks up the bank's lazy-decompressed
 //!    stream and returns a `Bank<'_>` view directly. Banks the user
 //!    never asks for stay compressed.
@@ -120,7 +120,7 @@ impl OwnedEvent {
         }
     }
 
-    /// Construct from a shared `Lz4ByBank` record + an event index.
+    /// Construct from a shared by-bank record + an event index.
     /// Banks decompress lazily on first access.
     #[inline]
     pub(crate) fn by_bank(record: Arc<ByBankRecord>, event_idx: u32, dict: Arc<Dict>) -> Self {
@@ -514,7 +514,7 @@ impl OwnedEvent {
 }
 
 /// Build a synthetic EventHeader + BankStructure blob for one event of
-/// an `Lz4ByBank` record. Decompresses every bank that the event has —
+/// a by-bank record. Decompresses every bank that the event has —
 /// expensive, used only when callers explicitly ask for raw bytes
 /// (e.g. `OwnedEvent::bytes()`, `ev.structures()`, recook flows).
 fn synthesize_event_bytes(record: &ByBankRecord, event_idx: u32) -> Vec<u8> {
@@ -557,7 +557,7 @@ fn synthesize_event_bytes(record: &ByBankRecord, event_idx: u32) -> Vec<u8> {
             // would already have triggered at iterator construction.
             let stream = record
                 .bank_stream(b)
-                .expect("Lz4ByBank: bank stream decompression failed during synthesis");
+                .expect("by-bank: bank stream decompression failed during synthesis");
             let range = record.bank_byte_range(event_idx, b);
             out.extend_from_slice(&stream[range]);
         }

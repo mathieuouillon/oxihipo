@@ -15,48 +15,29 @@ use crate::wire::record_header::RecordHeader;
 
 /// Compression mode for HIPO records.
 ///
-/// This enum is **writer-facing**; it may carry parameters
-/// (`events_per_chunk`) that aren't part of the on-disk record header.
-/// The wire-level compression tag is derived from this enum by the
-/// record builder.
+/// The wire-level compression tag is derived from this enum by the record
+/// builder.
 ///
-/// - `None` / `Lz4` / `Lz4Best` / `Gzip` are interchangeable with the
-///   wire tag of the same name, and produce files readable by the C++
-///   `hipo4` reader.
-/// - `Lz4Chunked` is a Rust-only format extension (record payload split
-///   into multiple independently-LZ4-compressed chunks) that enables
-///   intra-record parallel decompression.
-/// - `Lz4ByBank` is a Rust-only format extension (record payload split
-///   into one LZ4 stream per bank type) that enables true partial
-///   decompression — `ev.bank("name")` inflates only the requested
-///   bank's stream, leaving every other bank compressed.
+/// - `None` / `Lz4` / `Lz4Best` / `Gzip` are interchangeable with the wire
+///   tag of the same name, and produce files readable by the C++ `hipo4`
+///   reader.
+/// - `Lz4ByBankV2` and `Lz4PerColumn` are Rust-only format extensions that
+///   enable true partial decompression — `ev.bank("name")` (or one column)
+///   inflates only the stream it needs, leaving the rest compressed.
 ///
-/// **Files written with `Lz4Chunked` or `Lz4ByBank` are not readable
-/// by the C++ `hipo4` reader.**
+/// **Files written with `Lz4ByBankV2` or `Lz4PerColumn` are not readable by
+/// the C++ `hipo4` reader.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
     None,
     Lz4,
     Lz4Best,
     Gzip,
-    /// Split each record's events into groups of `events_per_chunk` and
-    /// compress every group as an independent LZ4 block. Reader is then
-    /// free to decompress chunks in parallel.
-    Lz4Chunked {
-        events_per_chunk: u32,
-    },
-    /// Store each bank type as its own LZ4 stream within the record,
-    /// plus an event×bank presence table. Readers decompress only the
-    /// bank streams they actually touch. Fast to write (default LZ4); see
-    /// [`Self::Lz4ByBankV2`] for a smaller, slower-to-write variant.
-    Lz4ByBank,
-    /// Version 2 of [`Self::Lz4ByBank`], tuned for the best ratio: each bank
-    /// stream is LZ4-HC compressed — per-bank grouping plus HC compounds to
-    /// beat whole-record [`Self::Lz4Best`] — and the directory is prefixed
-    /// with an extension-format-version byte and itself LZ4-compressed (the
-    /// per-event size matrix is highly redundant). Selective reads stay as
-    /// fast as v1; writes are slower (HC). The reader handles both v1 and v2
-    /// transparently.
+    /// Store each bank type as its own LZ4-HC stream within the record, plus
+    /// an event×bank presence directory (itself LZ4-compressed, prefixed with
+    /// an extension-format-version byte). Readers decompress only the bank
+    /// streams they actually touch; per-bank grouping plus HC beats
+    /// whole-record [`Self::Lz4Best`]. Writes are slower (HC).
     Lz4ByBankV2,
     /// Per-*column* layout: within each bank, every column is stored as its
     /// own LZ4-HC stream laid out cross-event contiguous (all events' `px`,
@@ -80,8 +61,6 @@ impl Compression {
             Self::Lz4 => CompressionType::Lz4,
             Self::Lz4Best => CompressionType::Lz4Best,
             Self::Gzip => CompressionType::Gzip,
-            Self::Lz4Chunked { .. } => CompressionType::Lz4Chunked,
-            Self::Lz4ByBank => CompressionType::Lz4ByBank,
             Self::Lz4ByBankV2 => CompressionType::Lz4ByBankV2,
             Self::Lz4PerColumn => CompressionType::Lz4PerColumn,
         }
@@ -174,23 +153,6 @@ pub(crate) fn build_record_bytes(
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
     match compression {
-        Compression::Lz4Chunked { events_per_chunk } => build_chunked_record_bytes(
-            events,
-            user_word_1,
-            user_word_2,
-            events_per_chunk,
-            record_number,
-            payload_buf,
-            compress_buf,
-        ),
-        Compression::Lz4ByBank => build_by_bank_record_bytes(
-            events,
-            user_word_1,
-            user_word_2,
-            record_number,
-            payload_buf,
-            compress_buf,
-        ),
         Compression::Lz4ByBankV2 => build_by_bank_v2_record_bytes(
             events,
             user_word_1,
@@ -290,274 +252,7 @@ fn build_single_block_record_bytes(
     Ok(out)
 }
 
-/// Chunked-LZ4 record path.
-///
-/// Compressed payload layout (all `u32` little-endian):
-///
-/// ```text
-/// +-- compressed payload section ----------------+
-/// | u32 num_chunks (N)                            |
-/// | u32 events_per_chunk (E)        last < E ok   |
-/// | E_total × u32 event_sizes[]     E_total =     |
-/// |                                  event_count  |
-/// |                                  uncompressed |
-/// | N × u32 compressed_chunk_sizes                |
-/// | N × u32 decompressed_chunk_sizes              |
-/// | concatenated LZ4 chunk payloads               |
-/// +-----------------------------------------------+
-/// ```
-///
-/// The `event_sizes[]` array sits *outside* any LZ4 stream, so a reader
-/// can compute every event's byte range without inflating anything —
-/// that's the property that enables future partial decompression.
-fn build_chunked_record_bytes(
-    events: &[&[u8]],
-    user_word_1: u64,
-    user_word_2: u64,
-    events_per_chunk: u32,
-    record_number: u32,
-    payload_buf: &mut Vec<u8>,
-    compress_buf: &mut Vec<u8>,
-) -> Result<Vec<u8>> {
-    if events_per_chunk == 0 {
-        return Err(HipoError::Compression(
-            "Lz4Chunked: events_per_chunk must be >= 1",
-        ));
-    }
-
-    let event_count = events.len() as u32;
-    let e_per = events_per_chunk as usize;
-    let num_chunks = events.len().div_ceil(e_per);
-
-    // Per-event uncompressed sizes — the canonical index array, written
-    // *outside* any LZ4 stream so a reader can compute event byte ranges
-    // without inflating anything.
-    let event_sizes: Vec<u32> = events.iter().map(|e| e.len() as u32).collect();
-
-    // Compress each chunk independently; record the table entries.
-    let mut compressed_chunks: Vec<Vec<u8>> = Vec::with_capacity(num_chunks);
-    let mut decompressed_sizes: Vec<u32> = Vec::with_capacity(num_chunks);
-    let mut compressed_sizes: Vec<u32> = Vec::with_capacity(num_chunks);
-
-    for group in events.chunks(e_per) {
-        // Concatenate the group's events into payload_buf (reused).
-        payload_buf.clear();
-        let group_bytes: usize = group.iter().map(|e| e.len()).sum();
-        payload_buf.reserve(group_bytes);
-        for ev in group {
-            payload_buf.extend_from_slice(ev);
-        }
-
-        // Compress this chunk as a single LZ4 block.
-        compress_buf.clear();
-        let n = compress(CompressionType::Lz4, payload_buf, compress_buf)?;
-        compressed_sizes.push(n as u32);
-        decompressed_sizes.push(group_bytes as u32);
-        compressed_chunks.push(compress_buf[..n].to_vec());
-    }
-
-    // Assemble the compressed payload section into payload_buf (reused
-    // again — we no longer need the per-chunk uncompressed concat).
-    let table_bytes = 8 // num_chunks + events_per_chunk
-        + 4 * event_sizes.len()
-        + 4 * compressed_sizes.len()
-        + 4 * decompressed_sizes.len();
-    let chunk_bytes: usize = compressed_chunks.iter().map(|c| c.len()).sum();
-    let section_len = table_bytes + chunk_bytes;
-
-    payload_buf.clear();
-    payload_buf.reserve(section_len);
-    payload_buf.extend_from_slice(&(num_chunks as u32).to_le_bytes());
-    payload_buf.extend_from_slice(&events_per_chunk.to_le_bytes());
-    for s in &event_sizes {
-        payload_buf.extend_from_slice(&s.to_le_bytes());
-    }
-    for s in &compressed_sizes {
-        payload_buf.extend_from_slice(&s.to_le_bytes());
-    }
-    for s in &decompressed_sizes {
-        payload_buf.extend_from_slice(&s.to_le_bytes());
-    }
-    for chunk in &compressed_chunks {
-        payload_buf.extend_from_slice(chunk);
-    }
-    debug_assert_eq!(payload_buf.len(), section_len);
-
-    // 4-byte align the section length (compressed-data padding).
-    let pad = (4 - (section_len % 4)) % 4;
-    let compressed_with_pad = section_len + pad;
-    payload_buf.extend(std::iter::repeat_n(0u8, pad));
-
-    let event_count_real = event_count;
-    let data_length: u32 = decompressed_sizes.iter().sum();
-    let index_array_length = event_count_real * 4;
-
-    let header_length = RECORD_HEADER_SIZE as u32;
-    let total_bytes = header_length as u64 + compressed_with_pad as u64;
-    let mut bit_info: u32 = HIPO_VERSION;
-    bit_info |= ((pad as u32) & BITINFO_PAD_MASK) << BITINFO_PAD3_SHIFT;
-    bit_info |= 4 << BITINFO_HEADER_TYPE_SHIFT;
-
-    let header = RecordHeader {
-        record_length: total_bytes,
-        record_number,
-        header_length,
-        event_count: event_count_real,
-        index_array_length,
-        bit_info,
-        user_header_length: 0,
-        data_length,
-        compressed_data_length: compressed_with_pad as u32,
-        compression: CompressionType::Lz4Chunked,
-        user_word_1,
-        user_word_2,
-        endianness: Endianness::Little,
-        user_header_padding: 0,
-        data_padding: 0,
-        compressed_data_padding: pad as u8,
-    };
-
-    let mut out = vec![0u8; total_bytes as usize];
-    let hdr: &mut [u8; RECORD_HEADER_SIZE] = (&mut out[..RECORD_HEADER_SIZE])
-        .try_into()
-        .map_err(|_| HipoError::Compression("record header slice"))?;
-    header.write(hdr);
-    out[RECORD_HEADER_SIZE..].copy_from_slice(&payload_buf[..compressed_with_pad]);
-    Ok(out)
-}
-
-/// By-bank record path.
-///
-/// Compressed payload layout (all `u32` little-endian unless noted):
-///
-/// ```text
-/// +-- compressed payload section -------------------+
-/// | u32 num_banks (B)                               |
-/// | u32 event_count (E)                             |   redundant w/ header; self-describing
-/// | B × { u16 group, u8 item, u8 data_type }        |   bank descriptors (4 B each)
-/// | B × u32 compressed_bank_sizes                   |
-/// | B × u32 decompressed_bank_sizes                 |
-/// | E × u32 event_tags                              |   EventHeader.tag for each event
-/// | E × ceil(B/8) bytes presence_matrix             |   bit[e,b]=1 iff event e has bank b
-/// | B × E × u32 event_bank_sizes                    |   per-event byte size of each bank
-/// |                                                  |   (0 if event lacks the bank)
-/// | concat B × LZ4 bank streams                     |   bank b stream = LZ4(concat of bank-b
-/// |                                                  |   data bytes across all events that have
-/// |                                                  |   it, in event order, no padding)
-/// +--------------------------------------------------+
-/// ```
-///
-/// On read, the directory is parsed eagerly but bank streams stay
-/// compressed until `ev.bank(name)` requests one — that's the partial-
-/// decompression hook.
-fn build_by_bank_record_bytes(
-    events: &[&[u8]],
-    user_word_1: u64,
-    user_word_2: u64,
-    record_number: u32,
-    payload_buf: &mut Vec<u8>,
-    compress_buf: &mut Vec<u8>,
-) -> Result<Vec<u8>> {
-    let ByBankParts {
-        num_banks,
-        event_count,
-        e_count,
-        descriptors,
-        compressed_streams,
-        compressed_sizes,
-        decompressed_sizes,
-        event_tags,
-        presence,
-        bytes_per_row,
-        sizes,
-    } = build_by_bank_parts(events, compress_buf, false)?;
-
-    // ---- 5. Assemble the payload section. -----------------------------
-    let directory_bytes = 8                       // num_banks + event_count
-        + 4 * num_banks                            // descriptors
-        + 4 * num_banks                            // compressed sizes
-        + 4 * num_banks; // decompressed sizes
-    let per_event_bytes = 4 * e_count              // tags
-        + e_count * bytes_per_row; // presence
-    let event_bank_sizes_bytes = 4 * num_banks * e_count;
-    let stream_bytes: usize = compressed_streams.iter().map(|s| s.len()).sum();
-    let section_len = directory_bytes + per_event_bytes + event_bank_sizes_bytes + stream_bytes;
-
-    payload_buf.clear();
-    payload_buf.reserve(section_len);
-    payload_buf.extend_from_slice(&(num_banks as u32).to_le_bytes());
-    payload_buf.extend_from_slice(&event_count.to_le_bytes());
-    for &(g, i, t) in &descriptors {
-        payload_buf.extend_from_slice(&g.to_le_bytes());
-        payload_buf.push(i);
-        payload_buf.push(t);
-    }
-    for s in &compressed_sizes {
-        payload_buf.extend_from_slice(&s.to_le_bytes());
-    }
-    for s in &decompressed_sizes {
-        payload_buf.extend_from_slice(&s.to_le_bytes());
-    }
-    for t in &event_tags {
-        payload_buf.extend_from_slice(&t.to_le_bytes());
-    }
-    payload_buf.extend_from_slice(&presence);
-    for row in &sizes {
-        for &s in row {
-            payload_buf.extend_from_slice(&s.to_le_bytes());
-        }
-    }
-    for stream in &compressed_streams {
-        payload_buf.extend_from_slice(stream);
-    }
-    debug_assert_eq!(payload_buf.len(), section_len);
-
-    // ---- 6. 4-byte align + record header. -----------------------------
-    let pad = (4 - (section_len % 4)) % 4;
-    let compressed_with_pad = section_len + pad;
-    payload_buf.extend(std::iter::repeat_n(0u8, pad));
-
-    // `data_length` reports the sum of decompressed bank-stream bytes.
-    // The Lz4ByBank decoder uses the per-bank fields directly; this is
-    // kept for header consistency (informational).
-    let data_length: u32 = decompressed_sizes.iter().sum();
-    let index_array_length = event_count * 4;
-
-    let header_length = RECORD_HEADER_SIZE as u32;
-    let total_bytes = header_length as u64 + compressed_with_pad as u64;
-    let mut bit_info: u32 = HIPO_VERSION;
-    bit_info |= ((pad as u32) & BITINFO_PAD_MASK) << BITINFO_PAD3_SHIFT;
-    bit_info |= 4 << BITINFO_HEADER_TYPE_SHIFT;
-
-    let header = RecordHeader {
-        record_length: total_bytes,
-        record_number,
-        header_length,
-        event_count,
-        index_array_length,
-        bit_info,
-        user_header_length: 0,
-        data_length,
-        compressed_data_length: compressed_with_pad as u32,
-        compression: CompressionType::Lz4ByBank,
-        user_word_1,
-        user_word_2,
-        endianness: Endianness::Little,
-        user_header_padding: 0,
-        data_padding: 0,
-        compressed_data_padding: pad as u8,
-    };
-
-    let mut out = vec![0u8; total_bytes as usize];
-    let hdr: &mut [u8; RECORD_HEADER_SIZE] = (&mut out[..RECORD_HEADER_SIZE])
-        .try_into()
-        .map_err(|_| HipoError::Compression("record header slice"))?;
-    header.write(hdr);
-    out[RECORD_HEADER_SIZE..].copy_from_slice(&payload_buf[..compressed_with_pad]);
-    Ok(out)
-}
-
-/// Per-bank directory pieces shared by the v1 and v2 by-bank builders.
+/// Per-bank directory pieces produced by the by-bank builder.
 /// `compressed_streams[b]` is the LZ4 block for bank `b`'s concatenated
 /// data; `sizes[b][e]` is the (uncompressed) byte size of bank `b` in
 /// event `e`.
@@ -575,15 +270,10 @@ struct ByBankParts {
     sizes: Vec<Vec<u32>>,
 }
 
-/// Steps 1–4 shared by both by-bank builders: walk events into per-bank
-/// tables, sort banks for determinism, compress each bank stream, pack the
-/// presence matrix. With `high_compression` the streams are LZ4-HC
-/// (`Lz4ByBankV2`, best ratio); otherwise fast default LZ4 (`Lz4ByBank` v1).
-fn build_by_bank_parts(
-    events: &[&[u8]],
-    compress_buf: &mut Vec<u8>,
-    high_compression: bool,
-) -> Result<ByBankParts> {
+/// Steps 1–4 of the by-bank builder: walk events into per-bank tables, sort
+/// banks for determinism, LZ4-HC-compress each bank stream, pack the presence
+/// matrix.
+fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<ByBankParts> {
     let event_count = events.len() as u32;
     let e_count = events.len();
 
@@ -642,16 +332,10 @@ fn build_by_bank_parts(
             continue;
         }
         compress_buf.clear();
-        // `Lz4ByBankV2` HC-compresses each bank stream for a better ratio:
-        // per-bank grouping plus LZ4-HC compounds to beat whole-record
-        // `Lz4Best`. The output is still a plain LZ4 block, so the reader is
-        // unchanged. `Lz4ByBank` (v1) uses fast default LZ4 for quick writes.
-        let stream_codec = if high_compression {
-            CompressionType::Lz4Best
-        } else {
-            CompressionType::Lz4
-        };
-        let n = compress(stream_codec, stream, compress_buf)?;
+        // HC-compress each bank stream for a better ratio: per-bank grouping
+        // plus LZ4-HC compounds to beat whole-record `Lz4Best`. The output is
+        // still a plain LZ4 block, so the reader is unchanged.
+        let n = compress(CompressionType::Lz4Best, stream, compress_buf)?;
         compressed_sizes.push(n as u32);
         compressed_streams.push(compress_buf[..n].to_vec());
     }
@@ -732,7 +416,7 @@ fn build_by_bank_v2_record_bytes(
         presence,
         bytes_per_row,
         sizes,
-    } = build_by_bank_parts(events, compress_buf, true)?;
+    } = build_by_bank_parts(events, compress_buf)?;
 
     // ---- Build the directory body (uncompressed). ---------------------
     let dir_len = 4 * num_banks            // descriptors

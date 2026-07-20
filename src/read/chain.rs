@@ -418,7 +418,7 @@ impl Chain {
     /// # fn main() -> oxihipo::Result<()> {
     /// let summary = Chain::open("run.hipo")?
     ///     .with_filter(Filter::require(["REC::Particle"]))?
-    ///     .skim("electrons.hipo", Compression::Lz4ByBank)?;
+    ///     .skim("electrons.hipo", Compression::Lz4PerColumn)?;
     /// println!("wrote {} events", summary.events);
     /// # Ok(()) }
     /// ```
@@ -442,7 +442,7 @@ impl Chain {
     /// # fn main() -> oxihipo::Result<()> {
     /// let chain = Chain::open("run.hipo")?;
     /// let total = chain.event_count();
-    /// let summary = chain.skim_with("out.hipo", Compression::Lz4ByBank, |n| {
+    /// let summary = chain.skim_with("out.hipo", Compression::Lz4PerColumn, |n| {
     ///     if n % 100_000 == 0 {
     ///         eprintln!("  {n}/{total}");
     ///     }

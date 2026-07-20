@@ -77,6 +77,6 @@ benchmark it on your laptop and conclude it doesn't work.
 `workers=` raises I/O throughput. It does nothing about *wasted* decompression —
 if your file is stock `Lz4`, every process still inflates every bank to read the
 one you asked for. Converting to
-[`Lz4ByBank`](../performance/compression.md) attacks that directly, and the two
+[`Lz4ByBankV2`](../performance/compression.md) attacks that directly, and the two
 compose: on ifarm the format change is worth considerably more than the process
 count.

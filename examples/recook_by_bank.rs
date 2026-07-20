@@ -31,13 +31,9 @@
 //! The per-file outputs are kept after the merge (you can delete
 //! `<output_dir>` yourself once the merged file is verified).
 //!
-//! Pass `--v2` (anywhere on the command line) to emit the version-2
-//! by-bank format: the directory is LZ4-compressed and carries an
-//! extension-format-version byte, shrinking the on-disk directory.
-//! The default stays v1 for byte-stable, backward-compatible output.
-//!
-//! Files produced are not readable by the C++ `hipo4` reader (Rust-only
-//! compression tags 5 / 6).
+//! Output is written in the `Lz4ByBankV2` format (LZ4-HC bank streams plus a
+//! compressed directory). Files produced are not readable by the C++ `hipo4`
+//! reader (Rust-only compression tag 6).
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -60,24 +56,20 @@ enum Mode {
         output_dir: PathBuf,
         /// Optional `--merge <path>`: after recooking each input into
         /// `output_dir`, concatenate every per-file output into one
-        /// combined `Lz4ByBank` file at `path`.
+        /// combined `Lz4ByBankV2` file at `path`.
         merge: Option<PathBuf>,
     },
 }
 
 fn parse_args() -> (Mode, Compression) {
-    const USAGE: &str = "usage: recook_by_bank [--v2] [--batch] <in> <out> [--merge <merged_file>]";
-    // `--v2` selects the version-2 by-bank format (compressed directory +
-    // version byte); the default stays v1 for byte-stable output and
-    // backward compatibility with existing readers.
-    let mut compression = Compression::Lz4ByBank;
+    const USAGE: &str = "usage: recook_by_bank [--batch] <in> <out> [--merge <merged_file>]";
+    let compression = Compression::Lz4ByBankV2;
     let mut batch = false;
     let mut merge: Option<PathBuf> = None;
     let mut positional: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(tok) = args.next() {
         match tok.as_str() {
-            "--v2" => compression = Compression::Lz4ByBankV2,
             "--batch" => batch = true,
             "--merge" => {
                 merge = Some(PathBuf::from(

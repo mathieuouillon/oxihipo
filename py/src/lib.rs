@@ -242,10 +242,9 @@ impl PyChain {
     }
 
     /// Copy the (filtered) chain to `dst`, re-compressing with `compression`
-    /// (`"none"`, `"lz4"`, `"lz4best"`, `"gzip"`, `"lz4bybank"`,
-    /// `"lz4bybankv2"`, `"lz4percolumn"`). Returns
-    /// `{"events", "records", "bytes"}`.
-    #[pyo3(signature = (dst, compression="lz4bybank"))]
+    /// (`"none"`, `"lz4"`, `"lz4best"`, `"gzip"`, `"lz4bybankv2"`,
+    /// `"lz4percolumn"`). Returns `{"events", "records", "bytes"}`.
+    #[pyo3(signature = (dst, compression="lz4percolumn"))]
     fn skim<'py>(
         &self,
         py: Python<'py>,
@@ -288,8 +287,7 @@ impl PyChain {
     }
 }
 
-/// Map a compression name to the core enum (`Lz4Chunked` needs a parameter and
-/// is intentionally not offered here).
+/// Map a compression name to the core enum.
 fn parse_compression(name: &str) -> PyResult<oxihipo::Compression> {
     use oxihipo::Compression;
     Ok(match name.to_ascii_lowercase().as_str() {
@@ -297,7 +295,6 @@ fn parse_compression(name: &str) -> PyResult<oxihipo::Compression> {
         "lz4" => Compression::Lz4,
         "lz4best" => Compression::Lz4Best,
         "gzip" => Compression::Gzip,
-        "lz4bybank" => Compression::Lz4ByBank,
         "lz4bybankv2" => Compression::Lz4ByBankV2,
         "lz4percolumn" => Compression::Lz4PerColumn,
         other => {

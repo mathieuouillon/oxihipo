@@ -55,7 +55,7 @@ pub struct EventIter {
     filter: Option<Filter>,
     record_tags: Option<Vec<u64>>,
     /// Currently-loaded record's state. The iterator switches between
-    /// "bytes-backed" (every compression except Lz4ByBank) and
+    /// "bytes-backed" (every compression except the by-bank format) and
     /// "by-bank-backed" depending on the record's compression tag.
     cur: CurrentRecord,
     /// Recycled across records to avoid per-record allocation in the

@@ -24,7 +24,7 @@
 //! - **Filter + record-tag pushdown honored**, exactly like
 //!   [`Chain::for_each`](super::chain::Chain::for_each).
 //! - **Uniform across storage formats.** Every layout (`None`/`Lz4`/`Gzip`/
-//!   `Lz4Chunked`, `Lz4ByBank(V2)`, `Lz4PerColumn`) is reduced to the same
+//!   `Lz4ByBankV2`, `Lz4PerColumn`) is reduced to the same
 //!   primitive: obtain a [`Bank`] for `(event, bank)`, take `bank.rows()` for
 //!   the offset delta and `bank.col_bytes(col)` for the flat column bytes.
 //!   The columnar formats never inflate a stream a consumer didn't ask for.

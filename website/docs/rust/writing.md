@@ -55,24 +55,23 @@ lower the reader's resident memory.
 ```rust
 use oxihipo::Compression;
 
-Compression::None                                   // no compression
-Compression::Lz4                                    // stock, hipo4-compatible
-Compression::Lz4Best                                // HC level (needs the `lz4-c` feature)
-Compression::Gzip                                   // stock, hipo4-compatible
-Compression::Lz4Chunked { events_per_chunk: 32 }    // intra-record parallel inflate
-Compression::Lz4ByBank                              // per-bank streams, lazy inflate
-Compression::Lz4ByBankV2
-Compression::Lz4PerColumn
+Compression::None            // no compression
+Compression::Lz4             // stock, hipo4-compatible
+Compression::Lz4Best         // HC level (needs the `lz4-c` feature)
+Compression::Gzip            // stock, hipo4-compatible
+Compression::Lz4ByBankV2     // per-bank streams, lazy inflate
+Compression::Lz4PerColumn    // per-column streams, best ratio + finest reads
 ```
 
 `None`, `Lz4`, `Lz4Best`, and `Gzip` stay byte-compatible with the C++ `hipo4`
-reader. The `Lz4Chunked` / `Lz4ByBank` family are **opt-in format extensions**
-with new compression tags that `hipo4` doesn't know about — use them for
-Rust-only (or oxihipo-Python-only) consumers.
+reader. `Lz4ByBankV2` and `Lz4PerColumn` are **opt-in format extensions** with
+new compression tags that `hipo4` doesn't know about — use them for Rust-only
+(or oxihipo-Python-only) consumers.
 
 If you're deciding between them, read
 [Compression formats](../performance/compression.md) — the short version is that
-`Lz4ByBank` is usually the one you want, and it's what `skim` defaults to.
+`Lz4ByBankV2` is usually the one you want, and `Lz4PerColumn` (what `skim`
+defaults to) squeezes the file smaller still.
 
 ## Copying events verbatim
 

@@ -140,7 +140,7 @@ cross-referencing patterns.
 `skim` copies the (filtered) chain to a new file, re-compressing as it goes:
 
 ```rust
-let summary = chain.skim("electrons.hipo", oxihipo::Compression::Lz4ByBank)?;
+let summary = chain.skim("electrons.hipo", oxihipo::Compression::Lz4PerColumn)?;
 ```
 
 See [Writing](./writing.md) for full control over the output.

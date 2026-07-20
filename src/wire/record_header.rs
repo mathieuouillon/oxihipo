@@ -219,6 +219,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_removed_compression_tags() {
+        // Tags 4 (`Lz4Chunked`) and 5 (`Lz4ByBank` v1) were removed; a record
+        // carrying either must be rejected at header parse rather than
+        // silently misread.
+        for tag in [4u32, 5u32] {
+            let mut buf = [0u8; RECORD_HEADER_SIZE];
+            sample().write(&mut buf);
+            // Overwrite just the compression-type nibble (top 4 bits of the
+            // compression word) with the removed tag.
+            write_u32_le(&mut buf, RH_COMP_WORD, tag << COMP_TYPE_SHIFT);
+            let err = RecordHeader::parse(&buf).unwrap_err();
+            assert!(
+                matches!(err, HipoError::UnknownCompression(t) if t == tag),
+                "tag {tag} should be rejected as UnknownCompression, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_header_longer_than_record() {
         let mut buf = [0u8; RECORD_HEADER_SIZE];
         let mut h = sample();

@@ -142,7 +142,7 @@ impl<'a> Event<'a> {
 ///
 /// - [`Self::Bytes`] walks a contiguous event buffer (zero-copy) — the
 ///   classic path.
-/// - [`Self::ByBank`] gathers an `Lz4ByBank` event's banks straight from
+/// - [`Self::ByBank`] gathers a by-bank event's banks straight from
 ///   their per-bank decompressed (lazily cached) streams, **without**
 ///   synthesising a contiguous event blob first. This is what keeps
 ///   `ev.structures()` from paying the full per-event synthesis cost.

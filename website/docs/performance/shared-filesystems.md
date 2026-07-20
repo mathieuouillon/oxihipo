@@ -26,7 +26,7 @@ The levers are user-side, roughly in order of payoff:
 
 ### 1. Change the format
 
-Converting to [`Lz4ByBank`](./compression.md) is usually worth more than every
+Converting to [`Lz4ByBankV2`](./compression.md) is usually worth more than every
 other lever combined — on the ifarm skim it cut the file to a quarter of its
 size *and* stopped inflating banks the analysis never reads. Fewer bytes off
 Lustre, less LZ4 work. Start here.
@@ -43,7 +43,7 @@ lfs migrate  -c 4 file.hipo          # existing files
 ### 3. Oversubscribe threads
 
 Pass `threads = 2 × num_cpus` to `for_each` to hide network page-fault stalls.
-Thread scaling is linear well past `num_cpus` for `Lz4ByBank` on Lustre.
+Thread scaling is linear well past `num_cpus` for the by-bank format on Lustre.
 
 ### 4. Stage to local scratch
 

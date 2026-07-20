@@ -33,10 +33,10 @@ layers are intentionally out of scope.
 - **Data-parallel scans.** `Chain::for_each(threads, f)` fans the work
   across cores out of order (`threads = 0` ⇒ all cores, `1` ⇒ sequential,
   `n` ⇒ exactly `n`); shared state in `f` is atomic or locked.
-- **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions:
-  `Lz4Chunked` (intra-record parallel inflate) and `Lz4ByBank`
-  (decompress only the banks an analysis actually reads — see the
-  benchmarks below).
+- **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions
+  that decompress only what an analysis actually reads: `Lz4ByBankV2`
+  (per-bank streams) and `Lz4PerColumn` (per-column streams) — see the
+  benchmarks below.
 - **Pure-Rust by default**, with optional features: `lz4-c` (C LZ4
   bindings — faster decode + `Lz4Best` HC), `lz4-apple` (Apple
   `libcompression` decode), and `mimalloc-allocator`.
@@ -265,185 +265,45 @@ If you are still I/O-bound, the levers are user-side:
 - **Stage to local scratch.** `cp /volatile/.../file.hipo /scratch/$USER/`
   before analysing — local disk easily beats Lustre per single client.
 
-## When LZ4 itself is the bottleneck: `Lz4Chunked` and `Lz4ByBank`
+## When LZ4 itself is the bottleneck
 
-After page-fault stalls are masked, LZ4 inflate dominates wall time on
-ifarm. The HIPO format stores **one LZ4 block per record**, so a record's
-decompress is one sequential pass on one worker — idle cores on the same
-record don't help, and you can't decompress part of a record without
-inflating all of it.
+Once page-fault stalls are masked, LZ4 inflate dominates. The stock HIPO format
+stores **one LZ4 block per record**, so reading any bank inflates *every* bank.
+Two opt-in format extensions fix that by storing sub-record streams and inflating
+only what an analysis touches:
 
-`Compression::Lz4Chunked { events_per_chunk }` is an opt-in format
-extension that splits each record's events into independently-compressed
-LZ4 chunks with an offset table:
+- **`Compression::Lz4ByBankV2`** — one LZ4-HC stream per bank type, plus a
+  compressed presence directory. `ev.bank("REC::Particle")` inflates only that
+  bank's stream; untouched banks stay compressed. No reader-side code change.
+- **`Compression::Lz4PerColumn`** — one LZ4-HC stream per `(bank, column)`,
+  cross-event contiguous. Reads at *column* granularity and compresses better
+  than a bank's interleaved bytes, so it beats `Lz4ByBankV2` on both size and
+  selective reads. It's what `skim` defaults to.
 
-```rust
-use oxihipo::{Compression, Writer};
+Both carry Rust-only wire tags the C++ `hipo4` reader can't read (the stock
+`None` / `Lz4` / `Lz4Best` / `Gzip` codecs stay compatible). On a 29.7 GB CLAS12
+ifarm skim, reading `REC::Particle` only, the by-bank format hit **36.6 Mev/s at
+par=64 — 25× the `Lz4` baseline** and cut the file to 6.66 GB.
 
-# fn run(dict: &oxihipo::Dict) -> oxihipo::Result<()> {
-let mut w = Writer::create("out.hipo")
-    .schemas(dict)
-    .compression(Compression::Lz4Chunked { events_per_chunk: 32 })
-    .build()?;
-// ... w.event(|ev| { ... })? ...
-w.finish()?;
-# Ok(()) }
-```
-
-What that unlocks today:
-
-- **Intra-record parallel decompression.** The reader inflates chunks in
-  parallel via `rayon::scope`. Sequential `chain.events()` loops use idle
-  cores; `for_each` workers get finer-grained units.
-- **Lays groundwork for partial decompression** — the inline
-  `event_sizes[]` table sits outside any LZ4 stream, so a future
-  filter-pushdown API can decompress only chunks containing wanted
-  events.
-
-Trade-offs:
-
-- **Compression ratio.** Per-chunk LZ4 has less back-reference context
-  than per-record. At `events_per_chunk = 32` the output is typically
-  5–15 % larger; the sweet spot is 32–64.
-- **C++ `hipo4` compatibility.** Files written with `Lz4Chunked` use a
-  new compression tag (4) the C++ reader doesn't know about. Use it for
-  Rust-only consumers, or alongside (not replacing) the standard `Lz4`
-  output. The other variants (`None` / `Lz4` / `Lz4Best` / `Gzip`) stay
-  byte-compatible with `hipo4`.
-
-A `recook` example re-emits an existing `Lz4` file as `Lz4Chunked` for
-A/B benchmarking:
+The `recook_by_bank` example re-emits a file as `Lz4ByBankV2`:
 
 ```sh
-cargo run --release --example recook -- \
-    /volatile/.../in.hipo /scratch/$USER/out_chunked.hipo 32
-cargo run --release --example bench_par -- /scratch/$USER/out_chunked.hipo 0
+cargo run --release --example recook_by_bank -- in.hipo out_by_bank.hipo   # or --batch <dir> <dir>
 ```
 
-### `Lz4ByBank` — decompress only the banks you read
-
-`Lz4Chunked` parallelises decompression of *every* bank for *every* event.
-Real analyses typically touch 2–5 banks out of ~30; the other ~85 % is
-wasted LZ4 work.
-
-`Compression::Lz4ByBank` stores each bank type as its own LZ4 stream
-within the record. The reader parses a small directory eagerly, but
-inflates a bank's stream only when `ev.bank(name)` actually asks for it.
-Banks the user never touches stay compressed for the record's lifetime.
-
-```rust
-use oxihipo::{Compression, Writer};
-
-# fn run(dict: &oxihipo::Dict) -> oxihipo::Result<()> {
-let mut w = Writer::create("out.hipo")
-    .schemas(dict)
-    .compression(Compression::Lz4ByBank)
-    .build()?;
-// ... w.event(|ev| { ... })? ...
-w.finish()?;
-# Ok(()) }
-```
-
-No reader-side API change — `for ev in chain.events() { let ev = ev?; ev.bank("X"); }`
-"just works". A scan that only ever calls `ev.bank("REC::Event")` will
-**never** inflate `REC::Particle`'s stream; the partial-decompression
-contract is asserted in tests (`wire::by_bank::tests::touching_one_bank_does_not_inflate_others`).
-
-Measured on a 1.1 GB CLAS12 file (`rec0.hipo`, 289 k events, 195 records,
-local SSD, `bench_par` reads `REC::Particle.rows()` only):
-
-| Format | Sequential | Parallel | Size |
-|---|---:|---:|---:|
-| `Lz4` baseline | 980 kev/s | 5,073 kev/s | 1,135 MB |
-| `Lz4Chunked` E=32 | 2,628 kev/s (2.7×) | 5,881 kev/s (1.2×) | 1,253 MB (+10 %) |
-| **`Lz4ByBank`** | **4,025 kev/s (4.1×)** | **15,675 kev/s (3.1×)** | **1,225 MB (+8 %)** |
-
-Trade-offs:
-
-- **Compression ratio.** Per-bank streams see better cross-event
-  back-reference locality (`REC::Particle` from consecutive events has
-  near-identical layout) — file size is typically *smaller* than
-  `Lz4Chunked` and within 5–10 % of `Lz4`.
-- **No C++ `hipo4` compatibility.** New compression tag (5); same caveat
-  as `Lz4Chunked`. Use for Rust-only consumers.
-- **Memory.** Once a bank is touched anywhere in a record, its
-  decompressed bytes stay alive until the record drops out of the
-  iterator's window. Touching every bank ⇒ same memory profile as `Lz4`.
-
-A `recook_by_bank` example re-emits an existing file as `Lz4ByBank`:
-
-```sh
-# Single file
-cargo run --release --example recook_by_bank -- \
-    /volatile/.../in.hipo /scratch/$USER/out_by_bank.hipo
-
-# Whole directory in parallel (one file per rayon worker)
-cargo run --release --example recook_by_bank -- --batch \
-    /volatile/.../skim_slices/hipo /scratch/$USER/skim_by_bank/
-
-cargo run --release --example bench_par -- /scratch/$USER/out_by_bank.hipo 0
-```
-
-### Measured on JLab ifarm
-
-29.7 GB CLAS12 skim file (`pi0_skim_CxC_Outbending_slice000.hipo`,
-1.85 M events, 29 430 records) on `ifarm2401` (64 logical cores).
-`bench_par` reads `REC::Particle.rows()` only — exactly the partial-
-decompression case `Lz4ByBank` is designed for.
-
-| Location | Format | Sequential | par=10 | par=32 | par=64 | Size |
-|---|---|---:|---:|---:|---:|---:|
-| `/volatile` (Lustre, hot) | `Lz4` baseline | 72 kev/s | 1,437 | — | — | 29.7 GB |
-| `/volatile` (Lustre, hot) | **`Lz4ByBank`** | 437 | 14,724 | 27,643 | **36,578** | **6.66 GB** (−77.6 %) |
-| `/scratch` (local SSD) | `Lz4` baseline | 159 | 1,112 | — | — | 29.7 GB |
-| `/scratch` (local SSD) | `Lz4ByBank` | 1,695 | 7,558 | — | — | 6.66 GB |
-
-Headline: `par=64` on `/volatile` hits **36.6 Mev/s** — 25× the `Lz4`
-baseline throughput at par=10. The compression ratio result is
-exceptional for skim files (near-identical per-event topology gives
-per-bank LZ4 streams enormous cross-event redundancy to dedup) — on
-generic reco files expect closer to ±5 %.
-
-Notes on the matrix:
-
-- **`/volatile` beats `/scratch` parallel** when the `Lz4ByBank` file is
-  ifarm-page-cache-hot from a just-completed recook. Cold-read Lustre
-  numbers (after the cache evicts) land closer to the `/scratch` row.
-- **Sequential is permanently Lustre-bound on `/volatile`** —
-  single-stream RPCs cap you around 400–500 kev/s regardless of LZ4
-  format. For sequential dev/debug, stage to `/scratch`.
-- **Thread scaling is linear well past `num_cpus`** for `Lz4ByBank` on
-  Lustre. Default `threads = 0` (one per logical CPU) is good; oversubscribing
-  to `2 × num_cpus` hides page-fault stalls further.
-
-End-to-end recipe for a real analysis:
-
-```sh
-# 1. One-time conversion (per slice, in parallel over the directory)
-cargo run --release --example recook_by_bank -- --batch \
-    /volatile/.../pi0_CxC_skim_slices/hipo \
-    /volatile/clas12/$USER/pi0_by_bank/
-
-# 2. Point your reader at the new directory — no code change.
-#    Every `ctx.event().bank(name)` call benefits from partial
-#    decompression automatically; no `Lz4ByBank`-aware code required.
-```
-
-Because the reader is polymorphic over the storage backend (`Bytes` vs
-`ByBank`, on `OwnedEvent`), downstream code stays unchanged whether or
-not the input is `Lz4ByBank` — banks the analysis never touches stay
-compressed for the record's lifetime.
+Full format guide, trade-offs, and the complete benchmark tables:
+**[Compression formats](https://mathieuouillon.github.io/oxihipo/docs/performance/compression)**
+and **[Benchmarks](https://mathieuouillon.github.io/oxihipo/docs/performance/benchmarks)**.
 
 ## Known gaps
 
 - `SortedWriter` and `StreamWriter` (per-tag bin writers, auto-flush) —
   deferred.
 - Bench-vs-`hipo4` comparator — deferred.
-- **Sub-chunked `Lz4ByBank`**: combining `Lz4Chunked`-style intra-stream
-  parallelism with per-bank streams, for very large records where one
-  bank's stream is multi-MB. Per-bank streams already parallelise *across
-  banks* in `for_each`; this is the next step if profiles say a single
-  bank dominates.
+- **Intra-stream parallel inflate** for the by-bank / per-column formats, for
+  very large records where a single bank's (or column's) stream is multi-MB.
+  Those streams already parallelise *across* banks in `for_each`; splitting a
+  single large stream is the next step if profiles say one dominates.
 
 ## CI gates
 

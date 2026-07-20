@@ -112,7 +112,7 @@ impl Filter {
         true
     }
 
-    /// `check` for `Lz4ByBank` records — peeks the presence matrix
+    /// `check` for by-bank records — peeks the presence matrix
     /// directly without inflating any bank stream.
     #[inline]
     pub(crate) fn check_by_bank(

@@ -49,7 +49,7 @@ fn main() -> Result<()> {
         tqdm!(desc = "skim (filtered)", unit = "ev", unit_scale = true)
     };
 
-    let summary = chain.skim_with(&output, Compression::Lz4ByBank, |written| {
+    let summary = chain.skim_with(&output, Compression::Lz4PerColumn, |written| {
         let _ = pb.update_to(written as usize);
     })?;
     let _ = pb.refresh();

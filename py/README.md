@@ -105,7 +105,7 @@ for chunk in ox.iterate("/volatile/run5042/*.hipo", "REC::Particle", step_size="
 ```python
 g = f.filtered(require=["REC::Particle"])           # events carrying a bank
 g = f.filtered(record_tag=[0x42])                   # by record tag
-summary = g.skim("electrons.hipo", compression="lz4bybank")   # {events, records, bytes}
+summary = g.skim("electrons.hipo", compression="lz4percolumn")   # {events, records, bytes}
 ```
 
 `filtered()` returns a new chain; the filter reduces what `arrays()` / `skim()`

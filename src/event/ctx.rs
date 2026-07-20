@@ -7,7 +7,7 @@
 //! Two backends share the same API:
 //!
 //! - **Bytes** — classic path, wrapping a raw `Event<'a>` byte slice.
-//! - **ByBank** — `Lz4ByBank` path, borrowing a shared `ByBankRecord`
+//! - **ByBank** — by-bank path, borrowing a shared `ByBankRecord`
 //!   plus an event index. `bank(name)` decompresses *only* the
 //!   requested bank's stream (lazily, cached on the record).
 //!
@@ -61,7 +61,7 @@ impl<'a> EventCtx<'a> {
         }
     }
 
-    /// Construct over an `Lz4ByBank` record + an event index. Bank
+    /// Construct over a by-bank record + an event index. Bank
     /// streams stay compressed until `bank(name)` requests one.
     ///
     /// Takes `&'a Arc<ByBankRecord>` (not `&ByBankRecord`) so
@@ -94,7 +94,7 @@ impl<'a> EventCtx<'a> {
 
     /// The underlying borrowed event bytes.
     ///
-    /// Returns an empty `Event<'a>` for `Lz4ByBank` backends — those
+    /// Returns an empty `Event<'a>` for by-bank backends — those
     /// don't carry raw event bytes. Callers that need a real byte view
     /// should up-convert through [`OwnedEvent`] (which synthesises bytes
     /// lazily by decompressing every bank).
@@ -110,7 +110,7 @@ impl<'a> EventCtx<'a> {
         self.dict
     }
 
-    /// Raw event bytes. Empty for `Lz4ByBank` backends — see [`Self::event`].
+    /// Raw event bytes. Empty for by-bank backends — see [`Self::event`].
     pub fn raw(&self) -> &'a [u8] {
         match self.backend {
             Backend::Bytes(e) => e.raw(),
@@ -156,7 +156,7 @@ impl<'a> EventCtx<'a> {
     /// Decode bank `name`. `None` if the schema isn't in the dict, the
     /// structure isn't in the event, or the bank's data is mis-sized.
     ///
-    /// On `Lz4ByBank` records, only the requested bank's LZ4 stream is
+    /// On by-bank records, only the requested bank's LZ4 stream is
     /// decompressed — other banks in the same record remain compressed.
     pub fn bank(&self, name: &str) -> Option<Bank<'a>> {
         // Per-event cache: a per-row loop over one bank resolves it once,
@@ -303,7 +303,7 @@ impl<'a> EventCtx<'a> {
     /// Iterate structure headers + payloads — for tools like `dump` and
     /// `stats`, and for any "touch every bank" pass.
     ///
-    /// Works for the `Bytes` and `Lz4ByBank` backends: `Lz4ByBank` events
+    /// Works for the `Bytes` and by-bank backends: by-bank events
     /// gather their banks straight from the per-bank decompressed (lazily
     /// cached) streams with no event-blob synthesis. **Empty for
     /// `Lz4PerColumn`** — those carry no contiguous bytes here; use
@@ -322,7 +322,7 @@ impl<'a> EventCtx<'a> {
     /// Decode a composite structure by name (looks up the wire IDs via the
     /// dict, then re-parses the inline format string).
     ///
-    /// **Returns `None` for `Lz4ByBank` backends** — composite reconstruction
+    /// **Returns `None` for by-bank backends** — composite reconstruction
     /// requires the original structure bytes. Up-convert via `OwnedEvent`
     /// if you need composites on ByBank records.
     pub fn composite(&self, name: &str) -> Option<Composite<'a>> {
@@ -352,7 +352,7 @@ impl<'a> EventCtx<'a> {
     /// The dict must already be wrapped in an `Arc` — provided so callers
     /// don't have to clone the entire dict per event.
     ///
-    /// For `Lz4ByBank` backends this is `O(1)` — the resulting
+    /// For by-bank backends this is `O(1)` — the resulting
     /// `OwnedEvent` shares the same lazy bank cache via `Arc`.
     pub fn to_owned_with(&self, dict: Arc<Dict>) -> OwnedEvent {
         match self.backend {

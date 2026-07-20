@@ -551,72 +551,6 @@ fn write_then_scan_array_columns() {
 }
 
 #[test]
-fn write_then_scan_lz4_chunked() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("chunked.hipo");
-
-    // ~100 events across several records (max_record_events small enough
-    // that we get multiple records, and chunk_size small enough that we
-    // get multiple chunks per record).
-    {
-        let mut w = Writer::create(&path)
-            .schemas(&sample_dict())
-            .compression(Compression::Lz4Chunked {
-                events_per_chunk: 4,
-            })
-            .max_record_events(30)
-            .build()
-            .unwrap();
-        for evno in 0..100_i64 {
-            w.event(|ev| {
-                ev.bank("REC::Event", |b| {
-                    b.row(|r| {
-                        r.set("evno", evno)?;
-                        r.set("beamE", 10.6_f32)?;
-                        Ok(())
-                    })?;
-                    Ok(())
-                })?;
-                ev.bank("REC::Particle", |b| {
-                    for i in 0..((evno as i32) % 5 + 1) {
-                        b.row(|r| {
-                            r.set("pid", 11 + i)?;
-                            r.set("px", i as f32 * 0.1)?;
-                            r.set("py", -i as f32 * 0.1)?;
-                            r.set("charge", (i as i8) - 1)?;
-                            Ok(())
-                        })?;
-                    }
-                    Ok(())
-                })?;
-                Ok(())
-            })
-            .unwrap();
-        }
-        w.finish().unwrap();
-    }
-
-    let file = Chain::open(&path).unwrap();
-    assert_eq!(file.event_count(), 100);
-    // Should be > 1 record so we exercise the chunk-boundary case.
-    assert!(file.record_count() > 1);
-
-    let mut seen = 0_i64;
-    for ev in file.events().map(Result::unwrap) {
-        let evno = ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0];
-        assert_eq!(evno, seen);
-        let p = ev.bank("REC::Particle").unwrap();
-        let pids = p.col::<i32>("pid").unwrap();
-        // pids start at 11 and march up
-        for (i, &pid) in pids.iter().enumerate() {
-            assert_eq!(pid, 11 + i as i32);
-        }
-        seen += 1;
-    }
-    assert_eq!(seen, 100);
-}
-
-#[test]
 fn write_then_scan_lz4_by_bank() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("by_bank.hipo");
@@ -624,7 +558,7 @@ fn write_then_scan_lz4_by_bank() {
     {
         let mut w = Writer::create(&path)
             .schemas(&sample_dict())
-            .compression(Compression::Lz4ByBank)
+            .compression(Compression::Lz4ByBankV2)
             .max_record_events(40)
             .build()
             .unwrap();
@@ -709,7 +643,7 @@ fn lz4_by_bank_for_each_matches_iterator() {
     {
         let mut w = Writer::create(&path)
             .schemas(&sample_dict())
-            .compression(Compression::Lz4ByBank)
+            .compression(Compression::Lz4ByBankV2)
             .max_record_events(30)
             .build()
             .unwrap();
@@ -756,7 +690,7 @@ fn lz4_by_bank_skips_unused_banks() {
     {
         let mut w = Writer::create(&path)
             .schemas(&sample_dict())
-            .compression(Compression::Lz4ByBank)
+            .compression(Compression::Lz4ByBankV2)
             .max_record_events(50)
             .build()
             .unwrap();
@@ -811,47 +745,4 @@ fn lz4_by_bank_skips_unused_banks() {
         assert_eq!(events_total, 150);
         assert_eq!(particle_total, 150 * 5);
     }
-}
-
-#[test]
-fn lz4_chunked_for_each_matches_iterator() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("chunked_par.hipo");
-
-    {
-        let mut w = Writer::create(&path)
-            .schemas(&sample_dict())
-            .compression(Compression::Lz4Chunked {
-                events_per_chunk: 8,
-            })
-            .max_record_events(25)
-            .build()
-            .unwrap();
-        for evno in 0..200_i64 {
-            w.event(|ev| {
-                ev.bank("REC::Event", |b| {
-                    b.row(|r| {
-                        r.set("evno", evno)?;
-                        r.set("beamE", 10.6_f32)?;
-                        Ok(())
-                    })?;
-                    Ok(())
-                })?;
-                Ok(())
-            })
-            .unwrap();
-        }
-        w.finish().unwrap();
-    }
-
-    let file = Chain::open(&path).unwrap();
-    let seq_sum: i64 = file
-        .events()
-        .map(Result::unwrap)
-        .map(|ev| ev.bank("REC::Event").unwrap().col::<i64>("evno").unwrap()[0])
-        .sum();
-
-    assert_eq!(seq_sum, (0..200_i64).sum::<i64>());
-    assert_eq!(sum_evno_for_each(&file, 1), seq_sum);
-    assert_eq!(sum_evno_for_each(&file, 0), seq_sum);
 }

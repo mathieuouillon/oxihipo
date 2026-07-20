@@ -552,7 +552,7 @@ class Chain:
         new._record_tag = record_tag
         return new
 
-    def skim(self, dst, compression: str = "lz4bybank") -> dict:
+    def skim(self, dst, compression: str = "lz4percolumn") -> dict:
         """Copy the (filtered) chain to ``dst``, re-compressing. Returns
         ``{"events", "records", "bytes"}``."""
         return self._reader().skim(str(dst), compression)

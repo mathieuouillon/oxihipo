@@ -60,7 +60,7 @@ RSS.
 ## Storage-polymorphic events
 
 `OwnedEvent` is polymorphic over its storage backend (`Bytes` vs `ByBank`).
-That's the reason [`Lz4ByBank`](../performance/compression.md) needs **no
+That's the reason [`Lz4ByBankV2`](../performance/compression.md) needs **no
 reader-side API change**: downstream code is identical whether or not the input
 uses per-bank streams, and banks an analysis never touches simply stay
 compressed for the record's lifetime.

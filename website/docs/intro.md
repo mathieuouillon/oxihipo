@@ -41,10 +41,10 @@ tune anything:
 3. **Nothing is decompressed that you don't read.** This is the big one on
    ifarm. The stock HIPO format stores one LZ4 block per record, so reading any
    bank inflates *every* bank. The opt-in
-   [`Lz4ByBank`](./performance/compression.md) format stores each bank as its
-   own stream and inflates it only when `ev.bank(name)` asks for it — a real
-   analysis touches maybe 5 of ~30 banks, so the other ~85% of LZ4 work simply
-   never happens.
+   [`Lz4ByBankV2`](./performance/compression.md) (and `Lz4PerColumn`) formats
+   store each bank (or column) as its own stream and inflate it only when
+   `ev.bank(name)` asks for it — a real analysis touches maybe 5 of ~30 banks,
+   so the other ~85% of LZ4 work simply never happens.
 
 That third point is why the headline number on this site is a 25× throughput
 improvement rather than a few percent. See
@@ -66,10 +66,10 @@ they were measured on.
 - `SortedWriter` and `StreamWriter` (per-tag bin writers, auto-flush) —
   deferred.
 - A bench-vs-`hipo4` comparator — deferred.
-- **Sub-chunked `Lz4ByBank`**: combining `Lz4Chunked`-style intra-stream
-  parallelism with per-bank streams, for very large records where a single
-  bank's stream is multi-MB. Per-bank streams already parallelise *across* banks
-  in `for_each`; this is the next step if profiles say one bank dominates.
+- **Intra-stream parallel inflate for the by-bank / per-column formats**, for
+  very large records where a single bank's (or column's) stream is multi-MB.
+  Those streams already parallelise *across* banks in `for_each`; splitting a
+  single large stream is the next step if profiles say one dominates.
 
 ## License
 

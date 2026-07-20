@@ -11,40 +11,49 @@ heavily on the file, the filesystem, and how many banks the analysis touches —
 so treat these as evidence that the approach works, not as a promise about your
 workload. Reproduce with `bench_par` on your own data.
 
-## Headline: `Lz4ByBank` on JLab ifarm
+## Headline: by-bank partial decompression on JLab ifarm
 
 A 29.7 GB CLAS12 skim file (`pi0_skim_CxC_Outbending_slice000.hipo`, 1.85 M
 events, 29,430 records) on `ifarm2401` (64 logical cores). `bench_par` reads
-`REC::Particle.rows()` only — exactly the partial-decompression case
-`Lz4ByBank` is designed for.
+`REC::Particle.rows()` only — exactly the partial-decompression case the by-bank
+format is designed for.
 
 | Location | Format | Sequential | par=10 | par=32 | par=64 | Size |
 |---|---|---:|---:|---:|---:|---:|
 | `/volatile` (Lustre, hot) | `Lz4` baseline | 72 kev/s | 1,437 | — | — | 29.7 GB |
-| `/volatile` (Lustre, hot) | **`Lz4ByBank`** | 437 | 14,724 | 27,643 | **36,578** | **6.66 GB** (−77.6%) |
+| `/volatile` (Lustre, hot) | **by-bank** | 437 | 14,724 | 27,643 | **36,578** | **6.66 GB** (−77.6%) |
 | `/scratch` (local SSD) | `Lz4` baseline | 159 | 1,112 | — | — | 29.7 GB |
-| `/scratch` (local SSD) | `Lz4ByBank` | 1,695 | 7,558 | — | — | 6.66 GB |
+| `/scratch` (local SSD) | by-bank | 1,695 | 7,558 | — | — | 6.66 GB |
 
 *(rates in kev/s)*
 
 `par=64` on `/volatile` reaches **36.6 Mev/s** — 25× the `Lz4` baseline
 throughput at par=10.
 
+:::note Measured on the original by-bank variant
+These were measured on the first by-bank format (fast default-LZ4 streams).
+`Lz4ByBankV2` — what you write today — shares the layout with HC-compressed
+streams: selective-read speed is the same (the figures carry over) and the file
+is *smaller* than the 6.66 GB shown. `Lz4PerColumn` inflates at column
+granularity and is smaller still.
+:::
+
 :::caution The −77.6% is not typical
 That compression ratio is exceptional **for skim files**: near-identical
-per-event topology gives per-bank LZ4 streams enormous cross-event redundancy to
+per-event topology gives the per-bank streams enormous cross-event redundancy to
 dedup. On generic reco files expect closer to ±5%.
 :::
 
 Reading the matrix:
 
-- **`/volatile` beats `/scratch` in parallel** here because the `Lz4ByBank` file
-  was ifarm-page-cache-hot from a just-completed recook. Cold-read Lustre
-  numbers (after the cache evicts) land closer to the `/scratch` row.
+- **`/volatile` beats `/scratch` in parallel** here because the by-bank file was
+  ifarm-page-cache-hot from a just-completed recook. Cold-read Lustre numbers
+  (after the cache evicts) land closer to the `/scratch` row.
 - **Sequential is permanently Lustre-bound on `/volatile`** — single-stream RPCs
   cap around 400–500 kev/s regardless of format. Stage to `/scratch` for
   sequential work.
-- **Thread scaling is linear well past `num_cpus`** for `Lz4ByBank` on Lustre.
+- **Thread scaling is linear well past `num_cpus`** for the by-bank format on
+  Lustre.
 
 ## Format comparison on a local SSD
 
@@ -54,12 +63,12 @@ Reading the matrix:
 | Format | Sequential | Parallel | Size |
 |---|---:|---:|---:|
 | `Lz4` baseline | 980 kev/s | 5,073 kev/s | 1,135 MB |
-| `Lz4Chunked` E=32 | 2,628 kev/s (2.7×) | 5,881 kev/s (1.2×) | 1,253 MB (+10%) |
-| **`Lz4ByBank`** | **4,025 kev/s (4.1×)** | **15,675 kev/s (3.1×)** | **1,225 MB (+8%)** |
+| **by-bank** | **4,025 kev/s (4.1×)** | **15,675 kev/s (3.1×)** | **1,225 MB (+8%)** |
 
-The gap between `Lz4Chunked` and `Lz4ByBank` is the whole thesis of
-[the compression page](./compression.md): not doing the work beats doing it
-faster.
+That 4×/3× gap over whole-record `Lz4` is the whole thesis of
+[the compression page](./compression.md): not decompressing the ~85% of banks
+you never read beats decompressing them faster. (Same-variant caveat as above —
+`Lz4ByBankV2` reads at this speed and writes smaller.)
 
 ## Python vs Rust
 
@@ -100,7 +109,7 @@ sequential `Chain::events()` scan reads all 187,941 events at ~257 kev/s.
 # Rust throughput, threads = 0 → all cores
 cargo run --release --example bench_par -- /path/to/file.hipo 0
 
-# Convert a file first if you want the Lz4ByBank numbers
+# Convert a file first if you want the by-bank (Lz4ByBankV2) numbers
 cargo run --release --example recook_by_bank -- in.hipo out_by_bank.hipo
 cargo run --release --example bench_par -- out_by_bank.hipo 0
 

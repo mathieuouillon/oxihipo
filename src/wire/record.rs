@@ -1,6 +1,6 @@
 //! In-memory decoded HIPO record.
 
-use crate::compress::{ScratchBuf, decompress, decompress_into_slice};
+use crate::compress::{ScratchBuf, decompress};
 use crate::error::{HipoError, Result};
 use crate::wire::bytes::{Endianness, read_u32_le};
 use crate::wire::constants::CompressionType;
@@ -37,19 +37,6 @@ pub fn decode_record_into(
     let header_len = header.header_length as usize;
     let payload_disk_len = header.payload_bytes() as usize;
     let payload_disk = &src[header_len..header_len + payload_disk_len];
-
-    if matches!(header.compression, CompressionType::Lz4Chunked) {
-        // `payload_disk` (minus trailing alignment padding) is the
-        // chunked compressed payload section. Inflate in-place into
-        // `payload`, build offsets from the inline `event_sizes[]` table.
-        let pad = header.compressed_data_padding as usize;
-        let section = &payload_disk[..payload_disk_len.saturating_sub(pad)];
-        decode_chunked_into(&header, section, payload, event_offsets)?;
-        return Ok(DecodedRecord {
-            header,
-            data_start: 0,
-        });
-    }
 
     let decompressed_size = header.decompressed_payload_size();
     let pad = header.compressed_data_padding as usize;
@@ -100,184 +87,6 @@ pub fn decode_record_into(
         header.index_array_length + header.user_header_length + header.user_header_padding as u32;
 
     Ok(DecodedRecord { header, data_start })
-}
-
-/// Decode an `Lz4Chunked` compressed payload section into `payload`
-/// (resized to the total decompressed bytes) and build `event_offsets`
-/// directly from the inline `event_sizes[]` table.
-///
-/// Layout — see `build_chunked_record_bytes` in `write::record` for the
-/// authoritative spec. The section length is
-/// `Σ compressed_chunk_sizes + table_bytes` (no trailing padding — the
-/// caller has already stripped the 4-byte alignment pad).
-fn decode_chunked_into(
-    header: &RecordHeader,
-    section: &[u8],
-    payload: &mut Vec<u8>,
-    event_offsets: &mut Vec<u32>,
-) -> Result<()> {
-    // We don't support big-endian chunked records — the writer always
-    // emits little-endian, and there are no historical chunked records
-    // in the wild that we'd need to byte-swap. Reject explicitly so the
-    // failure mode is loud.
-    if matches!(header.endianness, Endianness::Big) {
-        return Err(HipoError::CorruptRecord {
-            offset: 0,
-            reason: "Lz4Chunked: big-endian records not supported",
-        });
-    }
-
-    let event_count = header.event_count as usize;
-
-    if section.len() < 8 {
-        return Err(HipoError::CorruptRecord {
-            offset: 0,
-            reason: "Lz4Chunked: chunk table truncated (header)",
-        });
-    }
-    let num_chunks = read_u32_le(section, 0) as usize;
-    // events_per_chunk (offset 4) is informational — we don't need it
-    // for decoding since each chunk's bytes/decompressed-size are
-    // explicit in the tables below.
-
-    let event_sizes_off = 8;
-    let event_sizes_bytes = event_count * 4;
-    let comp_sizes_off = event_sizes_off + event_sizes_bytes;
-    let comp_sizes_bytes = num_chunks * 4;
-    let decomp_sizes_off = comp_sizes_off + comp_sizes_bytes;
-    let decomp_sizes_bytes = num_chunks * 4;
-    let payload_off = decomp_sizes_off + decomp_sizes_bytes;
-
-    if section.len() < payload_off {
-        return Err(HipoError::CorruptRecord {
-            offset: 0,
-            reason: "Lz4Chunked: chunk table truncated (sizes)",
-        });
-    }
-
-    // Build event_offsets from the inline `event_sizes[]` table — no
-    // decompression needed for this step (the partial-decompression win).
-    event_offsets.clear();
-    event_offsets.reserve(event_count + 1);
-    event_offsets.push(0u32);
-    let mut acc: u32 = 0;
-    for i in 0..event_count {
-        let size = read_u32_le(section, event_sizes_off + i * 4);
-        acc = acc.saturating_add(size);
-        event_offsets.push(acc);
-    }
-    let total_decompressed = acc as usize;
-
-    // Sanity: total_decompressed must equal Σ decompressed_chunk_sizes
-    // and must equal header.data_length.
-    if total_decompressed != header.data_length as usize {
-        return Err(HipoError::CorruptRecord {
-            offset: 0,
-            reason: "Lz4Chunked: Σ event_sizes != header.data_length",
-        });
-    }
-
-    // Parse per-chunk sizes and validate the total compressed length.
-    let mut comp_sizes: Vec<u32> = Vec::with_capacity(num_chunks);
-    let mut decomp_sizes: Vec<u32> = Vec::with_capacity(num_chunks);
-    let mut sum_decomp: u64 = 0;
-    let mut sum_comp: u64 = 0;
-    for c in 0..num_chunks {
-        let cs = read_u32_le(section, comp_sizes_off + c * 4);
-        let ds = read_u32_le(section, decomp_sizes_off + c * 4);
-        comp_sizes.push(cs);
-        decomp_sizes.push(ds);
-        sum_comp += cs as u64;
-        sum_decomp += ds as u64;
-    }
-    if sum_decomp as usize != total_decompressed {
-        return Err(HipoError::CorruptRecord {
-            offset: 0,
-            reason: "Lz4Chunked: Σ decompressed_chunk_sizes != Σ event_sizes",
-        });
-    }
-    if payload_off + sum_comp as usize > section.len() {
-        return Err(HipoError::CorruptRecord {
-            offset: 0,
-            reason: "Lz4Chunked: chunk payloads run past section end",
-        });
-    }
-
-    // Resize the destination buffer to the exact total. Existing
-    // capacity is preserved on shrink.
-    payload.clear();
-    if payload.capacity() < total_decompressed {
-        payload.reserve_exact(total_decompressed - payload.capacity());
-    }
-    payload.resize(total_decompressed, 0);
-
-    // Split the destination into N disjoint mutable slices, one per
-    // chunk. `split_at_mut` lets us hand out non-aliased slices for
-    // parallel use.
-    let mut dst_slices: Vec<&mut [u8]> = Vec::with_capacity(num_chunks);
-    {
-        let mut rest: &mut [u8] = payload.as_mut_slice();
-        for &ds in &decomp_sizes {
-            let (head, tail) = rest.split_at_mut(ds as usize);
-            dst_slices.push(head);
-            rest = tail;
-        }
-        debug_assert!(rest.is_empty());
-    }
-
-    // Slice the source side analogously.
-    let mut src_slices: Vec<&[u8]> = Vec::with_capacity(num_chunks);
-    {
-        let mut off = payload_off;
-        for &cs in &comp_sizes {
-            let cs = cs as usize;
-            src_slices.push(&section[off..off + cs]);
-            off += cs;
-        }
-    }
-
-    // Inflate chunks in parallel. `rayon::scope` uses the global pool;
-    // when called inside a `for_each` worker (nested rayon), it
-    // shares that pool — no deadlock. For sequential callers this is
-    // a free win: idle cores on the record get used.
-    //
-    // We collect per-task results into a Vec<Result<()>> to surface
-    // the first error after the scope completes (panicking inside
-    // rayon::scope would propagate, which is heavier than we want).
-    let work: Vec<(usize, &[u8], &mut [u8])> = src_slices
-        .into_iter()
-        .zip(dst_slices)
-        .enumerate()
-        .map(|(i, (s, d))| (i, s, d))
-        .collect();
-
-    // One result slot per chunk; written by exactly one thread.
-    let mut results: Vec<Option<Result<()>>> = (0..num_chunks).map(|_| None).collect();
-    {
-        let results_slots: Vec<&mut Option<Result<()>>> = results.iter_mut().collect();
-        rayon::scope(|s| {
-            for ((idx, src, dst), out_slot) in work.into_iter().zip(results_slots) {
-                s.spawn(move |_| {
-                    let r = decompress_into_slice(CompressionType::Lz4, src, dst).map(|_| ());
-                    *out_slot = Some(r);
-                    let _ = idx; // index only used for debugging
-                });
-            }
-        });
-    }
-    for r in results {
-        match r {
-            Some(Ok(())) => {}
-            Some(Err(e)) => return Err(e),
-            None => {
-                return Err(HipoError::Compression(
-                    "Lz4Chunked: rayon worker dropped without writing result",
-                ));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// One decompressed HIPO record.
@@ -348,10 +157,10 @@ impl Record {
         header: RecordHeader,
     ) -> Result<()> {
         if header.compression.is_by_bank() {
-            // By-bank records (v1/v2) can't be loaded into a single payload
-            // buffer — they keep banks individually compressed for
-            // partial decode. Callers must use `ByBankRecord::parse`
-            // instead. Bug to reach here in production code.
+            // By-bank records can't be loaded into a single payload buffer —
+            // they keep banks individually compressed for partial decode.
+            // Callers must use `ByBankRecord::parse` instead. Bug to reach
+            // here in production code.
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "Record::load on by-bank record; use ByBankRecord::parse",
@@ -366,19 +175,6 @@ impl Record {
         let header_len = header.header_length as usize;
         let payload_len_on_disk = header.payload_bytes() as usize;
         let payload_disk = &compressed_record[header_len..header_len + payload_len_on_disk];
-
-        if matches!(header.compression, CompressionType::Lz4Chunked) {
-            let pad = header.compressed_data_padding as usize;
-            let section = &payload_disk[..payload_len_on_disk.saturating_sub(pad)];
-            decode_chunked_into(
-                &header,
-                section,
-                self.payload.vec_mut(),
-                &mut self.event_offsets,
-            )?;
-            self.header = header;
-            return Ok(());
-        }
 
         let decompressed_size = header.decompressed_payload_size();
         let pad = header.compressed_data_padding as usize;
@@ -447,11 +243,6 @@ impl Record {
     }
 
     pub fn user_header(&self) -> &[u8] {
-        if matches!(self.header.compression, CompressionType::Lz4Chunked) {
-            // Chunked records carry no user header in the decompressed
-            // payload (and writers never produce one for data records).
-            return &[];
-        }
         let lo = self.header.index_array_length as usize;
         let hi = lo + self.header.user_header_length as usize;
         &self.payload.as_slice()[lo..hi]
@@ -465,17 +256,9 @@ impl Record {
     }
 
     fn data_section_offset(&self) -> usize {
-        if matches!(self.header.compression, CompressionType::Lz4Chunked) {
-            // Chunked records skip the index array entirely — the
-            // `event_sizes[]` table lives in the compressed payload
-            // section, not inside the decompressed buffer. The
-            // decompressed buffer is just concatenated event bytes.
-            0
-        } else {
-            self.header.index_array_length as usize
-                + self.header.user_header_length as usize
-                + self.header.user_header_padding as usize
-        }
+        self.header.index_array_length as usize
+            + self.header.user_header_length as usize
+            + self.header.user_header_padding as usize
     }
 }
 
@@ -597,104 +380,6 @@ mod tests {
         assert_eq!(rec.event_count(), 3);
         assert_eq!(rec.event(1).unwrap().len(), 1024);
         assert!(rec.event(1).unwrap().iter().all(|&b| b == 0xCD));
-    }
-
-    #[test]
-    fn round_trip_lz4_chunked() {
-        // Mix sizes and counts so we exercise: short last chunk, byte
-        // events, kilobyte events.
-        let big_a = vec![0xAB_u8; 200];
-        let big_b = vec![0xCD_u8; 1024];
-        let big_c = vec![0x12_u8; 8 * 1024];
-        let small = b"the quick brown fox".to_vec();
-        let events: Vec<Vec<u8>> = vec![
-            big_a.clone(),
-            big_b.clone(),
-            small.clone(),
-            big_c.clone(),
-            small.clone(),
-            big_a.clone(),
-            big_b.clone(),
-        ];
-        let refs: Vec<&[u8]> = events.iter().map(|e| e.as_slice()).collect();
-
-        // events_per_chunk = 3 → 3 chunks (3 / 3 / 1).
-        let mut payload_buf = Vec::new();
-        let mut compress_buf = Vec::new();
-        let raw = crate::write::record::build_record_bytes(
-            &refs,
-            &crate::schema::Dict::default(),
-            0,
-            0,
-            crate::write::Compression::Lz4Chunked {
-                events_per_chunk: 3,
-            },
-            1,
-            &mut payload_buf,
-            &mut compress_buf,
-        )
-        .unwrap();
-
-        // Load through the public Record API and assert byte equality.
-        let mut rec = Record::new();
-        rec.load(&raw).unwrap();
-        assert_eq!(rec.event_count(), events.len() as u32);
-        for (i, expected) in events.iter().enumerate() {
-            assert_eq!(rec.event(i as u32).unwrap(), expected.as_slice());
-        }
-
-        // Also exercise decode_record_into (the free function used by
-        // the chain reader).
-        let mut payload = Vec::new();
-        let mut offsets = Vec::new();
-        let dec = decode_record_into(&raw, &mut payload, &mut offsets).unwrap();
-        assert_eq!(dec.header.compression, CompressionType::Lz4Chunked);
-        assert_eq!(dec.data_start, 0);
-        // For each event, check its byte range in the decompressed
-        // payload matches the expected source bytes.
-        for (i, expected) in events.iter().enumerate() {
-            let lo = offsets[i] as usize;
-            let hi = offsets[i + 1] as usize;
-            assert_eq!(&payload[lo..hi], expected.as_slice());
-        }
-    }
-
-    #[test]
-    fn round_trip_lz4_chunked_last_partial() {
-        // 5 events with events_per_chunk = 2 → 3 chunks (2 / 2 / 1).
-        let evs: Vec<Vec<u8>> = (0..5)
-            .map(|i| {
-                let mut v = vec![0u8; 64 + i as usize * 8];
-                for (j, b) in v.iter_mut().enumerate() {
-                    *b = ((i * 31 + j as i32) & 0xff) as u8;
-                }
-                v
-            })
-            .collect();
-        let refs: Vec<&[u8]> = evs.iter().map(|e| e.as_slice()).collect();
-
-        let mut payload_buf = Vec::new();
-        let mut compress_buf = Vec::new();
-        let raw = crate::write::record::build_record_bytes(
-            &refs,
-            &crate::schema::Dict::default(),
-            0,
-            0,
-            crate::write::Compression::Lz4Chunked {
-                events_per_chunk: 2,
-            },
-            42,
-            &mut payload_buf,
-            &mut compress_buf,
-        )
-        .unwrap();
-
-        let mut rec = Record::new();
-        rec.load(&raw).unwrap();
-        assert_eq!(rec.event_count(), 5);
-        for (i, expected) in evs.iter().enumerate() {
-            assert_eq!(rec.event(i as u32).unwrap(), expected.as_slice());
-        }
     }
 
     #[test]
