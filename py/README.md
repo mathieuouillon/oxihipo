@@ -106,6 +106,8 @@ for chunk in ox.iterate("/volatile/run5042/*.hipo", "REC::Particle", step_size="
 ```python
 g = f.filtered(require=["REC::Particle"])           # events carrying a bank
 g = f.filtered(record_tag=[0x42])                   # by record tag
+g = f.filtered(event_tag=[1, 4])                    # by per-event tag (EH_TAG)
+g = f.filtered(event_tag_any=0b101)                 # tag bitmask: any of these bits set
 summary = g.skim("electrons.hipo", compression="lz4percolumn")   # SkimSummary(events, records, bytes)
 ```
 

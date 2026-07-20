@@ -43,6 +43,9 @@ fn main() {
 
     for i in 0..8i64 {
         w.event(|ev| {
+            // Per-event tag: one bit chosen by `i % 3` → {1, 2, 4}, so the
+            // Python event-tag filter has distinct values to select on.
+            ev.with_tag(1u32 << (i % 3) as u32);
             ev.bank("REC::Event", |b| {
                 b.row(|r| {
                     r.set("evno", 1000 + i)?;

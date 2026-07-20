@@ -51,9 +51,11 @@ surfaces as an `Err` you propagate with `?` rather than a panic. Each
 per-event allocation.
 
 :::tip Filters
-`Filter::require([...])` keeps only events carrying every named bank.
-`with_filter` is cheap — it clones the shared file handles rather than
-reopening.
+`Filter::require([...])` keeps only events carrying every named bank;
+`.record_tag([…])` skips whole records by their tag; `.event_tag([…])` /
+`.event_tag_any(mask)` keep events by their per-event `EH_TAG` (read without
+inflating any bank). All clauses AND together, and `with_filter` is cheap — it
+clones the shared file handles rather than reopening.
 :::
 
 ## Parallel scans

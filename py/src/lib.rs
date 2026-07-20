@@ -220,15 +220,18 @@ impl PyChain {
             .collect())
     }
 
-    /// A new `Chain` restricted to events carrying every bank in `require`
-    /// (and, if given, whose record tag is in `record_tag`). Cheap — clones
+    /// A new `Chain` restricted to events carrying every bank in `require`,
+    /// whose record tag is in `record_tag`, and whose per-event tag is in
+    /// `event_tag` (or overlaps the `event_tag_any` bitmask). Cheap — clones
     /// the shared file handles, does not reopen. `KeyError` if a required
     /// bank isn't in the dictionary.
-    #[pyo3(signature = (require=None, record_tag=None))]
+    #[pyo3(signature = (require=None, record_tag=None, event_tag=None, event_tag_any=None))]
     fn filtered(
         &self,
         require: Option<Vec<String>>,
         record_tag: Option<Vec<u64>>,
+        event_tag: Option<Vec<u32>>,
+        event_tag_any: Option<u32>,
     ) -> PyResult<PyChain> {
         let mut filter = oxihipo::Filter::new();
         if let Some(names) = require {
@@ -236,6 +239,12 @@ impl PyChain {
         }
         if let Some(tags) = record_tag {
             filter = filter.record_tag(tags);
+        }
+        if let Some(tags) = event_tag {
+            filter = filter.event_tag(tags);
+        }
+        if let Some(mask) = event_tag_any {
+            filter = filter.event_tag_any(mask);
         }
         let inner = self.inner.clone().with_filter(filter).map_err(to_pyerr)?;
         Ok(PyChain { inner })

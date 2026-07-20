@@ -3,8 +3,9 @@
 Runs against small committed fixtures (``tests/data/*.hipo``, written by
 ``src/bin/gen_sample.rs``) so no Rust build is needed to run them. The data
 model: 8 events; event ``i`` has ``i % 4`` particles (so 0, 4 are empty) with
-``pid = i*100 + r``, an array column ``cov`` (``float32[3]``), and one
-``REC::Event`` row per event with ``evno = 1000 + i``.
+``pid = i*100 + r``, an array column ``cov`` (``float32[3]``), one
+``REC::Event`` row per event with ``evno = 1000 + i``, and a per-event tag
+``1 << (i % 3)`` (so tags cycle 1, 2, 4).
 """
 
 import os
@@ -440,3 +441,30 @@ def test_copy_does_not_recurse(chain):
     assert shallow._c is chain._c
     with pytest.raises(TypeError):  # frozen reader isn't deep-copyable — clean error
         copy.deepcopy(chain)
+
+
+def test_event_tag_filter(chain):
+    ak = pytest.importorskip("awkward")
+    # tag = 1 << (i % 3), evno = 1000 + i.  tag == 1 → i in {0, 3, 6}.
+    got = ak.to_list(chain.filtered(event_tag=[1]).array("REC::Event", "evno"))
+    assert got == [[1000], [1003], [1006]]
+
+    # event_tag_any is a bitmask: bit 0 or bit 2 → tags {1, 4} → i in {0,2,3,5,6}.
+    n = len(ak.to_list(chain.filtered(event_tag_any=0b101).array("REC::Event", "evno")))
+    assert n == 5
+
+    # ANDs with require: tag == 2 AND carries REC::Particle (i % 4 > 0) → i in {1, 7}.
+    both = chain.filtered(require=["REC::Particle"], event_tag=[2])
+    assert ak.to_list(both.array("REC::Event", "evno")) == [[1001], [1007]]
+
+    # a tag no event carries → an empty result, not an error.
+    assert ak.to_list(chain.filtered(event_tag=[999]).array("REC::Event", "evno")) == []
+
+
+def test_event_tag_filter_survives_workers(chain):
+    # The event-tag filter must reach the worker processes (workers=).
+    ak = pytest.importorskip("awkward")
+    g = chain.filtered(event_tag=[1])
+    single = ak.to_list(g.arrays("REC::Event", ["evno"]).evno)
+    par = ak.to_list(g.arrays("REC::Event", ["evno"], workers=2).evno)
+    assert par == single == [[1000], [1003], [1006]]

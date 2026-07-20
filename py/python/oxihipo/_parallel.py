@@ -29,29 +29,36 @@ from concurrent.futures import ProcessPoolExecutor
 _CHAIN_CACHE: dict = {}
 
 
-def _worker_chain(source, require, record_tag):
+def _worker_chain(source, require, record_tag, event_tag, event_tag_any):
     key = (
         tuple(source),
         tuple(require) if require is not None else None,
         tuple(record_tag) if record_tag is not None else None,
+        tuple(event_tag) if event_tag is not None else None,
+        event_tag_any,
     )
     chain = _CHAIN_CACHE.get(key)
     if chain is None:
         import oxihipo
 
         chain = oxihipo.open(source)
-        if require is not None or record_tag is not None:
-            chain = chain.filtered(require=require, record_tag=record_tag)
+        if any(x is not None for x in (require, record_tag, event_tag, event_tag_any)):
+            chain = chain.filtered(
+                require=require,
+                record_tag=record_tag,
+                event_tag=event_tag,
+                event_tag_any=event_tag_any,
+            )
         _CHAIN_CACHE[key] = chain
     return chain
 
 
-def _read_range(source, require, record_tag, selection, start, stop, threads):
+def _read_range(source, require, record_tag, event_tag, event_tag_any, selection, start, stop, threads):
     """Worker entry point: open (once per process) the source, (re)apply the
     filter, read one global event range. Returns the raw ``read_columns``
     buffers, which are just NumPy arrays and pickle across the process
     boundary."""
-    return _worker_chain(source, require, record_tag)._c.read_columns(
+    return _worker_chain(source, require, record_tag, event_tag, event_tag_any)._c.read_columns(
         selection, start, stop, threads
     )
 
@@ -115,19 +122,19 @@ def _pool(workers):
     return ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"))
 
 
-def parallel_arrays(source, require, record_tag, selection, ranges, workers, threads, assemble):
+def parallel_arrays(source, require, record_tag, event_tag, event_tag_any, selection, ranges, workers, threads, assemble):
     """Read every range across ``workers`` processes, stitch, and assemble once.
     Holds the whole result in the parent (like a non-streaming read)."""
     with _pool(workers) as ex:
         futs = [
-            ex.submit(_read_range, source, require, record_tag, selection, s, e, threads)
+            ex.submit(_read_range, source, require, record_tag, event_tag, event_tag_any, selection, s, e, threads)
             for s, e in ranges
         ]
         results = [f.result() for f in futs]  # collected in submission (event) order
     return assemble(_concat_raw(results))
 
 
-def parallel_iterate(source, require, record_tag, selection, batches, workers, threads, assemble):
+def parallel_iterate(source, require, record_tag, event_tag, event_tag_any, selection, batches, workers, threads, assemble):
     """Stream ``batches`` across ``workers`` processes, keeping ~``workers`` reads
     in flight and yielding ``(assembled_chunk, start, stop, file_idx)`` in order.
     Resident memory stays ≈ ``workers`` chunks."""
@@ -137,7 +144,7 @@ def parallel_iterate(source, require, record_tag, selection, batches, workers, t
 
         def submit(b):
             inflight.append(
-                (ex.submit(_read_range, source, require, record_tag, selection, b[0], b[1], threads), b)
+                (ex.submit(_read_range, source, require, record_tag, event_tag, event_tag_any, selection, b[0], b[1], threads), b)
             )
 
         for _ in range(workers):

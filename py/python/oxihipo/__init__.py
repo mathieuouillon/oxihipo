@@ -220,6 +220,8 @@ class Chain:
         self._source = list(self._c.files)
         self._require = None
         self._record_tag = None
+        self._event_tag = None
+        self._event_tag_any = None
         # Per-record metadata is immutable (the Rust chain is frozen) and
         # `filtered()` builds a fresh wrapper, so it is safe to memoize.
         self._spans_cache: list | None = None
@@ -439,7 +441,8 @@ class Chain:
             # entry_start past the end, an empty bank list) as one empty result.
             if len(ranges) > 1 and selection:
                 return _parallel.parallel_arrays(
-                    self._source, self._require, self._record_tag, selection, ranges,
+                    self._source, self._require, self._record_tag,
+                    self._event_tag, self._event_tag_any, selection, ranges,
                     workers, _worker_threads(threads, workers),
                     lambda res: self._assemble(res, single, library),
                 )
@@ -586,7 +589,8 @@ class Chain:
             from . import _parallel
 
             stream = _parallel.parallel_iterate(
-                self._source, self._require, self._record_tag, selection, batches,
+                self._source, self._require, self._record_tag,
+                self._event_tag, self._event_tag_any, selection, batches,
                 workers, _worker_threads(threads, workers),
                 lambda res: self._assemble(res, single, library),
             )
@@ -627,12 +631,21 @@ class Chain:
         self,
         require: Sequence[str] | None = None,
         record_tag: Sequence[int] | None = None,
+        event_tag: Sequence[int] | None = None,
+        event_tag_any: int | None = None,
     ) -> "Chain":
-        """A new chain restricted to events carrying every bank in ``require``
-        (and, if given, whose record tag is in ``record_tag``)."""
-        new = Chain(self._reader().filtered(require, record_tag))
+        """A new chain keeping only events that carry every bank in ``require``,
+        whose record tag is in ``record_tag``, and whose per-event tag is in
+        ``event_tag`` (or overlaps the ``event_tag_any`` bitmask). Every clause
+        is applied with pushdown — non-matching events are dropped before their
+        banks are inflated. ``num_entries`` stays the pre-filter total."""
+        new = Chain(
+            self._reader().filtered(require, record_tag, event_tag, event_tag_any)
+        )
         new._require = require
         new._record_tag = record_tag
+        new._event_tag = event_tag
+        new._event_tag_any = event_tag_any
         return new
 
     def skim(self, dst: StrPath, compression: str = "lz4percolumn") -> SkimSummary:
