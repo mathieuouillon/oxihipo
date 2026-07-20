@@ -130,6 +130,9 @@ it is as cheap as a plain skim. The source file's own registry is *not* carried
 over (the closure defines a fresh scheme). A runnable end-to-end demo is
 [`examples/tag_and_skim.rs`](https://github.com/mathieuouillon/oxihipo/blob/main/examples/tag_and_skim.rs).
 
+For how tags are stored on disk, a benchmark showing the pushdown is free, and
+what's planned next, see the [event-tagging design & roadmap](../design/event-tagging.md).
+
 ## Array columns
 
 A column can hold a **fixed-length array** instead of a scalar. In schema text a

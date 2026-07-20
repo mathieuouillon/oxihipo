@@ -37,7 +37,11 @@ const sidebars = {
     {
       type: 'category',
       label: 'Design notes',
-      items: ['design/python-binding', 'design/python-vs-rust-benchmark'],
+      items: [
+        'design/event-tagging',
+        'design/python-binding',
+        'design/python-vs-rust-benchmark',
+      ],
     },
   ],
 };

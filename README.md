@@ -37,6 +37,13 @@ layers are intentionally out of scope.
   that decompress only what an analysis actually reads: `Lz4PerBank`
   (per-bank streams) and `Lz4PerColumn` (per-column streams) — see the
   benchmarks below.
+- **Event tagging.** Filter events by their per-event tag with pushdown
+  (`Filter::event_tag_any`, read without inflating any bank), name the bits
+  with the `tag_flags!` macro, persist the name registry *in the file* so tags
+  self-describe, and *write* tagged DSTs (`Chain::skim_tagged`, or Python
+  `f.filtered(event_tag="dvcs")` / `f.skim(tags=…)`). The pushdown costs
+  nothing on reads that don't use it (benchmarked below). See the
+  [event-tagging design & roadmap](https://mathieuouillon.github.io/oxihipo/docs/design/event-tagging).
 - **Pure-Rust by default**, with optional features: `lz4-c` (C LZ4
   bindings — faster decode + `Lz4Best` HC), `lz4-apple` (Apple
   `libcompression` decode), and `mimalloc-allocator`.
@@ -326,8 +333,12 @@ and **[Benchmarks](https://mathieuouillon.github.io/oxihipo/docs/performance/ben
 
 ## Known gaps
 
-- `SortedWriter` and `StreamWriter` (per-tag bin writers, auto-flush) —
-  deferred.
+- **Event tagging, Phases 4 & 5** — writer-side record-tag routing (binned
+  skims so a whole category of events shares records, for cheap coarse
+  pushdown) and a schema'd `TAG::Event` bank (for >32 flags or per-tag
+  payloads like a classifier score). Deferred until a workload needs them; the
+  five shipped phases cover the per-event-`u32` case. See the
+  [event-tagging roadmap](https://mathieuouillon.github.io/oxihipo/docs/design/event-tagging#roadmap).
 - Bench-vs-`hipo4` comparator — deferred.
 - **Intra-stream parallel inflate** for the by-bank / per-column formats, for
   very large records where a single bank's (or column's) stream is multi-MB.

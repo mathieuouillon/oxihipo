@@ -134,11 +134,25 @@ Validated on a 1.7 GB CLAS12 file (`rec_clas_022050.evio.00000.hipo`): a
 sequential `Chain::events()` scan reads all 187,941 events at ~257 kev/s.
 `Chain::for_each` fans the same scan across cores.
 
+## Event-tag filtering
+
+Filtering by the per-event tag reads a single word from the event header (or the
+record directory) — no bank is inflated — so it can only *save* work. The cost
+in the other direction is nil: comparing an unfiltered `for_each` against an
+all-pass `event_tag_any` filter that runs the tag check on **every** event
+(M4 Pro, single thread, warm cache) shows the check is below measurement noise —
+Δ ≈ 0 ns/ev on both the `Lz4` (~7.9 ns/ev) and `Lz4PerColumn` (~4.2 ns/ev)
+paths. Reads that don't use tags never enter the filter, so they are unchanged.
+Full table and method: [Event tagging](../design/event-tagging.md#performance-the-pushdown-is-free).
+
 ## Reproducing
 
 ```sh
 # Rust throughput, threads = 0 → all cores
 cargo run --release --example bench_par -- /path/to/file.hipo 0
+
+# Event-tag filter overhead (self-contained: writes a synthetic tagged file)
+cargo run --release --example bench_event_tags -- 200000 15
 
 # Convert a file first if you want the by-bank (Lz4PerBank) numbers
 cargo run --release --example recook_by_bank -- in.hipo out_by_bank.hipo
