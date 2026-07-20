@@ -15,13 +15,18 @@ crate-type = ["cdylib", "rlib"]
 # Pure-Rust core (lz4_flex decode) — the binding only reads, so it needs no
 # C LZ4 / HC compression path.
 oxihipo = { path = "..", default-features = false }
-# The abi3 stable-ABI floor stays at py39 (a cp39-abi3 wheel is forward-compatible
-# and runs on 3.13+). `requires-python = ">=3.13"` in pyproject.toml is what
-# enforces the 3.13 minimum — pip refuses to install on anything older. Raising
-# the abi3 floor to py312 is cosmetic here and broke maturin's interpreter-free
-# Windows wheel build ("Need a Python interpreter … generate-import-lib"), so we
-# keep py39.
-pyo3 = { version = "0.23", features = ["abi3-py39", "extension-module"] }
+# `requires-python = ">=3.13"` (pyproject.toml) enforces the 3.13 minimum. The
+# abi3 floor stays py39 (a cp39-abi3 wheel is forward-compatible, runs on 3.13+).
+# `generate-import-lib` lets the **Windows** wheel build *without* a Python
+# interpreter: on the CI runner maturin finds no `>=3.13` interpreter that
+# `requires-python` accepts, so it builds interpreter-free (which abi3 supports
+# via python3-dll-a). Without this feature that path errors ("Need a Python
+# interpreter to compile for Windows …"). No-op on Linux/macOS.
+pyo3 = { version = "0.23", features = [
+    "abi3-py39",
+    "extension-module",
+    "generate-import-lib",
+] }
 # rust-numpy tracks pyo3; 0.23 pairs with pyo3 0.23 and exposes the stable
 # `Vec::into_pyarray(py) -> Bound<PyArray>` zero-copy move.
 numpy = "0.23"
