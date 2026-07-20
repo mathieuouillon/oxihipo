@@ -50,7 +50,6 @@ lz4-apple = []
 
 [dev-dependencies]
 tempfile = "3"
-criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
 # tqdm-style progress bars for the `recook_by_bank` / `skim` examples.
 kdam = "0.6"
