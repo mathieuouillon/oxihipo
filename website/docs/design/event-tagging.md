@@ -36,6 +36,15 @@ The tag is read from the event header (stock formats) or the record directory
 registry rides in the file's dictionary record as one extra text bank, so it is
 additive: a reader that doesn't know about it simply skips it.
 
+**Updating a tag in place.** `Chain::set_event_tag` / `set_event_tags` (Python
+`f.set_event_tag` / `f.set_event_tags`) patch an event's `EH_TAG` on an existing
+file *without rewriting it* — a single 4-byte `pwrite`, gated by write
+permission. Because the tag must land at a fixed on-disk offset, this works only
+for **uncompressed** files (`Compression::None`); for any compressed record the
+tag is inside a compressed block, so it errors (`InPlaceTagUnsupported` /
+`ValueError`) and `skim_tagged` is the way to rewrite. The event-header magic is
+verified before every write, so a miscomputed offset can't corrupt the file.
+
 ## Performance: the pushdown is free
 
 The filter runs *before* a bank is touched, so filtering by tag can only save

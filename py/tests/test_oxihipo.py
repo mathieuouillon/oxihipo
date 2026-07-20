@@ -10,6 +10,7 @@ registry ``{dvcs: 0, sidis: 1, elastic: 2}``.
 """
 
 import os
+import shutil
 
 import numpy as np
 import pytest
@@ -548,3 +549,41 @@ def test_skim_tagged(chain, tmp_path):
     # a tags length that doesn't match the events written is a ValueError
     with pytest.raises(ValueError):
         chain.skim(str(tmp_path / "bad.hipo"), tags=np.array([1, 2], dtype=np.uint32))
+
+
+def test_set_event_tag_in_place(tmp_path):
+    # Patch tags on disk without a rewrite. Copy the *uncompressed* fixture so
+    # we mutate a throwaway file, never the committed one.
+    dst = str(tmp_path / "patch.hipo")
+    shutil.copy(os.path.join(DATA, "sample_none.hipo"), dst)
+    size_before = os.path.getsize(dst)
+
+    f = oxihipo.open(dst)
+    f.set_event_tag(2, 0xBEEF)
+    assert f.set_event_tags({4: 7, 6: 8}) == 2
+
+    # No rewrite: the file is exactly the same size.
+    assert os.path.getsize(dst) == size_before
+    # Visible through a fresh open (tags cycle 1, 2, 4 before patching).
+    tags = oxihipo.open(dst).event_tags().tolist()
+    assert tags[2] == 0xBEEF
+    assert tags[4] == 7
+    assert tags[6] == 8
+    assert tags[0] == 1 and tags[1] == 2 and tags[3] == 1  # untouched
+
+    # Out-of-range entry → IndexError.
+    with pytest.raises(IndexError):
+        oxihipo.open(dst).set_event_tag(999, 1)
+
+
+def test_set_event_tag_rejects_compressed(tmp_path):
+    # A compressed file can't be patched in place; the call raises ValueError
+    # and leaves the file byte-for-byte unchanged.
+    dst = str(tmp_path / "compressed.hipo")
+    shutil.copy(os.path.join(DATA, "sample.hipo"), dst)  # Lz4PerColumn
+    with open(dst, "rb") as fh:
+        before = fh.read()
+    with pytest.raises(ValueError):
+        oxihipo.open(dst).set_event_tag(1, 5)
+    with open(dst, "rb") as fh:
+        assert fh.read() == before

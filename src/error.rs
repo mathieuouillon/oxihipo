@@ -65,6 +65,20 @@ pub enum HipoError {
     #[error("corrupt record at offset {offset:#x}: {reason}")]
     CorruptRecord { offset: u64, reason: &'static str },
 
+    #[error("event index {index} out of range: the chain has {total} events")]
+    EventIndexOutOfRange { index: u64, total: u64 },
+
+    #[error(
+        "cannot update the event tag in place: the record at offset {offset:#x} is \
+         {compression}-compressed, so the tag lives inside a compressed block — only \
+         uncompressed (`Compression::None`) records can be patched in place; rewrite \
+         with `skim_tagged` instead"
+    )]
+    InPlaceTagUnsupported {
+        offset: u64,
+        compression: &'static str,
+    },
+
     #[error("compression error: {0}")]
     Compression(&'static str),
 

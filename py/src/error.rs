@@ -8,7 +8,9 @@
 
 use oxihipo::HipoError;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyKeyError, PyOSError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyException, PyIndexError, PyKeyError, PyOSError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 
 create_exception!(
@@ -37,7 +39,11 @@ pub(crate) fn to_pyerr(err: HipoError) -> PyErr {
             HipoError::TypeMismatch { .. } | HipoError::ColumnLengthMismatch { .. } => {
                 PyTypeError::new_err(msg)
             }
-            HipoError::SchemaParse(_) | HipoError::InvalidGlob { .. } => PyValueError::new_err(msg),
+            HipoError::SchemaParse(_)
+            | HipoError::InvalidGlob { .. }
+            | HipoError::InPlaceTagUnsupported { .. } => PyValueError::new_err(msg),
+            // An out-of-range event index is Python's `IndexError`.
+            HipoError::EventIndexOutOfRange { .. } => PyIndexError::new_err(msg),
             // Unwrap the path context to classify by the underlying cause.
             HipoError::Path { source, .. } => build(source, msg),
             // Corrupt/decompress/version/magic and anything added later

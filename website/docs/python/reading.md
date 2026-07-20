@@ -161,6 +161,22 @@ ox.open("dvcs.hipo").filtered(event_tag="dvcs")           # reread by name
 This closes the select→label→write→reread loop. A `tags` length that doesn't
 match the events written raises `ValueError`.
 
+### Updating a tag in place
+
+To change one event's tag on an **existing** file without rewriting it,
+`f.set_event_tag(entry, tag)` patches the 4 bytes on disk (and
+`f.set_event_tags({entry: tag, ...})` a batch, all-or-nothing). It needs write
+permission, and works **only for uncompressed files** (written with
+`compression="none"`): a compressed file raises `ValueError` (its tag is inside
+a compressed block — rewrite with `skim(tags=…)`), and an out-of-range entry
+raises `IndexError`.
+
+```python
+f = ox.open("run.hipo")            # written with compression="none"
+f.set_event_tag(42, 1)             # one 4-byte write, no rewrite
+f.set_event_tags({10: 1, 20: 2})   # batch
+```
+
 ## Resource management
 
 The chain closes itself when it goes out of scope — the core reads with

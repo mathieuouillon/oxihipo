@@ -12,6 +12,8 @@
 //! recycled buffer. Opening 100 files costs ≈ 0 RAM, and scanning a
 //! 10–100 GB file holds only one record (per worker) resident, not the file.
 
+use std::collections::{HashMap, hash_map::Entry};
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,9 +32,10 @@ use crate::schema::Dict;
 use crate::tag::TagRegistry;
 use crate::wire::by_bank::ByBankRecord;
 use crate::wire::bytes::write_u32_le;
-use crate::wire::constants::EH_TAG;
+use crate::wire::constants::{CompressionType, EH_TAG, RECORD_HEADER_SIZE};
 use crate::wire::per_column::PerColumnRecord;
 use crate::wire::record::{Record, decode_record_into};
+use crate::wire::record_header::RecordHeader;
 use crate::write::{Compression, WriteSummary, Writer};
 
 /// One or more HIPO files presented as a single iterable event stream.
@@ -566,6 +569,129 @@ impl Chain {
         w.finish()
     }
 
+    // ---- In-place tag update --------------------------------------------
+
+    /// Overwrite one event's per-event tag (`EH_TAG`) **in place** on disk,
+    /// without rewriting the file — a single 4-byte write. Requires write
+    /// permission on the underlying file (the open fails with an I/O error
+    /// otherwise). `tag` is a raw `u32` or a [`TagSet`](crate::TagSet).
+    ///
+    /// **Only uncompressed records (`Compression::None`) can be patched.** For
+    /// every compressed format the tag lives inside a compressed block, so
+    /// changing it needs the record re-encoded — this returns
+    /// [`HipoError::InPlaceTagUnsupported`]; use [`Self::skim_tagged`] to rewrite
+    /// those. An out-of-range `global_idx` returns
+    /// [`HipoError::EventIndexOutOfRange`]. The event header magic is verified
+    /// before the write, so a bad offset can never corrupt the file.
+    ///
+    /// The change is visible to later reads (through this or a fresh `Chain`)
+    /// immediately — records are streamed fresh on every read.
+    ///
+    /// ```no_run
+    /// # use oxihipo::Chain;
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("run.hipo")?; // written with Compression::None
+    /// chain.set_event_tag(42, 0b0000_0001_u32)?; // flag event 42
+    /// # Ok(()) }
+    /// ```
+    pub fn set_event_tag(&self, global_idx: u64, tag: impl Into<u32>) -> Result<()> {
+        self.set_event_tags([(global_idx, tag.into())]).map(|_| ())
+    }
+
+    /// Batch [`Self::set_event_tag`]: patch many events, grouping by file and
+    /// record so each file is opened once. **Every** update is validated (index
+    /// in range, record uncompressed) *before* any write, so a bad update fails
+    /// the whole batch without a partial change. Returns the number patched.
+    ///
+    /// ```no_run
+    /// # use oxihipo::Chain;
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("run.hipo")?;
+    /// chain.set_event_tags([(10, 1_u32), (20, 2), (30, 4)])?;
+    /// # Ok(()) }
+    /// ```
+    pub fn set_event_tags<I>(&self, updates: I) -> Result<usize>
+    where
+        I: IntoIterator<Item = (u64, u32)>,
+    {
+        let total = self.event_count();
+
+        // Pass 0 — resolve every update to (file, record offset, local event),
+        // erroring on an out-of-range index before touching the disk.
+        let mut targets: Vec<TagPatch> = Vec::new();
+        for (global_idx, tag) in updates {
+            let file_idx = self
+                .file_event_offsets
+                .partition_point(|&o| o <= global_idx)
+                .checked_sub(1)
+                .filter(|&fi| fi < self.files.len())
+                .ok_or(HipoError::EventIndexOutOfRange {
+                    index: global_idx,
+                    total,
+                })?;
+            let local = global_idx - self.file_event_offsets[file_idx];
+            let inner = &self.files[file_idx];
+            let (rec, ev_local) =
+                inner
+                    .index
+                    .locate(local)
+                    .ok_or(HipoError::EventIndexOutOfRange {
+                        index: global_idx,
+                        total,
+                    })?;
+            targets.push(TagPatch {
+                file_idx,
+                record_offset: inner.index.records()[rec].file_offset,
+                ev_local,
+                tag,
+            });
+        }
+        if targets.is_empty() {
+            return Ok(0);
+        }
+
+        // Pass 1 — open a read+write handle per distinct file (this is the
+        // permission gate) and read+validate each distinct record's layout
+        // (uncompressed, event count). No writes yet, so a compressed record
+        // or a permission error aborts the whole batch cleanly.
+        let mut fds: HashMap<usize, File> = HashMap::new();
+        let mut layouts: HashMap<(usize, u64), RecordLayout> = HashMap::new();
+        for t in &targets {
+            if let Entry::Vacant(slot) = fds.entry(t.file_idx) {
+                let path = self.files[t.file_idx].path();
+                let f = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .map_err(|e| HipoError::Io(e).with_path(path.to_path_buf()))?;
+                slot.insert(f);
+            }
+            if let Entry::Vacant(slot) = layouts.entry((t.file_idx, t.record_offset)) {
+                let layout = read_record_layout(&fds[&t.file_idx], t.record_offset)?;
+                slot.insert(layout);
+            }
+        }
+
+        // Pass 2 — apply. Verify the event-header magic at each computed offset
+        // before writing the 4-byte tag, so a layout miscomputation surfaces as
+        // an error rather than a corrupted event.
+        for t in &targets {
+            let fd = &fds[&t.file_idx];
+            let layout = &layouts[&(t.file_idx, t.record_offset)];
+            let event_start = t.record_offset + layout.event_start_in_record(t.ev_local)?;
+            let mut magic = [0u8; 4];
+            read_exact_at(fd, event_start, &mut magic)?;
+            if &magic != b"EVNT" {
+                return Err(HipoError::CorruptRecord {
+                    offset: event_start,
+                    reason: "event header magic mismatch during in-place tag patch",
+                });
+            }
+            write_all_at(fd, event_start + EH_TAG as u64, &t.tag.to_le_bytes())?;
+        }
+        Ok(targets.len())
+    }
+
     // ---- Event processing -----------------------------------------------
 
     /// Run `f` on every event across every file. The execution mode is
@@ -804,6 +930,131 @@ fn build_pool(threads: usize) -> Result<rayon::ThreadPool> {
         .num_threads(threads)
         .build()
         .map_err(|_| HipoError::Compression("rayon thread pool init failed"))
+}
+
+// ---- In-place tag update helpers -----------------------------------------
+
+/// One resolved in-place tag update: which file, which record, which local
+/// event, and the new tag value.
+struct TagPatch {
+    file_idx: usize,
+    record_offset: u64,
+    ev_local: u32,
+    tag: u32,
+}
+
+/// The byte geometry of one *uncompressed* record, enough to locate any event's
+/// header on disk without decompressing anything.
+struct RecordLayout {
+    /// Byte offset of the data section, relative to the record's file offset.
+    data_start_in_record: u64,
+    /// Cumulative event byte offsets within the data section (`event_count + 1`
+    /// entries; the first is 0).
+    event_offsets: Vec<u32>,
+}
+
+impl RecordLayout {
+    /// Byte offset of event `ev`'s header, relative to the record's file offset.
+    fn event_start_in_record(&self, ev: u32) -> Result<u64> {
+        let off = *self
+            .event_offsets
+            .get(ev as usize)
+            .ok_or(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "event index past record event count during in-place tag patch",
+            })?;
+        Ok(self.data_start_in_record + u64::from(off))
+    }
+}
+
+/// Read + validate the header and index array of the record at `record_offset`,
+/// returning its [`RecordLayout`]. Errors if the record is compressed (only
+/// uncompressed records are patchable in place) or malformed.
+fn read_record_layout(fd: &File, record_offset: u64) -> Result<RecordLayout> {
+    let mut hdr = [0u8; RECORD_HEADER_SIZE];
+    read_exact_at(fd, record_offset, &mut hdr)?;
+    let header = RecordHeader::parse(&hdr)?;
+    if !matches!(header.compression, CompressionType::None) {
+        return Err(HipoError::InPlaceTagUnsupported {
+            offset: record_offset,
+            compression: compression_label(header.compression),
+        });
+    }
+    // The index array (`4 * event_count` bytes of per-event sizes) must fit in
+    // the record's payload — bound the allocation against a hostile header.
+    if u64::from(header.index_array_length) > header.payload_bytes() {
+        return Err(HipoError::CorruptRecord {
+            offset: record_offset,
+            reason: "index array larger than record payload",
+        });
+    }
+    let ia_len = header.index_array_length as usize;
+    let mut index = vec![0u8; ia_len];
+    read_exact_at(
+        fd,
+        record_offset + u64::from(header.header_length),
+        &mut index,
+    )?;
+
+    let n = ia_len / 4;
+    let mut event_offsets = Vec::with_capacity(n + 1);
+    event_offsets.push(0u32);
+    let mut acc = 0u32;
+    for i in 0..n {
+        let size = u32::from_le_bytes(index[i * 4..i * 4 + 4].try_into().expect("4 bytes"));
+        acc = acc.saturating_add(size);
+        event_offsets.push(acc);
+    }
+
+    let data_start_in_record = u64::from(header.header_length)
+        + u64::from(header.index_array_length)
+        + u64::from(header.user_header_length)
+        + u64::from(header.user_header_padding);
+    Ok(RecordLayout {
+        data_start_in_record,
+        event_offsets,
+    })
+}
+
+/// Lower-case wire name of a record compression, for error messages.
+fn compression_label(c: CompressionType) -> &'static str {
+    match c {
+        CompressionType::None => "none",
+        CompressionType::Lz4 => "lz4",
+        CompressionType::Lz4Best => "lz4best",
+        CompressionType::Gzip => "gzip",
+        CompressionType::Lz4PerBank => "lz4perbank",
+        CompressionType::Lz4PerColumn => "lz4percolumn",
+    }
+}
+
+/// Positioned read. On Unix this is `pread` (no shared cursor). Elsewhere it
+/// seeks the passed handle — callers use a private handle, so this is safe.
+#[cfg(unix)]
+fn read_exact_at(f: &File, offset: u64, buf: &mut [u8]) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    f.read_exact_at(buf, offset).map_err(HipoError::Io)
+}
+
+/// Positioned write. On Unix this is `pwrite` (no shared cursor).
+#[cfg(unix)]
+fn write_all_at(f: &File, offset: u64, buf: &[u8]) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    f.write_all_at(buf, offset).map_err(HipoError::Io)
+}
+
+#[cfg(not(unix))]
+fn read_exact_at(mut f: &File, offset: u64, buf: &mut [u8]) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    f.seek(SeekFrom::Start(offset)).map_err(HipoError::Io)?;
+    f.read_exact(buf).map_err(HipoError::Io)
+}
+
+#[cfg(not(unix))]
+fn write_all_at(mut f: &File, offset: u64, buf: &[u8]) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(offset)).map_err(HipoError::Io)?;
+    f.write_all(buf).map_err(HipoError::Io)
 }
 
 /// Aggregate counters returned by [`Chain::for_each`].

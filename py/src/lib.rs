@@ -340,6 +340,27 @@ impl PyChain {
         Ok(out)
     }
 
+    /// Overwrite one event's per-event tag (`EH_TAG`) **in place** on disk,
+    /// without rewriting the file (a single 4-byte write). Requires write
+    /// permission on the file. Only uncompressed (`Compression::None`) files
+    /// can be patched — a compressed record raises `ValueError`; an
+    /// out-of-range `entry` raises `IndexError`.
+    #[pyo3(signature = (entry, tag))]
+    fn set_event_tag(&self, py: Python<'_>, entry: u64, tag: u32) -> PyResult<()> {
+        py.detach(|| self.inner.set_event_tag(entry, tag))
+            .map_err(to_pyerr)
+    }
+
+    /// Batch `set_event_tag`: `updates` is a list of `(entry, tag)` pairs.
+    /// Every update is validated (index in range, record uncompressed) before
+    /// any write, so a bad update fails the whole batch without a partial
+    /// change. Returns the number patched.
+    #[pyo3(signature = (updates))]
+    fn set_event_tags(&self, py: Python<'_>, updates: Vec<(u64, u32)>) -> PyResult<usize> {
+        py.detach(|| self.inner.set_event_tags(updates))
+            .map_err(to_pyerr)
+    }
+
     /// Per-record positions (no decompression):
     /// `(file_index, record_index, global_event_start, event_count)`.
     fn record_spans(&self) -> Vec<(usize, usize, u64, u32)> {

@@ -9,8 +9,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxihipo::{
-    Chain, Compression, DataType, Dict, EventCtx, Filter, Result, Schema, TagRegistry, TagSet,
-    Writer,
+    Chain, Compression, DataType, Dict, EventCtx, Filter, HipoError, Result, Schema, TagRegistry,
+    TagSet, Writer,
 };
 
 // Named flags via the `tag_flags!` macro — the Phase 2 ergonomics.
@@ -435,4 +435,85 @@ fn skim_tagged_retags_records_registry_and_rereads_by_name() {
     let out = Chain::open(&dst).unwrap();
     assert!(out.tag_registry().is_empty(), "no names → empty registry");
     assert_eq!(surviving_evnos(&out), survivors);
+}
+
+/// In-place tag update: rewrite an event's `EH_TAG` on disk without a full
+/// rewrite (uncompressed records only). The file size is unchanged, and the new
+/// tag is visible to the same chain and to a fresh open.
+#[test]
+fn set_event_tag_patches_uncompressed_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("none.hipo");
+    write_tagged(&path, Compression::None).unwrap();
+
+    let size_before = std::fs::metadata(&path).unwrap().len();
+    let chain = Chain::open(&path).unwrap();
+
+    // A single patch, then a batch of three — assorted new tag values.
+    chain.set_event_tag(5, 0xABCD_u32).unwrap();
+    assert_eq!(
+        chain
+            .set_event_tags([(10, 7_u32), (20, 8), (30, 9)])
+            .unwrap(),
+        3
+    );
+
+    // No rewrite: the file is exactly the same size.
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), size_before);
+
+    // Visible immediately through the same chain (records stream fresh)…
+    assert_eq!(chain.event(5).unwrap().tag(), 0xABCD);
+    // …and through a fresh open, via the tag column.
+    let tags = Chain::open(&path).unwrap().event_tags(None, 1).unwrap();
+    assert_eq!(tags[5], 0xABCD);
+    assert_eq!(tags[10], 7);
+    assert_eq!(tags[20], 8);
+    assert_eq!(tags[30], 9);
+    // Untouched events keep their original tag.
+    for e in [0_i64, 6, 11, 59] {
+        assert_eq!(tags[e as usize], tag_of(e), "event {e} must be unchanged");
+    }
+
+    // A `TagSet` flows straight in, like `with_tag` / `event_tag_any`.
+    chain.set_event_tag(0, Cat::Dvcs | Cat::Elastic).unwrap();
+    assert_eq!(Chain::open(&path).unwrap().event(0).unwrap().tag(), 0b101);
+
+    // An out-of-range index errors cleanly, without writing.
+    assert!(matches!(
+        chain.set_event_tag(N as u64, 1_u32),
+        Err(HipoError::EventIndexOutOfRange { .. })
+    ));
+}
+
+/// Compressed records can't be patched in place — the tag lives inside a
+/// compressed block — so the call errors and the file is left byte-for-byte
+/// intact (use `skim_tagged` to rewrite those).
+#[test]
+fn set_event_tag_rejects_compressed_records() {
+    let dir = tempfile::tempdir().unwrap();
+    for comp in [
+        Compression::Lz4,
+        Compression::Gzip,
+        Compression::Lz4PerBank,
+        Compression::Lz4PerColumn,
+    ] {
+        let path = dir.path().join(format!("{comp:?}.hipo"));
+        write_tagged(&path, comp).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let err = Chain::open(&path)
+            .unwrap()
+            .set_event_tag(3, 1_u32)
+            .unwrap_err();
+        assert!(
+            matches!(err, HipoError::InPlaceTagUnsupported { .. }),
+            "{comp:?}: expected InPlaceTagUnsupported, got {err:?}"
+        );
+        // The file is untouched.
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "{comp:?}: file changed"
+        );
+    }
 }

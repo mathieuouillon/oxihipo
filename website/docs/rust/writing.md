@@ -130,6 +130,24 @@ it is as cheap as a plain skim. The source file's own registry is *not* carried
 over (the closure defines a fresh scheme). A runnable end-to-end demo is
 [`examples/tag_and_skim.rs`](https://github.com/mathieuouillon/oxihipo/blob/main/examples/tag_and_skim.rs).
 
+### Updating a tag in place
+
+To flip one event's tag on an **existing** file — without rewriting it —
+`Chain::set_event_tag` patches the 4-byte `EH_TAG` on disk (and
+`set_event_tags` a batch, all-or-nothing). It needs write permission on the
+file, and works **only for uncompressed files** (`Compression::None`): for a
+compressed record the tag lives inside a compressed block, so it returns
+`HipoError::InPlaceTagUnsupported` — use `skim_tagged` to rewrite those.
+
+```rust
+let chain = Chain::open("run.hipo")?;      // written with Compression::None
+chain.set_event_tag(42, EventTag::Dvcs)?;  // one 4-byte write, no rewrite
+chain.set_event_tags([(10, 1_u32), (20, 2)])?;
+```
+
+The event-header magic is verified before every write, so a bad index can't
+corrupt the file, and the change is visible to the next read immediately.
+
 For how tags are stored on disk, a benchmark showing the pushdown is free, and
 what's planned next, see the [event-tagging design & roadmap](../design/event-tagging.md).
 

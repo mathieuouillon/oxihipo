@@ -13,7 +13,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, overload
 
@@ -759,6 +759,28 @@ class Chain:
             names = list(tag_names.items()) if tag_names else None
             d = self._reader().skim(str(dst), compression, t, names)
         return SkimSummary(d["events"], d["records"], d["bytes"])
+
+    def set_event_tag(self, entry: int, tag: int) -> None:
+        """Overwrite one event's tag (``EH_TAG``) **in place** on disk, without
+        rewriting the file — a single 4-byte write. Requires write permission.
+
+        Only uncompressed files (written with ``compression="none"``) can be
+        patched: for a compressed file the tag lives inside a compressed block,
+        so this raises ``ValueError`` (rewrite with ``skim(tags=…)`` instead).
+        An out-of-range ``entry`` raises ``IndexError``. The new tag is visible
+        to a fresh :func:`open` (and to ``event_tags()``) immediately."""
+        self._reader().set_event_tag(entry, tag)
+
+    def set_event_tags(self, updates: "Mapping[int, int] | Iterable[tuple[int, int]]") -> int:
+        """Batch :meth:`set_event_tag`. ``updates`` is a ``{entry: tag}`` mapping
+        or an iterable of ``(entry, tag)`` pairs. Every update is validated (index
+        in range, record uncompressed) before any write — all-or-nothing — so a
+        bad update leaves the file unchanged. Returns the number patched."""
+        if isinstance(updates, Mapping):
+            pairs = [(int(k), int(v)) for k, v in updates.items()]
+        else:
+            pairs = [(int(e), int(t)) for e, t in updates]
+        return self._reader().set_event_tags(pairs)
 
     def __getitem__(self, key: str | tuple[str, str | Sequence[str]]):
         """Index into the chain:
