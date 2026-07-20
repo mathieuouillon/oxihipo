@@ -944,33 +944,45 @@ def arrays(
 _NP_DTYPE = {"B": "int8", "S": "int16", "I": "int32", "L": "int64", "F": "float32", "D": "float64"}
 
 
-def _flatten_column(col):
-    """One column → ``(offsets | None, flat 1-D ndarray)``. ``None`` offsets
-    means one row per event (a scalar-per-event column)."""
+def _inner_of(typechar: str | None) -> int:
+    """The per-row array length of a type char: ``"F"`` → 1, ``"F#3"`` → 3."""
+    if not typechar or "#" not in typechar:
+        return 1
+    return int(typechar.split("#", 1)[1])
+
+
+def _flatten_column(col, inner):
+    """One column → ``(offsets | None, flat 1-D ndarray)`` for a schema column of
+    per-row length ``inner``. ``None`` offsets means one row per event. The flat
+    array is row-major with ``inner`` values per row (``total_rows * inner``)."""
     import numpy as np
 
     if hasattr(col, "layout"):  # an awkward array
         import awkward as ak
 
-        if col.ndim == 1:  # flat ak → scalar per event
-            return None, ak.to_numpy(col)
-        counts = ak.to_numpy(ak.num(col, axis=1))
-        flat = ak.to_numpy(ak.flatten(col, axis=1))
-        offsets = np.concatenate(([0], np.cumsum(counts))).astype(np.int64)
-        return offsets, flat
+        # A jagged column (rows vary per event) carries one more list axis than
+        # a "flat" one-row-per-event column.
+        if col.ndim >= (3 if inner > 1 else 2):
+            counts = ak.to_numpy(ak.num(col, axis=1))
+            flat = np.ascontiguousarray(ak.to_numpy(ak.flatten(col, axis=1))).reshape(-1)
+            offsets = np.concatenate(([0], np.cumsum(counts))).astype(np.int64)
+            return offsets, flat
+        return None, np.ascontiguousarray(ak.to_numpy(col)).reshape(-1)  # one row per event
 
-    arr = np.asarray(col)
-    if arr.ndim == 1:  # 1-D NumPy → scalar per event
-        return None, arr
-    if arr.ndim == 2:  # (n_events, rows) rectangular → constant per-event counts
-        n, r = arr.shape
-        return (np.arange(n + 1, dtype=np.int64) * r), np.ascontiguousarray(arr).reshape(-1)
-    raise TypeError(f"unsupported column shape {arr.shape!r} (need 1-D, 2-D, or a jagged ak.Array)")
+    arr = np.ascontiguousarray(col)
+    flat_ndim = 2 if inner > 1 else 1
+    if arr.ndim == flat_ndim:  # one row per event  (n_events[, inner])
+        return None, arr.reshape(-1)
+    if arr.ndim == flat_ndim + 1:  # (n_events, rows[, inner]) rectangular → constant counts
+        n, r = arr.shape[0], arr.shape[1]
+        return (np.arange(n + 1, dtype=np.int64) * r), arr.reshape(-1)
+    raise TypeError(f"unsupported column shape {arr.shape!r} for a length-{inner} column")
 
 
 def _to_columnar(bank, bdata, schema):
     """One bank's ``extend`` data → ``(offsets int64, [(col, values ndarray)])``.
-    Accepts an ``ak.Array`` record (as ``arrays(bank)`` returns) or a dict of columns."""
+    Accepts an ``ak.Array`` record (as ``arrays(bank)`` returns) or a dict of
+    columns; ``schema`` maps ``col → typechar`` (with ``#N`` for array columns)."""
     import numpy as np
 
     if hasattr(bdata, "fields") and bdata.fields:  # ak record array
@@ -985,16 +997,19 @@ def _to_columnar(bank, bdata, schema):
     offsets = None
     out_cols = []
     for name, col in cols_in.items():
-        off, flat = _flatten_column(col)
-        if off is None:
-            off = np.arange(len(flat) + 1, dtype=np.int64)
+        typechar = schema.get(name)
+        inner = _inner_of(typechar)
+        off, flat = _flatten_column(col, inner)
+        if off is None:  # one row per event → derive row-unit offsets
+            off = np.arange(len(flat) // inner + 1, dtype=np.int64)
         if offsets is None:
             offsets = off
         elif not np.array_equal(offsets, off):
             raise ValueError(
                 f"bank {bank!r}: column {name!r} has different per-event row counts than the others"
             )
-        out_cols.append((name, np.ascontiguousarray(flat, dtype=_NP_DTYPE.get(schema.get(name)))))
+        base = typechar.split("#", 1)[0] if typechar else None
+        out_cols.append((name, np.ascontiguousarray(flat, dtype=_NP_DTYPE.get(base))))
     if offsets is None:
         offsets = np.zeros(1, dtype=np.int64)
     return np.ascontiguousarray(offsets, dtype=np.int64), out_cols
@@ -1008,8 +1023,7 @@ class Writer:
     bank with :meth:`new_bank`, feed columnar batches (NumPy or Awkward) with
     :meth:`extend`, then :meth:`close` — or use it as a context manager.
 
-    Array columns (``T#N``) are not yet supported by the writer; existing array
-    columns of a decorated file are copied through verbatim.
+    Scalar and fixed-length array columns (``T#N``) are both supported.
     """
 
     _w: "_RustWriter | None"
@@ -1034,7 +1048,8 @@ class Writer:
     ) -> None:
         """Declare a new bank. ``columns`` maps ``name → typechar`` (or a list of
         ``(name, typechar)``); typechar ∈ ``B/S/I/L/F/D`` (byte/short/int/long/
-        float/double). ``item`` (the unique bank id) auto-assigns when omitted."""
+        float/double), optionally with ``#N`` for a fixed-length array column
+        (e.g. ``"F#3"``). ``item`` (the unique bank id) auto-assigns when omitted."""
         cols: list[tuple[str, str]] = (
             list(columns.items())
             if isinstance(columns, dict)

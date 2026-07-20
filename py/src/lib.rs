@@ -396,10 +396,26 @@ impl PyChain {
 
 // ---- Writer ---------------------------------------------------------------
 
-/// Map a hipo type char to a [`DataType`]. Array columns (`T#N`) are not yet
-/// supported by the Python writer.
-fn dtype_from_char(c: &str) -> PyResult<DataType> {
-    Ok(match c {
+/// Parse a hipo column type — a type char, optionally with a `#N` array length:
+/// `"F"` → `(Float, 1)`, `"F#3"` → `(Float, 3)`.
+fn parse_type(s: &str) -> PyResult<(DataType, u32)> {
+    let (base, length) = match s.split_once('#') {
+        Some((b, n)) => {
+            let len: u32 = n.trim().parse().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "column type {s:?}: array length after '#' must be a positive integer"
+                ))
+            })?;
+            if len == 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "column type {s:?}: array length must be > 0"
+                )));
+            }
+            (b.trim(), len)
+        }
+        None => (s.trim(), 1),
+    };
+    let dt = match base {
         "B" => DataType::Byte,
         "S" => DataType::Short,
         "I" => DataType::Int,
@@ -408,11 +424,11 @@ fn dtype_from_char(c: &str) -> PyResult<DataType> {
         "D" => DataType::Double,
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown column type {other:?} (expected one of B/S/I/L/F/D); \
-                 array columns are not yet supported by the Python writer"
+                "unknown column type {other:?} (expected B/S/I/L/F/D, optionally `#N`)"
             )));
         }
-    })
+    };
+    Ok((dt, length))
 }
 
 /// A column's values copied out of a NumPy array into an owned, typed `Vec`,
@@ -462,16 +478,37 @@ impl ColData {
         }
     }
 
-    /// Set flat value `i` into bank-builder row `row` of column `name`.
-    fn set_at(&self, bb: &mut BankBuilder, name: &str, row: u32, i: usize) -> oxihipo::Result<()> {
-        match self {
-            ColData::I8(v) => bb.set_i8_at(name, row, v[i])?,
-            ColData::I16(v) => bb.set_i16_at(name, row, v[i])?,
-            ColData::I32(v) => bb.set_i32_at(name, row, v[i])?,
-            ColData::I64(v) => bb.set_i64_at(name, row, v[i])?,
-            ColData::F32(v) => bb.set_f32_at(name, row, v[i])?,
-            ColData::F64(v) => bb.set_f64_at(name, row, v[i])?,
-        };
+    /// Set the value(s) for bank-builder row `row`, column `name`, from flat
+    /// row `i`. A scalar column (`inner == 1`) writes `v[i]`; an array column
+    /// (`inner == N`) writes the `N`-slice `v[i*N .. i*N+N]` via `set_array_at`.
+    fn set_at(
+        &self,
+        bb: &mut BankBuilder,
+        name: &str,
+        row: u32,
+        i: usize,
+        inner: usize,
+    ) -> oxihipo::Result<()> {
+        if inner == 1 {
+            match self {
+                ColData::I8(v) => bb.set_i8_at(name, row, v[i])?,
+                ColData::I16(v) => bb.set_i16_at(name, row, v[i])?,
+                ColData::I32(v) => bb.set_i32_at(name, row, v[i])?,
+                ColData::I64(v) => bb.set_i64_at(name, row, v[i])?,
+                ColData::F32(v) => bb.set_f32_at(name, row, v[i])?,
+                ColData::F64(v) => bb.set_f64_at(name, row, v[i])?,
+            };
+        } else {
+            let (lo, hi) = (i * inner, i * inner + inner);
+            match self {
+                ColData::I8(v) => bb.set_array_at(name, row, &v[lo..hi])?,
+                ColData::I16(v) => bb.set_array_at(name, row, &v[lo..hi])?,
+                ColData::I32(v) => bb.set_array_at(name, row, &v[lo..hi])?,
+                ColData::I64(v) => bb.set_array_at(name, row, &v[lo..hi])?,
+                ColData::F32(v) => bb.set_array_at(name, row, &v[lo..hi])?,
+                ColData::F64(v) => bb.set_array_at(name, row, &v[lo..hi])?,
+            };
+        }
         Ok(())
     }
 }
@@ -482,7 +519,8 @@ struct ResolvedBank {
     schema: Schema,
     /// `n_events + 1` cumulative row offsets (event `e`'s rows = `[e]..[e+1]`).
     offsets: Vec<i64>,
-    columns: Vec<(String, ColData)>,
+    /// `(column name, values, inner length)` — inner > 1 for a `T#N` array column.
+    columns: Vec<(String, ColData, usize)>,
 }
 
 /// Columnar HIPO writer. Create a fresh file (`ox.create`) or decorate an
@@ -571,7 +609,7 @@ impl PyWriter {
         }
         let entries: Vec<(String, DataType, u32)> = cols
             .into_iter()
-            .map(|(n, t)| dtype_from_char(&t).map(|dt| (n, dt, 1u32)))
+            .map(|(n, t)| parse_type(&t).map(|(dt, len)| (n, dt, len)))
             .collect::<PyResult<_>>()?;
         self.dict
             .add(Schema::from_columns(name, group, item, entries));
@@ -616,7 +654,7 @@ impl PyWriter {
             let total_rows = *offs.last().unwrap_or(&0) as usize;
             let mut columns = Vec::with_capacity(cols.len());
             for (cname, arr) in cols {
-                let dt = schema
+                let entry = schema
                     .entries()
                     .iter()
                     .find(|e| &e.name == cname)
@@ -624,16 +662,17 @@ impl PyWriter {
                         pyo3::exceptions::PyValueError::new_err(format!(
                             "bank {name:?} has no column {cname:?}"
                         ))
-                    })?
-                    .ty;
-                let cd = ColData::from_py(dt, cname, arr)?;
-                if cd.len() != total_rows {
+                    })?;
+                let inner = entry.length as usize;
+                let cd = ColData::from_py(entry.ty, cname, arr)?;
+                let want = total_rows * inner;
+                if cd.len() != want {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "bank {name:?} column {cname:?}: {} values but offsets imply {total_rows}",
+                        "bank {name:?} column {cname:?}: {} values but offsets × inner-length imply {want}",
                         cd.len()
                     )));
                 }
-                columns.push((cname.clone(), cd));
+                columns.push((cname.clone(), cd, inner));
             }
             resolved.push(ResolvedBank {
                 schema,
@@ -678,9 +717,9 @@ impl PyWriter {
                     let hi = rb.offsets[e + 1] as usize;
                     let mut bb = BankBuilder::with_row_capacity(&rb.schema, (hi - lo) as u32);
                     bb.push_rows((hi - lo) as u32);
-                    for (cname, cd) in &rb.columns {
+                    for (cname, cd, inner) in &rb.columns {
                         for (row, i) in (lo..hi).enumerate() {
-                            cd.set_at(&mut bb, cname, row as u32, i)?;
+                            cd.set_at(&mut bb, cname, row as u32, i, *inner)?;
                         }
                     }
                     eb.add(bb);

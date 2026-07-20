@@ -27,30 +27,28 @@ with ox.create("out.hipo", compression="lz4percolumn") as w:
 ```
 
 - **`new_bank(bank, {col: typechar})`** declares a bank; each `typechar` is one
-  of `B`/`S`/`I`/`L`/`F`/`D` (byte, short, int, long, float, double). The unique
-  bank `item` auto-assigns (pass `item=`/`group=` to override).
+  of `B`/`S`/`I`/`L`/`F`/`D` (byte, short, int, long, float, double), optionally
+  with `#N` for a fixed-length **array** column (e.g. `"F#3"`). The unique bank
+  `item` auto-assigns (pass `item=`/`group=` to override).
 - **`extend({bank: data})`** appends a batch of events. `data` is an `ak.Array`
   record (exactly what `arrays(bank)` returns) or a dict of columns — a jagged
   `ak.Array` per column, or a 1-D NumPy array for a **scalar-per-event** bank.
-  Call `extend` in a loop to stream large outputs in bounded memory; every bank
-  in one call must span the same number of events.
+  (Array columns take a jagged `N * var * K` `ak.Array`, or an `(n_events, K)`
+  NumPy array for one array-row per event.) Call `extend` in a loop to stream
+  large outputs in bounded memory; every bank in one call must span the same
+  number of events.
 - **`close()`** (or leaving the `with`) writes the trailer index and returns a
   `SkimSummary` (`events` / `records` / `bytes`).
 
-A round-trip through `arrays` is exact:
+A round-trip through `arrays` is exact — array columns (`REC::Particle`'s
+`cov/F#3`) and all:
 
 ```python
 p = ox.open("in.hipo").arrays("REC::Particle")     # ak record array
 with ox.create("copy.hipo") as w:
-    w.new_bank("REC::Particle", {"px": "F", "py": "F", "pz": "F", "pid": "I"})
+    w.new_bank("REC::Particle", {"px": "F", "py": "F", "pz": "F", "pid": "I", "cov": "F#3"})
     w.extend({"REC::Particle": p})
 ```
-
-:::note Scalar columns only (for now)
-The writer handles scalar columns; fixed-length array columns (`T#N`) aren't
-supported yet. Decorating (below) still copies a file's *existing* array columns
-through verbatim.
-:::
 
 ## Decorating an existing file (add a bank)
 

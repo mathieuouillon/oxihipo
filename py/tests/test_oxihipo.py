@@ -627,10 +627,32 @@ def test_writer_scalar_bank_and_context(tmp_path):
     assert ak.to_list(f.array("RUN::config", "run")) == [[5], [5], [6]]  # one row/event
 
 
-def test_writer_rejects_array_columns(tmp_path):
-    w = oxihipo.create(str(tmp_path / "x.hipo"))
+def test_writer_array_columns(tmp_path):
+    # Fixed-length array columns (T#N) round-trip. sample.hipo's REC::Particle
+    # has cov/F#3 (a jagged array column) — read it, write it, read it back.
+    ak = pytest.importorskip("awkward")
+    p = oxihipo.open(os.path.join(DATA, "sample.hipo")).arrays("REC::Particle")
+    dst = str(tmp_path / "arr.hipo")
+    with oxihipo.create(dst) as w:
+        w.new_bank("REC::Particle", {"pid": "I", "px": "F", "cov": "F#3"})
+        w.extend({"REC::Particle": p})
+    q = oxihipo.open(dst).arrays("REC::Particle")
+    assert ak.to_list(q.pid) == ak.to_list(p.pid)
+    assert ak.to_list(q.px) == ak.to_list(p.px)
+    assert ak.to_list(q.cov) == ak.to_list(p.cov)  # the array column survives
+    assert "3 * float32" in str(q.type)
+
+    # A scalar-per-event array bank from a plain (n_events, N) NumPy array.
+    dst2 = str(tmp_path / "arr2.hipo")
+    with oxihipo.create(dst2) as w:
+        w.new_bank("VEC::mom", {"p": "F#3"})
+        w.extend({"VEC::mom": {"p": np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)}})
+    g = oxihipo.open(dst2).array("VEC::mom", "p")
+    assert ak.to_list(g) == [[[1, 2, 3]], [[4, 5, 6]]]  # one 3-vector row per event
+
+    # A bad #N length is still rejected.
     with pytest.raises(ValueError):
-        w.new_bank("BAD::bank", {"cov": "F#3"})  # array columns unsupported (v1)
+        oxihipo.create(str(tmp_path / "bad.hipo")).new_bank("B::b", {"x": "F#0"})
 
 
 def test_decorate_adds_bank(tmp_path):
