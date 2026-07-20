@@ -13,7 +13,7 @@ thiserror = "2"
 # `min_const_generics` provides `Pod for [T; N]` over a *generic* N, which
 # the array-column cast (`bank.col::<[f32; N]>()`) relies on.
 bytemuck = { version = "1", features = ["min_const_generics"] }
-lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-decode"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-decode"] }
 flate2 = { version = "1", features = ["zlib-rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -50,7 +50,7 @@ lz4-apple = []
 
 [dev-dependencies]
 tempfile = "3"
-criterion = { version = "0.7", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
 # tqdm-style progress bars for the `recook_by_bank` / `skim` examples.
 kdam = "0.6"
