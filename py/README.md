@@ -187,6 +187,13 @@ Needs a working ROOT/PyROOT (not on PyPI — conda-forge or system) plus
 [`examples/rdataframe.py`](examples/rdataframe.py) and the
 [RDataFrame guide](https://mathieuouillon.github.io/oxihipo/docs/python/rdataframe).
 
+The bridge is a **no-copy view** — `rdataframe` costs ~1 ms over the bare
+`arrays` read. But the RDF loop is single-threaded here (implicit MT doesn't work
+with the Awkward-generated source), so on a simple kernel it runs slower than the
+vectorized Awkward equivalent: use it to reuse RDF/C++ code, not for speed. Numbers
++ reproduction: [`examples/bench_rdataframe.py`](examples/bench_rdataframe.py) and
+the [RDataFrame guide's Performance section](https://mathieuouillon.github.io/oxihipo/docs/python/rdataframe#performance).
+
 ## Discovery
 
 ```python

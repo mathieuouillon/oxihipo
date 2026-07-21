@@ -116,10 +116,50 @@ for df in ox.iterate_rdataframe("/data/run5042/*.hipo", "REC::Particle", ["px"],
 single-graph global optimization across chunks — for a single histogram or count
 that's immaterial.
 
+## Performance
+
+Two things are worth knowing before you reach for this. Numbers below are a
+1 M-event synthetic `REC::Particle` file (3 M particles, LZ4-per-column),
+per-particle `pt = √(px²+py²)` filled into a 100-bin histogram — Apple M4 Pro,
+single thread, best of 7, warm cache
+([`py/examples/bench_rdataframe.py`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples/bench_rdataframe.py)):
+
+| step | time | throughput |
+|---|--:|--:|
+| `arrays` read (baseline) | 18.5 ms | 54 Mevt/s |
+| `rdataframe` build (read + wrap) | 19.6 ms | **+1.1 ms** over the read |
+| `pt` histogram — Awkward / NumPy | 39 ms | 26 Mevt/s |
+| `pt` histogram — RDataFrame | 188 ms | 5.3 Mevt/s |
+
+Plus a **one-time cling warmup** of ≈ 0.7 s to generate the `RDataSource`
+template and ≈ 0.7 s to JIT the first `Define` — ~1.4 s per process, amortized
+over the whole job.
+
+**The bridge itself is free.** `rdataframe` sits ~1 ms on top of the bare
+`arrays` read: `ak.to_rdataframe` builds a *no-copy view*, no second
+materialization.
+
+**But the RDataFrame loop is not a speed win here.** On this simple kernel,
+single-threaded RDF is ~5× slower end-to-end than the vectorized Awkward/NumPy
+equivalent — RDF walks the generated source event by event, materializing an
+`RVec` per event, where Awkward runs one flat SIMD kernel over the whole column.
+And ROOT's usual answer to that — implicit multithreading (`EnableImplicitMT`) —
+**does not work with the Awkward-generated source** (the loop hangs), so the RDF
+side stays single-threaded.
+
+So the bridge earns its keep by giving you RDF's **declarative API and ecosystem**
+— reusing an existing `Define`/`Filter`/`Histo` graph or C++ analysis code on
+HIPO data — not by going faster than staying in Awkward. The performant,
+multi-threaded route is a native C++ `RHipoDS` (it would own the threads and skip
+the per-event source overhead), which is deliberately out of the pure-Python
+core's scope.
+
 ## When *not* to use this
 
 - **A pure NumPy/Awkward analysis** — you already have the columns from
-  `arrays()`; RDataFrame adds a ROOT dependency for no gain.
+  `arrays()`; RDataFrame adds a ROOT dependency and (per the numbers above) runs
+  slower single-threaded, for no gain. Use the bridge to reuse RDF/C++ code, not
+  to speed up an analysis you'd otherwise write in Awkward.
 - **`ROOT.RDF.FromNumpy`** handles only flat, equal-length scalar columns — it
   cannot represent a jagged bank, which is most of CLAS12. This bridge exists
   precisely to carry the jaggedness.
