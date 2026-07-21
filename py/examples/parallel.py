@@ -26,9 +26,15 @@ SAMPLE = os.path.join(os.path.dirname(__file__), "..", "tests", "data", "sample.
 def main():
     source = sys.argv[1] if len(sys.argv) > 1 else SAMPLE
     max_workers = int(sys.argv[2]) if len(sys.argv) > 2 else 8
-    cols = ["px", "py", "pz", "pid"]
 
-    events = ox.open(source).num_entries
+    f = ox.open(source)
+    # Read the momentum columns when the file has them (real CLAS12 DSTs do);
+    # fall back to whatever REC::Particle actually carries, so this also runs
+    # against the small bundled sample.
+    have = f.columns("REC::Particle")
+    cols = [c for c in ("px", "py", "pz", "pid") if c in have] or have
+
+    events = f.num_entries
     print(f"{events} events; reading REC::Particle {cols}\n")
 
     # Correctness: N processes must give the same array as one.

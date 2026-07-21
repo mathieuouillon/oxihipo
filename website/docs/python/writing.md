@@ -73,3 +73,12 @@ The new banks must align 1:1 with the source events (extend all of them, in
 order) — `close` errors if you cover fewer. Existing banks, **including array
 columns**, are copied through unchanged. With `dst=None` the source is replaced
 in place via a temporary file.
+
+## Runnable examples
+
+- [`py/examples/writing.py`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples/writing.py)
+  — a new file end to end: jagged, `T#N` array, and scalar-per-event columns,
+  plus a streaming `extend` loop for bounded-memory output.
+- [`py/examples/decorate.py`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples/decorate.py)
+  — compute per-event quantities and attach them to a cooked file, verifying the
+  original banks survive untouched.

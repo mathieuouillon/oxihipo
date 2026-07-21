@@ -83,7 +83,11 @@ w.close()
 
 Runnable scripts live in
 [`py/examples/`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples)
-(`quickstart.py`, `analysis.py`, `streaming.py`, `parallel.py`).
+— each runs against the bundled sample with no arguments:
+`quickstart.py`, `analysis.py` (columnar cuts + reductions), `streaming.py`,
+`parallel.py`, `writing.py`, `decorate.py`, `event_tags.py`, `interop.py`
+(pandas / Arrow / polars / duckdb), `rdataframe.py`, plus the `bench_*.py`
+benchmarks.
 
 ## Where to go next
 

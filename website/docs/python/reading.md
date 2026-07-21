@@ -53,7 +53,9 @@ These work on `arrays` / `array` / `numpy` / `iterate`:
 - **`filter_name="REC::*"`** — glob over `bank` / `bank/column` keys.
 - **`library=`** — `"ak"` (default, `ak.Array`), `"np"` (dict of object-dtype
   `ndarray`), `"pd"` (pandas, one frame per bank), `"arrow"` (`pyarrow.Table`,
-  one `large_list` column per field — for polars / duckdb).
+  one `large_list` column per field — for polars / duckdb). All four, plus the
+  raw-buffer `numpy()` path, are demonstrated in
+  [`py/examples/interop.py`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples/interop.py).
 - **`threads=`** — `0` = all cores (default), `1` = sequential, `n` = an
   `n`-thread pool. This is parallelism *within* one process.
 - **`workers=`** — read with `N` **processes**; see
@@ -186,6 +188,10 @@ f = ox.open("run.hipo")            # written with compression="none"
 f.set_event_tag(42, 1)             # one 4-byte write, no rewrite
 f.set_event_tags({10: 1, 20: 2})   # batch
 ```
+
+All of the above — reading tags, filtering by name, tag-and-skim, and the
+in-place patch — run end to end in
+[`py/examples/event_tags.py`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples/event_tags.py).
 
 ## Scaler banks (and record tags)
 

@@ -22,9 +22,21 @@ p.px                                        # jagged: p[event].px indexes partic
 ak.sum(p.px, axis=1)                         # per-event reductions, no Python loop
 ```
 
-See [`examples/`](examples/) for runnable scripts (`quickstart.py`,
-`analysis.py`, `streaming.py`, `parallel.py`, `rdataframe.py`, and the
-`bench_*.py` benchmarks).
+Runnable scripts live in [`examples/`](examples/) — every one works against the
+bundled sample with no arguments:
+
+| | |
+|---|---|
+| [`quickstart.py`](examples/quickstart.py) | open a file, inspect it, read columns |
+| [`analysis.py`](examples/analysis.py) | a columnar analysis with Awkward (cuts, reductions) |
+| [`streaming.py`](examples/streaming.py) | `iterate` a chain bigger than RAM |
+| [`parallel.py`](examples/parallel.py) | `workers=N` multi-process reading |
+| [`writing.py`](examples/writing.py) | write a file: jagged, `T#N` array, and scalar columns |
+| [`decorate.py`](examples/decorate.py) | attach a derived bank to a cooked file |
+| [`event_tags.py`](examples/event_tags.py) | tags: filter by name, tag-and-skim, retag in place |
+| [`interop.py`](examples/interop.py) | NumPy / pandas / Arrow → polars, duckdb |
+| [`rdataframe.py`](examples/rdataframe.py) | feed ROOT's RDataFrame |
+| `bench_*.py` | read, compression, and RDataFrame benchmarks |
 
 ## Reading
 
