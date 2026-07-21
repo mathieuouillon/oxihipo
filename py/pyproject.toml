@@ -40,7 +40,11 @@ root = ["awkward>=2.6"]
 all = ["awkward>=2.6", "pandas>=2.0", "pyarrow>=14"]
 
 [project.urls]
+Homepage = "https://mathieuouillon.github.io/oxihipo/"
+Documentation = "https://mathieuouillon.github.io/oxihipo/docs/python/reading"
 Repository = "https://github.com/mathieuouillon/oxihipo"
+Changelog = "https://github.com/mathieuouillon/oxihipo/blob/main/CHANGELOG.md"
+Issues = "https://github.com/mathieuouillon/oxihipo/issues"
 
 [tool.maturin]
 # The compiled extension is `oxihipo._oxihipo`; the pure-Python ergonomics

@@ -140,19 +140,42 @@ jobs:
           name: wheels-sdist
           path: py/dist
 
-  # Publish to PyPI on a version tag. Set the `PYPI_API_TOKEN` repo secret (a
-  # PyPI project token) before pushing a `v*` tag; the job is skipped otherwise.
+  # Fail fast if the pushed tag doesn't match the packaged version, before the
+  # (irreversible) publish. `v0.1.0` must match `version` in py/pyproject.toml.
+  tag-check:
+    name: tag matches version
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Assert tag == pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          proj=$(grep -m1 '^version' py/pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "tag=$tag  pyproject=$proj"
+          test "$tag" = "$proj" || { echo "::error::tag v$tag does not match py/pyproject.toml version $proj"; exit 1; }
+
+  # Publish to PyPI on a version tag via Trusted Publishing (OIDC) — no stored
+  # token. One-time setup: on PyPI add a "pending publisher" for project
+  # `oxihipo`, repo `mathieuouillon/oxihipo`, workflow `wheels.yml`, environment
+  # `pypi`. The OIDC `id-token` below is exchanged for a short-lived upload
+  # credential; PEP 740 attestations are generated automatically.
   release:
     name: publish to PyPI
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [test, linux, macos, windows, sdist]
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [tag-check, test, linux, macos, windows, sdist]
+    environment:
+      name: pypi
+      url: https://pypi.org/p/oxihipo
+    permissions:
+      id-token: write # mint the OIDC token Trusted Publishing verifies
     steps:
       - uses: actions/download-artifact@v5
-      - name: Publish
-        uses: PyO3/maturin-action@v1
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         with:
-          command: upload
-          args: --non-interactive --skip-existing wheels-*/*
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true # flatten every artifact into dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
