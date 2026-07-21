@@ -12,8 +12,15 @@ zero-copy from buffers the Rust side fills with the GIL released.
 
 ## Install
 
-Not yet on PyPI. Build the wheel from the repo with
-[maturin](https://www.maturin.rs) and the Rust toolchain:
+```sh
+pip install oxihipo
+```
+
+Wheels ship for Linux, macOS, and Windows (CPython ≥ 3.13). NumPy is always
+pulled in; the optional backends are extras (see below).
+
+Or build from source with [maturin](https://www.maturin.rs) and the Rust
+toolchain:
 
 ```sh
 git clone https://github.com/mathieuouillon/oxihipo

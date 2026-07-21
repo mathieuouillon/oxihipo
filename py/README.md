@@ -1,5 +1,6 @@
 # oxihipo (Python)
 
+[![PyPI](https://img.shields.io/pypi/v/oxihipo)](https://pypi.org/project/oxihipo/)
 [![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/docs/python/reading)
 
 Fast, **columnar** reading *and writing* of HIPO (CLAS12) files, powered by the
@@ -226,7 +227,16 @@ a 9.1 GB CLAS12 file (598k events, Apple M4 Pro, all cores),
 [Python vs Rust benchmark](https://mathieuouillon.github.io/oxihipo/docs/design/python-vs-rust-benchmark)
 and [`examples/bench_columns.py`](examples/bench_columns.py).
 
-## Build
+## Install
+
+```sh
+pip install oxihipo          # wheels for Linux / macOS / Windows, CPython >= 3.13
+```
+
+Optional backends are extras: `oxihipo[awkward]`, `[pandas]`, `[arrow]`,
+`[root]`, or `[all]` (NumPy is always installed).
+
+### Build from source
 
 Requires the Rust toolchain and [maturin](https://www.maturin.rs).
 

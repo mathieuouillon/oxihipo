@@ -205,8 +205,10 @@ df.Define("pt", "sqrt(REC_Particle_px*REC_Particle_px + REC_Particle_py*REC_Part
   .Histo1D("pt")                                   # REC::Particle/px → REC_Particle_px
 ```
 
-Build with [maturin](https://www.maturin.rs) (`cd py && maturin develop
---release`); see the [Python guide](https://mathieuouillon.github.io/oxihipo/docs/python/reading),
+Install with `pip install oxihipo` (wheels for Linux / macOS / Windows,
+CPython ≥ 3.13), or build from source with
+[maturin](https://www.maturin.rs) (`cd py && maturin develop --release`); see the
+[Python guide](https://mathieuouillon.github.io/oxihipo/docs/python/reading),
 [`py/README.md`](py/README.md), and [`py/examples/`](py/examples/). Design notes:
 [Python binding design](https://mathieuouillon.github.io/oxihipo/docs/design/python-binding).
 
