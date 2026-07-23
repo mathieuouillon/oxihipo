@@ -12,6 +12,20 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: 'Tutorial: CLAS12 in Python',
+      items: [
+        'tutorial/tutorial-index',
+        'tutorial/clas12-and-hipo',
+        'tutorial/first-look',
+        'tutorial/particles-and-kinematics',
+        'tutorial/inclusive-dis',
+        'tutorial/detector-and-pid',
+        'tutorial/exclusive-channels',
+        'tutorial/scaling-up',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Rust guide',
       items: ['rust/reading', 'rust/writing', 'rust/design'],
     },

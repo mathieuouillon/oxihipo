@@ -36,7 +36,12 @@ bundled sample with no arguments:
 | [`event_tags.py`](examples/event_tags.py) | tags: filter by name, tag-and-skim, retag in place |
 | [`interop.py`](examples/interop.py) | NumPy / pandas / Arrow → polars, duckdb |
 | [`rdataframe.py`](examples/rdataframe.py) | feed ROOT's RDataFrame |
+| [`tutorial_sample.py`](examples/tutorial_sample.py) | generate the CLAS12-shaped sample for the [tutorial](https://mathieuouillon.github.io/oxihipo/docs/tutorial/tutorial-index) |
 | `bench_*.py` | read, compression, and RDataFrame benchmarks |
+
+New to CLAS12? The [**Python tutorial**](https://mathieuouillon.github.io/oxihipo/docs/tutorial/tutorial-index)
+builds from a first `open()` to a full multi-particle analysis (DIS kinematics,
+`pindex` joins, invariant/missing mass) on data `tutorial_sample.py` generates.
 
 ## Reading
 

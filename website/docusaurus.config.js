@@ -1,5 +1,7 @@
 // @ts-check
 import { themes as prismThemes } from 'prism-react-renderer';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
@@ -14,6 +16,15 @@ const config = {
   organizationName: 'mathieuouillon',
   projectName: 'oxihipo',
   trailingSlash: false,
+
+  // KaTeX stylesheet for the math in the tutorial (rehype-katex renders the
+  // markup at build time; this styles it in the browser).
+  stylesheets: [
+    {
+      href: 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css',
+      type: 'text/css',
+    },
+  ],
 
   // A broken link is a build failure — CI catches them before they ship.
   onBrokenLinks: 'throw',
@@ -38,6 +49,9 @@ const config = {
         docs: {
           sidebarPath: './sidebars.js',
           editUrl: 'https://github.com/mathieuouillon/oxihipo/tree/main/website/',
+          // KaTeX renders the physics formulas in the CLAS12 tutorial.
+          remarkPlugins: [remarkMath],
+          rehypePlugins: [rehypeKatex],
         },
         blog: false, // library docs, not a blog
         theme: { customCss: './src/css/custom.css' },
