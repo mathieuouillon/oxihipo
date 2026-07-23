@@ -35,7 +35,10 @@ m_gg = ak.flatten(inv_mass_2(g1, g2))      # all pair masses, flattened
 ```
 
 ```python
-plt.hist(ak.to_numpy(m_gg), bins=80, range=(0.05, 0.35))
+import mplhep as hep
+
+counts, edges = np.histogram(ak.to_numpy(m_gg), bins=80, range=(0.05, 0.35))
+hep.histplot(counts, edges, histtype="fill", alpha=0.85)
 ```
 
 ![γγ invariant mass, showing the π0 peak](/img/tutorial/pi0_mass.png)
@@ -112,7 +115,8 @@ MX = np.sqrt(np.maximum(0, miss_E**2 - miss_px**2 - miss_py**2 - miss_pz**2))
 ```
 
 ```python
-plt.hist(ak.to_numpy(MX[~ak.is_none(MX)]), bins=80, range=(0.5, 2.0))
+counts, edges = np.histogram(ak.to_numpy(MX[~ak.is_none(MX)]), bins=80, range=(0.5, 2.0))
+hep.histplot(counts, edges, histtype="fill", alpha=0.85)
 ```
 
 ![Missing mass of e' π+, with a neutron peak](/img/tutorial/missing_mass.png)

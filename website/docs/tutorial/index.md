@@ -55,9 +55,15 @@ real DSTs for physics. Every page flags what changes on real data.
 ## Setup
 
 ```bash
-pip install "oxihipo[all]"      # oxihipo + awkward + pandas + pyarrow
-pip install matplotlib          # for the plots in this tutorial
+pip install "oxihipo[all]"        # oxihipo + awkward + pandas + pyarrow
+pip install matplotlib mplhep     # plotting (mplhep = HEP histogram helpers)
 ```
+
+We plot with [**mplhep**](https://mplhep.readthedocs.io)'s `histplot` /
+`hist2dplot`, which draw pre-binned histograms the way HEP expects (bin edges in,
+step/filled bins out) instead of matplotlib's raw-data `plt.hist`. We deliberately
+**don't** call `hep.style.use(...)` — that would impose a CMS/ATLAS look; importing
+mplhep alone changes no matplotlib settings, so the figures keep plain styling.
 
 We use [Awkward Array](https://awkward-array.org) throughout — it's how oxihipo
 returns jagged, variable-length-per-event data. If you've used NumPy, the mental

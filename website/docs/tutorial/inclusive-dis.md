@@ -74,11 +74,15 @@ cross-section make electrons unreliable — a standard CLAS12 choice.
 
 ```python
 import matplotlib.pyplot as plt
+import mplhep as hep          # histogram helpers — we never call hep.style.use()
+
+# bin first, then draw: hep.hist2dplot takes counts + edges
+H, xe, ye = np.histogram2d(ak.to_numpy(xB), ak.to_numpy(Q2),
+                           bins=(60, 60), range=((0, 0.8), (0, 8)))
+H = np.where(H == 0, np.nan, H)          # leave empty bins blank
 
 fig, ax = plt.subplots()
-h = ax.hist2d(ak.to_numpy(xB), ak.to_numpy(Q2),
-              bins=60, range=((0, 0.8), (0, 8)), cmin=1)
-fig.colorbar(h[3], label="events")
+hep.hist2dplot(H, xe, ye, ax=ax, cmap="viridis")     # colorbar included
 ax.set(xlabel="$x_B$", ylabel="$Q^2$ [GeV$^2$]")
 ```
 
@@ -91,7 +95,8 @@ $Q^2$ runs from 1 to ~11 GeV² (mean ≈ 3.8) and:
 
 ```python
 W = ...                       # as above, before the W cut
-plt.hist(ak.to_numpy(W), bins=70, range=(2, 4.5))
+counts, edges = np.histogram(ak.to_numpy(W), bins=70, range=(2, 4.5))
+hep.histplot(counts, edges, histtype="fill", alpha=0.85)
 ```
 
 ![W spectrum](/img/tutorial/dis_w.png)

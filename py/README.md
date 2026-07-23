@@ -2,6 +2,12 @@
 
 [![PyPI](https://img.shields.io/pypi/v/oxihipo)](https://pypi.org/project/oxihipo/)
 [![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/docs/python/reading)
+[![Tutorial](https://img.shields.io/badge/🎓_tutorial-CLAS12_analysis_in_Python-0d7a6f)](https://mathieuouillon.github.io/oxihipo/docs/tutorial)
+
+> **New to CLAS12?** Start with the
+> **[CLAS12 analysis tutorial](https://mathieuouillon.github.io/oxihipo/docs/tutorial)** —
+> eight pages from your first `open()` to DIS kinematics, `pindex` detector joins,
+> and invariant/missing-mass spectra, with runnable code and sample data.
 
 Fast, **columnar** reading *and writing* of HIPO (CLAS12) files, powered by the
 Rust `oxihipo` core. A HIPO bank reads like a
@@ -22,26 +28,22 @@ p.px                                        # jagged: p[event].px indexes partic
 ak.sum(p.px, axis=1)                         # per-event reductions, no Python loop
 ```
 
-Runnable scripts live in [`examples/`](examples/) — every one works against the
+Runnable scripts live in [`examples/`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples) — every one works against the
 bundled sample with no arguments:
 
 | | |
 |---|---|
-| [`quickstart.py`](examples/quickstart.py) | open a file, inspect it, read columns |
-| [`analysis.py`](examples/analysis.py) | a columnar analysis with Awkward (cuts, reductions) |
-| [`streaming.py`](examples/streaming.py) | `iterate` a chain bigger than RAM |
-| [`parallel.py`](examples/parallel.py) | `workers=N` multi-process reading |
-| [`writing.py`](examples/writing.py) | write a file: jagged, `T#N` array, and scalar columns |
-| [`decorate.py`](examples/decorate.py) | attach a derived bank to a cooked file |
-| [`event_tags.py`](examples/event_tags.py) | tags: filter by name, tag-and-skim, retag in place |
-| [`interop.py`](examples/interop.py) | NumPy / pandas / Arrow → polars, duckdb |
-| [`rdataframe.py`](examples/rdataframe.py) | feed ROOT's RDataFrame |
-| [`tutorial_sample.py`](examples/tutorial_sample.py) | generate the CLAS12-shaped sample for the [tutorial](https://mathieuouillon.github.io/oxihipo/docs/tutorial) |
+| [`quickstart.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/quickstart.py) | open a file, inspect it, read columns |
+| [`analysis.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/analysis.py) | a columnar analysis with Awkward (cuts, reductions) |
+| [`streaming.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/streaming.py) | `iterate` a chain bigger than RAM |
+| [`parallel.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/parallel.py) | `workers=N` multi-process reading |
+| [`writing.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/writing.py) | write a file: jagged, `T#N` array, and scalar columns |
+| [`decorate.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/decorate.py) | attach a derived bank to a cooked file |
+| [`event_tags.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/event_tags.py) | tags: filter by name, tag-and-skim, retag in place |
+| [`interop.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/interop.py) | NumPy / pandas / Arrow → polars, duckdb |
+| [`rdataframe.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/rdataframe.py) | feed ROOT's RDataFrame |
+| [`tutorial_sample.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/tutorial_sample.py) | generate the CLAS12-shaped sample for the [tutorial](https://mathieuouillon.github.io/oxihipo/docs/tutorial) |
 | `bench_*.py` | read, compression, and RDataFrame benchmarks |
-
-New to CLAS12? The [**Python tutorial**](https://mathieuouillon.github.io/oxihipo/docs/tutorial)
-builds from a first `open()` to a full multi-particle analysis (DIS kinematics,
-`pindex` joins, invariant/missing mass) on data `tutorial_sample.py` generates.
 
 ## Reading
 
@@ -119,7 +121,7 @@ for chunk in ox.iterate("/volatile/run5042/*.hipo", "REC::Particle", step_size="
 > **Required:** any script that passes `workers=` must be guarded by
 > `if __name__ == "__main__":`. Workers are spawned (not forked — forking after
 > Rust's thread pool exists is unsafe), so each re-imports your script; without
-> the guard it would re-run at import. See [`examples/parallel.py`](examples/parallel.py).
+> the guard it would re-run at import. See [`examples/parallel.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/parallel.py).
 
 ## Filtering and skimming
 
@@ -202,14 +204,14 @@ for chunk in ox.iterate_rdataframe("run5042.hipo", "REC::Particle", ["px"], step
 Needs a working ROOT/PyROOT (not on PyPI — conda-forge or system) plus
 `awkward`; `pip install oxihipo[root]` covers the awkward side. `filter_name`,
 `entry_start`/`entry_stop`, and `.filtered(...)` all carry through. See
-[`examples/rdataframe.py`](examples/rdataframe.py) and the
+[`examples/rdataframe.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/rdataframe.py) and the
 [RDataFrame guide](https://mathieuouillon.github.io/oxihipo/docs/python/rdataframe).
 
 The bridge is a **no-copy view** — `rdataframe` costs ~1 ms over the bare
 `arrays` read. But the RDF loop is single-threaded here (implicit MT doesn't work
 with the Awkward-generated source), so on a simple kernel it runs slower than the
 vectorized Awkward equivalent: use it to reuse RDF/C++ code, not for speed. Numbers
-+ reproduction: [`examples/bench_rdataframe.py`](examples/bench_rdataframe.py) and
++ reproduction: [`examples/bench_rdataframe.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/bench_rdataframe.py) and
 the [RDataFrame guide's Performance section](https://mathieuouillon.github.io/oxihipo/docs/python/rdataframe#performance).
 
 ## Discovery
@@ -242,7 +244,7 @@ a 9.1 GB CLAS12 file (598k events, Apple M4 Pro, all cores),
 `f.arrays("REC::Particle", ["px","py","pz","pid"])` reads at ~5.6 GB/s vs Rust's
 6.3 GB/s. Details + reproduction:
 [Python vs Rust benchmark](https://mathieuouillon.github.io/oxihipo/docs/design/python-vs-rust-benchmark)
-and [`examples/bench_columns.py`](examples/bench_columns.py).
+and [`examples/bench_columns.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/bench_columns.py).
 
 ## Install
 
