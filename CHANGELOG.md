@@ -7,6 +7,38 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-23
+
+A documentation and examples release — **no library code changed**, so the API
+and behaviour are identical to 0.1.0. It exists mainly to publish a corrected
+PyPI page (a released project description cannot be edited in place).
+
+### Fixed
+
+- **PyPI project page links.** `py/README.md` is the PyPI long description, and
+  PyPI resolves relative links against `https://pypi.org/project/oxihipo/` — so
+  every `examples/…` link 404'd (e.g. `.../project/oxihipo/examples/`). All 14
+  are now absolute GitHub URLs.
+- `examples/parallel.py` requested `px,py,pz,pid` unconditionally and so failed
+  against the bundled sample (whose `REC::Particle` has only `pid`/`px`/`cov`);
+  it now intersects with the file's actual columns.
+
+### Added
+
+- **A CLAS12 analysis tutorial for Python** — eight pages on the docs site, from
+  the HIPO/bank data model through particle selection, inclusive DIS kinematics,
+  `pindex` detector joins and PID, invariant/missing-mass channels, and scaling
+  to a batch job. Every snippet is runnable against a synthetic CLAS12-shaped
+  sample produced by the new `py/examples/tutorial_sample.py`.
+- Four runnable examples: `writing.py`, `decorate.py`, `event_tags.py`, and
+  `interop.py` (NumPy / pandas / Arrow → polars, duckdb).
+- A tutorial link and badge at the top of the PyPI page.
+
+### Changed
+
+- Tutorial figures and plotting snippets use [mplhep](https://mplhep.readthedocs.io)'s
+  `histplot` / `hist2dplot`, without applying a `hep.style` theme.
+
 ## [0.1.0] - 2026-07-20
 
 First public release: a pure-Rust HIPO (CLAS12) v6 reader and writer, with a
@@ -42,5 +74,6 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mathieuouillon/oxihipo/releases/tag/v0.1.0
