@@ -48,6 +48,7 @@ const sidebars = {
         'performance/compression',
         'performance/shared-filesystems',
         'performance/benchmarks',
+        'performance/cross-implementation',
       ],
     },
     {

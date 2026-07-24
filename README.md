@@ -257,9 +257,10 @@ binding drives:
 
 All-columns drops 33.0 → 16.9 ms serial and 7.1 ms across cores, and the Python
 binding costs ~0–10% over native Rust rather than a multiple. **If you read many
-columns, don't loop events.** Method, full matrix, compression sweep, and the
-two measurement traps that produced wrong numbers before being caught:
-[`benches/cross-impl/`](benches/cross-impl/).
+columns, don't loop events.** Full matrix, compression sweep, and the two
+measurement traps that produced wrong numbers before being caught:
+[vs C++ and Java](https://mathieuouillon.github.io/oxihipo/docs/performance/cross-implementation)
+— harness in [`benches/cross-impl/`](benches/cross-impl/).
 
 ## Layout
 
