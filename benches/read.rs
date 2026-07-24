@@ -189,10 +189,10 @@ fn bench_random_access(c: &mut Criterion) {
                 b.iter(|| {
                     let mut acc = 0i64;
                     for &i in idx {
-                        if let Some(ev) = chain.event(i) {
-                            if let Some(bank) = ev.bank("REC::Event") {
-                                acc += bank.get::<i64>("evno", 0);
-                            }
+                        if let Some(ev) = chain.event(i)
+                            && let Some(bank) = ev.bank("REC::Event")
+                        {
+                            acc += bank.get::<i64>("evno", 0);
                         }
                     }
                     black_box(acc)
