@@ -35,3 +35,6 @@ fixtures/large/
 
 # Local tooling
 .claude/
+
+# cargo-fuzz build output (the targets live on their own branch)
+/fuzz/
