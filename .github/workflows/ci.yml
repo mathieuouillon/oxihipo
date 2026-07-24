@@ -77,6 +77,34 @@ jobs:
         with:
           command: check advisories licenses bans sources
 
+  # The fuzz targets are built with nightly and are not part of `cargo test`,
+  # so nothing else would notice them going stale (an API change in the crate
+  # breaks them silently). Build them; running the fuzzer is a manual job.
+  fuzz:
+    name: fuzz targets build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: fuzz
+      # Not the `@<tool>` ref shorthand: install-action's `cargo-fuzz` tag still
+      # points at the March 2024 action, which installs nothing *and exits 0* —
+      # the install step reads green and the next one dies with "no such
+      # command: fuzz". Pin the major tag and name the tool explicitly.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # `--target` is not optional here. The prebuilt cargo-fuzz is a
+      # musl-static binary, and cargo-fuzz defaults the target to its *own*
+      # build triple — so it would try to cross-compile the fuzz targets to
+      # musl, where the target is not installed and ASan cannot link against a
+      # static libc. Build for the host instead.
+      - run: |
+          cargo +nightly fuzz build --target "$(rustc +nightly -vV | sed -n 's/^host: //p')"
+
   docs:
     name: docs
     runs-on: ubuntu-latest
