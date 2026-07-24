@@ -90,7 +90,13 @@ jobs:
         with:
           workspaces: fuzz
           key: fuzz
-      - uses: taiki-e/install-action@cargo-fuzz
+      # Not the `@<tool>` ref shorthand: install-action's `cargo-fuzz` tag still
+      # points at the March 2024 action, which installs nothing *and exits 0* —
+      # the install step reads green and the next one dies with "no such
+      # command: fuzz". Pin the major tag and name the tool explicitly.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - run: cargo +nightly fuzz build
 
   docs:
