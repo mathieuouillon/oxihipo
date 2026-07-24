@@ -51,6 +51,46 @@ pub use crate::schema::{ColumnHandle, DataType, Dict, Schema, SchemaEntry};
 pub use crate::tag::{TagRegistry, TagSet};
 pub use crate::write::{BankWriter, Compression, RowWriter, WriteSummary, Writer};
 
+/// Internal entry points exposed **only** for fuzzing (`fuzz-api` feature).
+///
+/// Not part of the public API and exempt from semver: the fuzz targets need to
+/// feed bytes straight to the record decoder, below `Chain::open`'s file-header
+/// layer, so the fuzzer spends its budget on the code that handles
+/// attacker-controlled lengths rather than on getting past the header.
+#[cfg(feature = "fuzz-api")]
+pub mod fuzz_api {
+    use crate::wire::record::Record;
+
+    /// A decoded record, for the `read_record` fuzz target.
+    #[derive(Debug)]
+    pub struct FuzzRecord(Record);
+
+    impl FuzzRecord {
+        pub fn event_count(&self) -> u32 {
+            self.0.event_count()
+        }
+        pub fn event(&self, i: u32) -> Option<&[u8]> {
+            self.0.event(i)
+        }
+    }
+
+    /// Decode `bytes` as a standalone record (header at offset 0).
+    pub fn decode_record(bytes: &[u8]) -> crate::Result<FuzzRecord> {
+        let mut rec = Record::new();
+        rec.load(bytes)?;
+        Ok(FuzzRecord(rec))
+    }
+
+    /// Walk every structure of an event's bytes, touching each header and
+    /// payload span — the bounds-checked path a malformed event must survive.
+    pub fn walk_structures(event_bytes: &[u8]) {
+        let ev = crate::event::Event::new(event_bytes);
+        for (hdr, data) in ev.iter_structures() {
+            std::hint::black_box((hdr.group, hdr.item, hdr.ty, data.len()));
+        }
+    }
+}
+
 /// Unwrap an `Option<T>`; on `None`, `continue` the enclosing loop.
 ///
 /// A one-line shorthand for the `let-else` pattern that's idiomatic

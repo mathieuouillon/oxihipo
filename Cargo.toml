@@ -50,6 +50,9 @@ mimalloc-allocator = ["dep:mimalloc"]
 # Use the C LZ4 bindings (`lz4-sys`) instead of the pure-Rust `lz4_flex`.
 # Faster decompression and unlocks `LZ4_compress_HC` for `Compression::Lz4Best`.
 lz4-c = ["dep:lz4-sys"]
+# Expose internal decoder entry points to the fuzz targets (see
+# `fuzz_api`). Not for library users; exempt from semver.
+fuzz-api = []
 # Route LZ4 *decompression* through Apple's system `libcompression` framework
 # (`COMPRESSION_LZ4_RAW`). On Apple Silicon this is ~7% faster than the
 # reference C `liblz4`. Decompression-only; compression still uses

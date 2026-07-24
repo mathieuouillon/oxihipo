@@ -36,5 +36,10 @@ fixtures/large/
 # Local tooling
 .claude/
 
-# cargo-fuzz build output (the targets live on their own branch)
-/fuzz/
+# cargo-fuzz build output and crash artifacts. NOT a blanket /fuzz/ ignore:
+# fuzz/Cargo.toml, fuzz/README.md and fuzz/fuzz_targets/ are tracked sources.
+# Minimized findings belong in tests/fuzz_corpus.rs, not in artifacts/.
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/Cargo.lock
