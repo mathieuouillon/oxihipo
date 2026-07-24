@@ -102,7 +102,8 @@ jobs:
       # build triple — so it would try to cross-compile the fuzz targets to
       # musl, where the target is not installed and ASan cannot link against a
       # static libc. Build for the host instead.
-      - run: cargo +nightly fuzz build --target "$(rustc +nightly -vV | sed -n 's/^host: //p')"
+      - run: |
+          cargo +nightly fuzz build --target "$(rustc +nightly -vV | sed -n 's/^host: //p')"
 
   docs:
     name: docs
