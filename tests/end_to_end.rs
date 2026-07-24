@@ -420,3 +420,89 @@ fn no_user_config_is_empty() {
     assert!(chain.user_config().is_empty());
     assert_eq!(chain.config("anything"), None);
 }
+
+#[test]
+fn random_access_is_correct_across_records() {
+    // `Chain::event` caches the last decoded record. Exercise the patterns that
+    // could return stale data: repeats, forward runs within one record,
+    // alternating between records, and backwards traversal.
+    let dir = tempfile::tempdir().unwrap();
+    for compression in [
+        Compression::None,
+        Compression::Lz4,
+        Compression::Lz4PerBank,
+        Compression::Lz4PerColumn,
+    ] {
+        let path = dir.path().join(format!("ra_{compression:?}.hipo"));
+        let mut d = Dict::new();
+        d.add(Schema::from_columns(
+            "T::b",
+            300,
+            1,
+            [("x".into(), DataType::Long, 1)],
+        ));
+        const N: i64 = 40;
+        {
+            let mut w = Writer::create(&path)
+                .schemas(&d)
+                .compression(compression)
+                .max_record_events(3) // ~14 records, so access crosses them
+                .build()
+                .unwrap();
+            for e in 0..N {
+                w.event(|ev| {
+                    ev.bank("T::b", |b| {
+                        b.row(|r| {
+                            r.set("x", 1000 + e)?;
+                            Ok(())
+                        })?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })
+                .unwrap();
+            }
+            w.finish().unwrap();
+        }
+
+        let chain = Chain::open(&path).unwrap();
+        let get = |i: u64| {
+            chain
+                .event(i)
+                .unwrap_or_else(|| panic!("{compression:?}: event {i} missing"))
+                .bank("T::b")
+                .unwrap()
+                .get::<i64>("x", 0)
+        };
+
+        // forward, backward, repeated, and alternating-across-records
+        for i in 0..N as u64 {
+            assert_eq!(get(i), 1000 + i as i64, "{compression:?} forward {i}");
+        }
+        for i in (0..N as u64).rev() {
+            assert_eq!(get(i), 1000 + i as i64, "{compression:?} backward {i}");
+        }
+        for _ in 0..3 {
+            assert_eq!(get(7), 1007, "{compression:?} repeat");
+        }
+        for i in 0..N as u64 {
+            let j = (N as u64 - 1) - i; // alternate far apart
+            assert_eq!(get(i), 1000 + i as i64, "{compression:?} alt-a {i}");
+            assert_eq!(get(j), 1000 + j as i64, "{compression:?} alt-b {j}");
+        }
+        // A cloned chain shares the cache; it must still be correct.
+        let c2 = chain.clone();
+        for i in 0..N as u64 {
+            assert_eq!(
+                c2.event(i)
+                    .unwrap()
+                    .bank("T::b")
+                    .unwrap()
+                    .get::<i64>("x", 0),
+                1000 + i as i64,
+                "{compression:?} clone {i}"
+            );
+        }
+        assert!(chain.event(N as u64).is_none(), "{compression:?} past end");
+    }
+}

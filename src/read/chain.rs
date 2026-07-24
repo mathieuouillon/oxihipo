@@ -58,6 +58,37 @@ pub struct Chain {
     config: Arc<Vec<(String, String)>>,
     filter: Option<Filter>,
     record_tags: Option<Vec<u64>>,
+    /// Last record decoded by [`Self::event`]. Shared across clones so a
+    /// cloned chain inherits the warm record. `Mutex` (not `RefCell`) keeps
+    /// `Chain: Sync`; the lock is held only for the lookup/insert, and is
+    /// negligible next to a record decode.
+    record_cache: Arc<std::sync::Mutex<Option<RecordCache>>>,
+}
+
+/// One decoded record, kept so consecutive [`Chain::event`] calls that land in
+/// the same record don't re-read and re-decompress it.
+///
+/// Random access previously cost a full record decode *per call*: fetching M
+/// events from one record was O(M x record-decompress). Real access patterns
+/// are clustered (a sorted list of interesting event indices), so a
+/// single-record cache turns all but the first hit into a slice.
+#[derive(Debug)]
+struct RecordCache {
+    file_idx: usize,
+    rec_idx: usize,
+    decoded: CachedRecord,
+}
+
+#[derive(Debug)]
+enum CachedRecord {
+    /// Classic record: shared decompressed payload + per-event offsets.
+    Bytes {
+        payload: Arc<Vec<u8>>,
+        offsets: Vec<u32>,
+        data_start: u32,
+    },
+    ByBank(Arc<ByBankRecord>),
+    PerColumn(Arc<PerColumnRecord>),
 }
 
 impl std::fmt::Debug for Chain {
@@ -82,6 +113,7 @@ impl Default for Chain {
             config: Arc::new(Vec::new()),
             filter: None,
             record_tags: None,
+            record_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -182,6 +214,7 @@ impl Chain {
             config,
             filter: None,
             record_tags: None,
+            record_cache: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -326,51 +359,83 @@ impl Chain {
         }
         let local = idx - self.file_event_offsets[file_idx];
         let inner = &self.files[file_idx];
-        let (rec, ev_local) = inner.index.locate(local)?;
-        let span = &inner.index.records()[rec];
-        // Stream just this one record into a local buffer.
-        let mut raw = Vec::new();
-        let header = inner.read_record_into(span.file_offset, &mut raw).ok()?;
-        if header.compression.is_by_bank() {
-            let by_bank = ByBankRecord::parse(&raw).ok()?;
-            if ev_local >= by_bank.event_count() {
-                return None;
+        let (rec_idx, ev_local) = inner.index.locate(local)?;
+
+        // Serve from the cached record when this call lands in the same one as
+        // the last (the common case for a sorted list of event indices): a hit
+        // is a slice / index, with no read and no decompression.
+        let mut guard = self.record_cache.lock().ok()?;
+        let hit = guard
+            .as_ref()
+            .is_some_and(|c| c.file_idx == file_idx && c.rec_idx == rec_idx);
+        if !hit {
+            let span = &inner.index.records()[rec_idx];
+            let mut raw = Vec::new();
+            let header = inner.read_record_into(span.file_offset, &mut raw).ok()?;
+            let decoded = if header.compression.is_by_bank() {
+                CachedRecord::ByBank(ByBankRecord::parse(&raw).ok()?)
+            } else if header.compression.is_per_column() {
+                CachedRecord::PerColumn(PerColumnRecord::parse(&raw).ok()?)
+            } else {
+                let mut payload = Vec::new();
+                let mut offsets = Vec::new();
+                // Degrade to `None` on a corrupt record rather than panicking —
+                // the documented contract is `None` on failure, not an abort.
+                let d =
+                    decode_record_into(&raw, &mut payload, &mut offsets, Some(&self.dict)).ok()?;
+                CachedRecord::Bytes {
+                    payload: Arc::new(payload),
+                    offsets,
+                    data_start: d.data_start,
+                }
+            };
+            *guard = Some(RecordCache {
+                file_idx,
+                rec_idx,
+                decoded,
+            });
+        }
+
+        let cache = guard.as_ref()?;
+        match &cache.decoded {
+            CachedRecord::ByBank(rec) => {
+                if ev_local >= rec.event_count() {
+                    return None;
+                }
+                Some(OwnedEvent::by_bank(
+                    Arc::clone(rec),
+                    ev_local,
+                    Arc::clone(&self.dict),
+                ))
             }
-            return Some(OwnedEvent::by_bank(
-                by_bank,
-                ev_local,
-                Arc::clone(&self.dict),
-            ));
-        }
-        if header.compression.is_per_column() {
-            let per_column = PerColumnRecord::parse(&raw).ok()?;
-            if ev_local >= per_column.event_count() {
-                return None;
+            CachedRecord::PerColumn(rec) => {
+                if ev_local >= rec.event_count() {
+                    return None;
+                }
+                Some(OwnedEvent::per_column(
+                    Arc::clone(rec),
+                    ev_local,
+                    Arc::clone(&self.dict),
+                ))
             }
-            return Some(OwnedEvent::per_column(
-                per_column,
-                ev_local,
-                Arc::clone(&self.dict),
-            ));
+            CachedRecord::Bytes {
+                payload,
+                offsets,
+                data_start,
+            } => {
+                if ev_local as usize + 1 >= offsets.len() {
+                    return None;
+                }
+                let start = data_start + offsets[ev_local as usize];
+                let end = data_start + offsets[ev_local as usize + 1];
+                Some(OwnedEvent::slice(
+                    Arc::clone(payload),
+                    start,
+                    end,
+                    Arc::clone(&self.dict),
+                ))
+            }
         }
-        let mut payload = Vec::new();
-        let mut offsets = Vec::new();
-        // Degrade to `None` on a corrupt record rather than panicking — the
-        // by-bank / per-column branches above already do (`.ok()?`), and the
-        // documented contract is `None` on failure, not an abort.
-        let decoded =
-            decode_record_into(&raw, &mut payload, &mut offsets, Some(&self.dict)).ok()?;
-        if ev_local as usize + 1 >= offsets.len() {
-            return None;
-        }
-        let start = decoded.data_start + offsets[ev_local as usize];
-        let end = decoded.data_start + offsets[ev_local as usize + 1];
-        Some(OwnedEvent::slice(
-            Arc::new(payload),
-            start,
-            end,
-            Arc::clone(&self.dict),
-        ))
     }
 
     // ---- Column-major scan -----------------------------------------------

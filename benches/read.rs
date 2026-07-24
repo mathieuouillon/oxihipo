@@ -58,6 +58,10 @@ fn write_fixture(path: &Path, compression: Compression) {
     let mut w = Writer::create(path)
         .schemas(&dict())
         .compression(compression)
+        // Several records, so `random_access/scattered` genuinely crosses
+        // record boundaries. With one giant record every index would land in
+        // the same record and the numbers would flatter the record cache.
+        .max_record_events(2_000)
         .build()
         .unwrap();
     for e in 0..N_EVENTS {
@@ -170,22 +174,31 @@ fn bench_random_access(c: &mut Criterion) {
     for (name, path) in fixtures() {
         let chain = Chain::open(path).unwrap();
         let n = chain.event_count();
-        // A fixed, scattered index set (prime stride) — no RNG, so runs compare.
-        let idx: Vec<u64> = (0..256u64).map(|i| (i * 7919) % n).collect();
-        g.throughput(criterion::Throughput::Elements(idx.len() as u64));
-        g.bench_function(*name, |b| {
-            b.iter(|| {
-                let mut acc = 0i64;
-                for &i in &idx {
-                    if let Some(ev) = chain.event(i) {
-                        if let Some(bank) = ev.bank("REC::Event") {
-                            acc += bank.get::<i64>("evno", 0);
+        // Two access patterns, because they stress different things:
+        //   scattered — a prime stride, so almost every call lands in a new
+        //               record: the worst case, and what a record cache cannot
+        //               help with.
+        //   sorted    — an ascending slice of indices (what reading a list of
+        //               interesting events actually looks like), where
+        //               consecutive hits share a record.
+        let scattered: Vec<u64> = (0..256u64).map(|i| (i * 7919) % n).collect();
+        let sorted: Vec<u64> = (0..256u64).map(|i| i * 3).filter(|&i| i < n).collect();
+        for (pattern, idx) in [("scattered", &scattered), ("sorted", &sorted)] {
+            g.throughput(criterion::Throughput::Elements(idx.len() as u64));
+            g.bench_function(format!("{name}/{pattern}"), |b| {
+                b.iter(|| {
+                    let mut acc = 0i64;
+                    for &i in idx {
+                        if let Some(ev) = chain.event(i) {
+                            if let Some(bank) = ev.bank("REC::Event") {
+                                acc += bank.get::<i64>("evno", 0);
+                            }
                         }
                     }
-                }
-                black_box(acc)
-            })
-        });
+                    black_box(acc)
+                })
+            });
+        }
     }
     g.finish();
 }
