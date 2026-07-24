@@ -16,8 +16,9 @@ zero-copy from buffers the Rust side fills with the GIL released.
 pip install oxihipo
 ```
 
-Wheels ship for Linux, macOS, and Windows (CPython ≥ 3.13). NumPy is always
-pulled in; the optional backends are extras (see below).
+Wheels ship for Linux, macOS, and Windows (CPython ≥ 3.13). That one command is
+the whole install — **every backend comes with it**, so each `library=` value
+works out of the box and there is no extra to hunt for.
 
 Or build from source with [maturin](https://www.maturin.rs) and the Rust
 toolchain:
@@ -33,18 +34,31 @@ The extension is `abi3` — one wheel per OS/arch works across CPython ≥ 3.13.
 your interpreter is newer than the pinned pyo3 knows about, build with
 `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
 
-### Optional dependencies
+### What comes with it
 
-NumPy is required. Each extra pulls in everything its backend actually imports,
-so one `pip install oxihipo[<extra>]` gives you a working backend:
+| Package | Powers |
+|---|---|
+| `numpy >= 1.24` | the columnar buffers themselves; `numpy()` and `library="np"` |
+| `awkward >= 2.6` | `array` / `arrays` (`library="ak"`, the default), and the pandas + ROOT paths |
+| `pandas >= 2.0` | `library="pd"` |
+| `pyarrow >= 14` | `library="arrow"` — assembled directly with pyarrow, no awkward on the polars/duckdb path |
 
-| Extra | Pulls in | For |
-|---|---|---|
-| *(base)* | `numpy >= 1.24` | `numpy()` — raw buffers, no Awkward import |
-| `oxihipo[awkward]` | `awkward >= 2.6` | `array` / `arrays` (`library="ak"`, the default) |
-| `oxihipo[pandas]` | awkward + pandas | `library="pd"` |
-| `oxihipo[arrow]` | `pyarrow >= 14` | `library="arrow"` — assembled directly with pyarrow, no awkward needed on the polars/duckdb path |
-| `oxihipo[all]` | awkward + pandas + pyarrow | everything |
+None of these is imported when you `import oxihipo`; each loads on first use, so
+a backend you never call costs only disk.
+
+:::warning ROOT is not on PyPI
+`rdataframe` / `iterate_rdataframe` additionally need a working ROOT with
+PyROOT, which pip cannot install. Get it from conda-forge
+(`conda install -c conda-forge root`) or your system package manager. The
+`oxihipo[root]` extra only covers the awkward side, which you already have.
+:::
+
+:::note
+The `[awkward]`, `[pandas]`, `[arrow]` and `[all]` extras still resolve so older
+install commands keep working — they are no-ops now. For a minimal footprint,
+`pip install --no-deps oxihipo numpy` still gives the `numpy()` /
+`read_columns()` paths.
+:::
 
 ## Read your first file
 

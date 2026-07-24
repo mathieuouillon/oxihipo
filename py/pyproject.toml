@@ -27,20 +27,28 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Typing :: Typed",
 ]
-# NumPy is required (the columnar buffers are ndarrays). Awkward is imported
-# lazily, only inside array()/arrays(), so the numpy() path works without it.
-dependencies = ["numpy>=1.24"]
+# Every backend by default: `pip install oxihipo` should give a package where
+# each documented `library=` value works, rather than one where `arrays()` —
+# the headline API — raises ImportError until the user finds the right extra.
+#
+# The imports stay lazy in the code, so `import oxihipo` still does not pay for
+# awkward/pandas/pyarrow unless a call actually reaches them. This only changes
+# what pip resolves.
+#
+# Note pip has no way to opt *out* of a default dependency: anyone who needs
+# the old numpy-only footprint installs with `--no-deps` and adds numpy.
+dependencies = ["numpy>=1.24", "awkward>=2.6", "pandas>=2.0", "pyarrow>=14"]
 
 [project.optional-dependencies]
-# Each extra pulls in everything its backend actually imports: the pandas and
-# arrow assemblers both go through awkward, so listing pandas/pyarrow alone
-# would install a backend that fails at first use.
+# Kept so existing `oxihipo[awkward]` / `[all]` commands and pinned CI recipes
+# keep resolving; the defaults above already satisfy them, so they are no-ops.
 awkward = ["awkward>=2.6"]
 pandas = ["awkward>=2.6", "pandas>=2.0"]
 arrow = ["pyarrow>=14"]
 # `root` = the ROOT RDataFrame bridge. Awkward's ROOT interop generates the
 # RDataSource, so it's the pip-installable part; ROOT/PyROOT itself is NOT on
 # PyPI — install it via conda-forge or your system so `import ROOT` works.
+# This is the one extra still worth naming: it documents that split.
 root = ["awkward>=2.6"]
 all = ["awkward>=2.6", "pandas>=2.0", "pyarrow>=14"]
 

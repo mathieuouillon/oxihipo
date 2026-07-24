@@ -208,7 +208,8 @@ w.close()
 And for ROOT users, `rdataframe` hands a selection to
 [RDataFrame](https://root.cern/manual/data_frame/) via Awkward's generated
 `RDataSource` — jagged banks become `RVec` columns, no copy (`iterate_rdataframe`
-streams it for bigger-than-RAM inputs). Needs ROOT + `oxihipo[root]`:
+streams it for bigger-than-RAM inputs). This is the one path needing something
+pip can't provide — a working ROOT/PyROOT (conda-forge or system):
 
 ```python
 df = ox.rdataframe("run5042.hipo", "REC::Particle", ["px", "py", "pid"])
@@ -217,7 +218,8 @@ df.Define("pt", "sqrt(REC_Particle_px*REC_Particle_px + REC_Particle_py*REC_Part
 ```
 
 Install with `pip install oxihipo` (wheels for Linux / macOS / Windows,
-CPython ≥ 3.13), or build from source with
+CPython ≥ 3.13) — every backend ships by default, so `library="ak"` / `"pd"` /
+`"np"` / `"arrow"` all work with no extra to hunt for. Or build from source with
 [maturin](https://www.maturin.rs) (`cd py && maturin develop --release`); see the
 [Python guide](https://mathieuouillon.github.io/oxihipo/docs/python/reading),
 [`py/README.md`](py/README.md), and [`py/examples/`](py/examples/). Design notes:
