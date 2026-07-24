@@ -45,6 +45,9 @@ class Chain:
         entry_stop: int | None = ...,
         threads: int = ...,
     ) -> list[_BankColumns]: ...
+    def read_columns_at(
+        self, selection: _Selection, entries: Sequence[int]
+    ) -> list[_BankColumns]: ...
     def event_tags(
         self,
         entry_start: int | None = ...,
@@ -81,7 +84,13 @@ class Chain:
 
 @final
 class Writer:
-    def __new__(cls, dst: str, compression: str = ..., source: str | None = ...) -> "Writer": ...
+    def __new__(
+        cls,
+        dst: str,
+        compression: str = ...,
+        source: str | None = ...,
+        max_record_bytes: int | None = ...,
+    ) -> "Writer": ...
     def add_schema(
         self,
         name: str,

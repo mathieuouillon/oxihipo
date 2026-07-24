@@ -10,6 +10,7 @@ NumPy-only path needs no Awkward import.
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import os
 import re
@@ -145,6 +146,58 @@ def _wrap_column(ak, offsets, values, inner_len):
     if inner_len > 1:  # T#N array column → inner fixed-size axis
         node = ak.contents.RegularArray(node, int(inner_len))
     return ak.contents.ListOffsetArray(ak.index.Index64(offsets), node)
+
+
+
+def _cut_identifiers(cut: str) -> set[str]:
+    """Bare names a cut expression reads. Used to widen the read so a cut can
+    reference a column the caller did not ask to get back."""
+    try:
+        tree = ast.parse(cut, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"cut {cut!r} is not a valid Python expression: {e}") from e
+    return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+
+
+def _cut_mask_to_rows(ak, np, mask, offsets):
+    """Normalise an evaluated cut to ``(row_keep, kept_counts)``.
+
+    Accepts the two shapes a cut can naturally produce, which is what makes one
+    keyword serve both jobs:
+
+    * **jagged** ``n_events * var * bool`` — a per-row predicate like
+      ``pid == 11``: keeps matching rows, every event survives (possibly empty).
+    * **flat** ``n_events * bool`` — a per-event predicate like
+      ``ak.any(pid == 11, axis=1)``: keeps whole events, drops the rest.
+
+    Returned as a flat row mask plus the surviving row count per event, so the
+    caller can filter the flat column buffers without an awkward round-trip and
+    without disturbing ``inner_len``.
+    """
+    counts = np.diff(offsets)
+    ndim = mask.ndim if hasattr(mask, "ndim") else 1
+    if ndim >= 2:
+        if len(mask) != len(counts):
+            raise ValueError(
+                f"cut produced {len(mask)} entries for {len(counts)} events"
+            )
+        flat = np.asarray(ak.flatten(mask))
+        if flat.dtype != bool:
+            raise ValueError(f"cut must evaluate to booleans, got {flat.dtype}")
+        if flat.size != int(offsets[-1]):
+            raise ValueError(
+                f"cut produced {flat.size} row flags for {int(offsets[-1])} rows"
+            )
+        return flat, np.asarray(ak.sum(mask, axis=1)).astype(np.int64)
+    keep = np.asarray(mask)
+    if keep.dtype != bool:
+        raise ValueError(f"cut must evaluate to booleans, got {keep.dtype}")
+    if keep.size != len(counts):
+        raise ValueError(
+            f"cut produced {keep.size} event flags for {len(counts)} events"
+        )
+    # Whole-event selection: a dropped event contributes no rows *and* no entry.
+    return np.repeat(keep, counts), counts[keep].astype(np.int64)
 
 
 def _bank_record(ak, offsets, cols):
@@ -531,6 +584,8 @@ class Chain:
         library: _Library = "ak",
         entry_start: int | None = None,
         entry_stop: int | None = None,
+        entries: "Sequence[int] | None" = None,
+        cut: str | None = None,
         threads: int = 0,
         workers: int = 1,
     ):
@@ -543,6 +598,29 @@ class Chain:
           object-dtype ``ndarray``; ``"pd"`` → pandas ``DataFrame`` (one bank)
           or ``dict`` of frames; ``"arrow"`` → a ``pyarrow.Table`` (for
           polars / duckdb).
+        - ``entries``: read exactly these global event indices instead of a
+          contiguous range — the columnar way to replay a list of interesting
+          events found by an earlier pass. Output is aligned 1:1 with the list,
+          so your order and any duplicates are preserved, and an out-of-range
+          index yields an empty entry rather than an error. **Ascending is
+          faster**: each lookup goes through the record cache, so a run inside
+          one record costs a single decode. Mutually exclusive with
+          ``entry_start``/``entry_stop``, and ignores ``threads``/``workers``
+          (the lookups run sequentially).
+        - ``cut``: a Python expression filtering the result, with the bank's
+          columns bound to jagged ``ak.Array`` values. One keyword covers both
+          granularities, chosen by what the expression evaluates to:
+
+          * per-row — ``cut="pid == 11"`` keeps matching **rows**; every event
+            survives, some possibly empty.
+          * per-event — ``cut="ak.any(pid == 11, axis=1)"`` keeps whole
+            **events** and drops the rest.
+
+          A column named only in the cut is read for it and then dropped, so
+          ``arrays("REC::Particle", ["px"], cut="pid == 11")`` returns just
+          ``px``. Needs exactly one bank. ``ak``, ``np`` and ``abs`` are in
+          scope. **The cut is evaluated as code** — build it from your own
+          source, never from untrusted input.
         - ``threads``: rayon threads *within* the read (``0`` = all cores).
         - ``workers``: read with ``N`` **processes** (disjoint record ranges,
           stitched into one result). On a parallel filesystem (ifarm) this is
@@ -552,6 +630,34 @@ class Chain:
         """
         c = self._reader()
         selection, single = self._resolve(banks, columns, filter_name)
+        keep_columns: set[str] | None = None
+        if cut is not None:
+            if len(selection) != 1:
+                raise ValueError(
+                    f"`cut` needs exactly one bank; the selection has {len(selection)}"
+                )
+            bank_name, requested = selection[0]
+            available = c.columns(bank_name)
+            extra = sorted(_cut_identifiers(cut) & set(available) - set(requested))
+            if requested and extra:
+                # Read what the cut needs, remember to drop it afterwards.
+                keep_columns = set(requested)
+                selection = [(bank_name, list(requested) + extra)]
+
+        def finish(res):
+            if cut is not None:
+                res = self._apply_cut(res, cut, keep_columns)
+            return self._assemble(res, single, library)
+
+        if entries is not None:
+            if entry_start is not None or entry_stop is not None:
+                raise ValueError(
+                    "pass either `entries` or `entry_start`/`entry_stop`, not both"
+                )
+            idx = [int(i) for i in entries]
+            if any(i < 0 for i in idx):
+                raise ValueError("`entries` indices must be non-negative")
+            return finish(c.read_columns_at(selection, idx))
         if workers and workers > 1:
             from . import _parallel
 
@@ -568,10 +674,65 @@ class Chain:
                     self._source, self._require, self._record_tag,
                     self._event_tag, self._event_tag_any, selection, ranges,
                     workers, _worker_threads(threads, workers),
-                    lambda res: self._assemble(res, single, library),
+                    finish,
                 )
-        res = c.read_columns(selection, entry_start, entry_stop, threads)
-        return self._assemble(res, single, library)
+        return finish(c.read_columns(selection, entry_start, entry_stop, threads))
+
+    def _apply_cut(self, res, cut: str, keep_columns: "set[str] | None"):
+        """Filter the raw column buffers by ``cut``, then drop any column that
+        was read only because the cut mentioned it.
+
+        The expression is evaluated with each of the bank's columns bound to a
+        jagged ``ak.Array``, which is what lets one keyword express both a
+        per-row cut (``pid == 11``) and a per-event one
+        (``ak.any(pid == 11, axis=1)``) — see :func:`_cut_mask_to_rows`.
+
+        The mask is applied to the flat buffers with NumPy rather than by
+        rebuilding through Awkward, so ``inner_len`` (array columns, ``T#N``)
+        survives untouched and every ``library=`` assembler downstream is
+        unchanged.
+        """
+        import awkward as ak
+        import numpy as np
+
+        if len(res) != 1:
+            raise ValueError(
+                "`cut` needs exactly one bank; got "
+                f"{len(res)}. Cut per bank, or filter the result yourself."
+            )
+        bname, offsets, cols = res[0]
+        offsets = np.asarray(offsets)
+        env: dict[str, Any] = {"ak": ak, "np": np, "numpy": np, "abs": abs}
+        local = {
+            name: ak.Array(_bank_record(ak, offsets, [(name, values, inner)]))[name]
+            for name, values, inner in cols
+        }
+        try:
+            # Restricted namespace, not a sandbox: `cut` is code and is
+            # evaluated. Do not build one from untrusted input.
+            mask = eval(cut, {"__builtins__": {}, **env}, local)  # noqa: S307
+        except ValueError:
+            raise
+        except Exception as e:
+            names = ", ".join(sorted(local)) or "<none>"
+            raise ValueError(
+                f"could not evaluate cut {cut!r} on {bname}: "
+                f"{type(e).__name__}: {e}. Available columns: {names}"
+            ) from e
+
+        row_keep, kept_counts = _cut_mask_to_rows(ak, np, mask, offsets)
+        new_offsets = np.zeros(len(kept_counts) + 1, dtype=np.int64)
+        np.cumsum(kept_counts, out=new_offsets[1:])
+
+        out_cols = []
+        for name, values, inner in cols:
+            if keep_columns is not None and name not in keep_columns:
+                continue
+            if inner > 1:
+                out_cols.append((name, values.reshape(-1, inner)[row_keep].reshape(-1), inner))
+            else:
+                out_cols.append((name, values[row_keep], inner))
+        return [(bname, new_offsets, out_cols)]
 
     def _assemble(self, res, single, library):
         if library == "ak":
@@ -864,8 +1025,10 @@ class Chain:
         format string instead of a dictionary schema.
 
         Composite fields are positional, so they come back named ``f0``, ``f1``,
-        … in format order. These banks are invisible to :meth:`arrays` /
-        :meth:`read_columns`, which resolve banks through the dictionary.
+        … in format order. :meth:`arrays` / :meth:`read_columns` cannot read
+        them — those need a schema — but the name still resolves through the
+        dictionary, so a composite bank does appear in :meth:`keys` and being
+        listed there does not tell you which reader to use.
 
             ev = f.composite("RUN::scaler")
             ev.f0            # first field, one sublist per event
@@ -874,7 +1037,22 @@ class Chain:
         (dict of object-dtype arrays, one entry per field)."""
         offsets, fields = self._reader().composite_columns(bank, entry_start, entry_stop)
         if not fields:
-            raise KeyError(f"no composite bank {bank!r} in this file")
+            # Two very different causes, and saying "no composite bank X" for
+            # both is actively misleading: on a real CLAS12 file *every*
+            # dictionary bank takes the second branch, and X plainly is in the
+            # file. Composites resolve through the dictionary like any other
+            # bank, so being in `keys()` says nothing about being composite.
+            if bank in self._reader().keys(False):
+                raise KeyError(
+                    f"{bank!r} is in this file but is not a composite bank — it has a "
+                    "dictionary schema, so read it with arrays()/read_columns(). "
+                    "Composite banks are the ones carrying an inline format string "
+                    "instead of a schema."
+                )
+            raise KeyError(
+                f"no bank {bank!r} in this file (looked in the dictionary; "
+                f"{len(self._reader().keys(False))} banks present)"
+            )
         if library == "np":
             import numpy as _np
 
@@ -1301,8 +1479,21 @@ class Writer:
 
     _w: "_RustWriter | None"
 
-    def __init__(self, path, compression="lz4percolumn", source=None, _inplace=None, config=None):
-        self._w = _RustWriter(str(path), compression, None if source is None else str(source))
+    def __init__(
+        self,
+        path,
+        compression="lz4percolumn",
+        source=None,
+        _inplace=None,
+        config=None,
+        max_record_bytes=None,
+    ):
+        self._w = _RustWriter(
+            str(path),
+            compression,
+            None if source is None else str(source),
+            max_record_bytes,
+        )
         if config:
             for key, value in dict(config).items():
                 self._w.add_config(str(key), str(value))
@@ -1380,6 +1571,7 @@ def create(
     path: StrPath,
     compression: str = "lz4percolumn",
     config: "Mapping[str, str] | None" = None,
+    max_record_bytes: int | None = None,
 ) -> Writer:
     """Open a new HIPO file for writing (overwrites). Declare banks with
     :meth:`Writer.new_bank`, feed batches with :meth:`Writer.extend`, then
@@ -1396,8 +1588,19 @@ def create(
       decompression; not read by the released C++/Java readers.
 
     ``config`` writes a user key/value store into the dictionary record (read
-    back via :attr:`Chain.config`); it interoperates with the C++/Java writers."""
-    return Writer(path, compression=compression, config=config)
+    back via :attr:`Chain.config`); it interoperates with the C++/Java writers.
+
+    ``max_record_bytes`` sets the record-flush target. The default (32 MB for
+    the per-bank/per-column formats, 8 MB otherwise) is tuned for compression
+    ratio and single-thread selective reads. **A reader parallelises over whole
+    records**, so it cannot use more cores than the file has records — on a
+    mid-sized file the default leaves cores idle. Aim for at least a few records
+    per core: on a 134 MB file, 4 MB records took a full parallel scan from
+    73 ms to 59 ms for 1% more size. Smaller records cost ratio because each
+    one restarts LZ4's match window."""
+    return Writer(
+        path, compression=compression, config=config, max_record_bytes=max_record_bytes
+    )
 
 
 def numpy(path: StrPath, bank: str, column: str, **kwargs: "Any") -> "Any":
@@ -1421,7 +1624,10 @@ def skim(path: StrPath, dst: StrPath, **kwargs: "Any") -> "SkimSummary":
 
 
 def recreate(
-    source: StrPath, dst: StrPath | None = None, compression: str = "lz4percolumn"
+    source: StrPath,
+    dst: StrPath | None = None,
+    compression: str = "lz4percolumn",
+    max_record_bytes: int | None = None,
 ) -> Writer:
     """Decorate an existing file: copy every event of ``source`` and attach the
     new banks you :meth:`~Writer.new_bank` + :meth:`~Writer.extend` (which must
@@ -1430,5 +1636,13 @@ def recreate(
     place via a temp file."""
     if dst is None:
         temp = str(source) + ".oxitmp"
-        return Writer(temp, compression=compression, source=source, _inplace=(str(source), temp))
-    return Writer(dst, compression=compression, source=source)
+        return Writer(
+            temp,
+            compression=compression,
+            source=source,
+            _inplace=(str(source), temp),
+            max_record_bytes=max_record_bytes,
+        )
+    return Writer(
+        dst, compression=compression, source=source, max_record_bytes=max_record_bytes
+    )

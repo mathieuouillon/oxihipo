@@ -506,3 +506,80 @@ fn random_access_is_correct_across_records() {
         assert!(chain.event(N as u64).is_none(), "{compression:?} past end");
     }
 }
+
+/// `read_columns_at` must agree with `read_columns` element for element, keep
+/// the caller's order, and treat an out-of-range index as an empty entry —
+/// the three properties the Python `entries=` keyword rests on.
+#[test]
+fn read_columns_at_matches_the_range_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("at.hipo");
+
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        31,
+        [
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
+        ],
+    ));
+    // Several records, so an index list can cross record boundaries.
+    let mut w = Writer::create(&path)
+        .schemas(&d)
+        .max_record_events(7)
+        .build()
+        .unwrap();
+    for e in 0..40i32 {
+        w.event(|ev| {
+            ev.bank("REC::Particle", |b| {
+                for r in 0..(e % 3) {
+                    b.row(|row| {
+                        row.set("pid", e * 100 + r)?;
+                        row.set("px", e as f32 + r as f32 * 0.5)?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+
+    let chain = Chain::open(&path).unwrap();
+    let sel = [("REC::Particle", &["pid", "px"][..])];
+
+    // A contiguous ascending list must reproduce the equivalent range exactly.
+    let want = chain.read_columns(&sel, Some(10..20), 1).unwrap();
+    let idx: Vec<u64> = (10..20).collect();
+    let got = chain.read_columns_at(&sel, &idx).unwrap();
+    assert_eq!(got, want, "contiguous entries must equal the same range");
+
+    // Caller order is preserved, including duplicates.
+    let shuffled = [5u64, 5, 31, 2, 17];
+    let got = chain.read_columns_at(&sel, &shuffled).unwrap();
+    assert_eq!(got[0].offsets.len(), shuffled.len() + 1);
+    for (k, &e) in shuffled.iter().enumerate() {
+        let one = chain.read_columns_at(&sel, &[e]).unwrap();
+        let rows = (got[0].offsets[k + 1] - got[0].offsets[k]) as usize;
+        assert_eq!(rows, one[0].total_rows() as usize, "row count at slot {k}");
+    }
+
+    // Out of range is an empty entry, not an error, and does not shorten the
+    // result — otherwise offsets would stop lining up with `entries`.
+    let with_oob = [3u64, 9_999, 4];
+    let got = chain.read_columns_at(&sel, &with_oob).unwrap();
+    assert_eq!(
+        got[0].offsets.len(),
+        4,
+        "one offset per requested entry + 1"
+    );
+    assert_eq!(
+        got[0].offsets[2] - got[0].offsets[1],
+        0,
+        "out-of-range index must contribute zero rows"
+    );
+}
