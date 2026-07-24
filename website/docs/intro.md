@@ -55,17 +55,17 @@ they were measured on.
 
 - A single `oxihipo` library crate. No bundled binary — downstream consumers
   build whatever frontend they need on top.
-- `cargo test`, `cargo clippy --all-targets -- -D warnings`, and
-  `cargo fmt --check` are all clean, and every PR runs them.
-- Not yet published to crates.io or PyPI; install
-  [from git](./getting-started/rust.md) or build the Python wheel
-  [with maturin](./getting-started/python.md).
+- `cargo test`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo fmt --check` are all clean, and every PR runs them on Linux, macOS and
+  Windows — alongside the declared MSRV, every feature combination, `cargo-deny`,
+  the doctests, a build of the fuzz targets, and a smoke-run of the examples.
+- The Python package is on PyPI (`pip install oxihipo`). The Rust crate is not
+  yet on crates.io — depend on it [from git](./getting-started/rust.md).
 
 ### Known gaps
 
 - `SortedWriter` and `StreamWriter` (per-tag bin writers, auto-flush) —
   deferred.
-- A bench-vs-`hipo4` comparator — deferred.
 - **Intra-stream parallel inflate for the by-bank / per-column formats**, for
   very large records where a single bank's (or column's) stream is multi-MB.
   Those streams already parallelise *across* banks in `for_each`; splitting a

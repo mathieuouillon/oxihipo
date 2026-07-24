@@ -5,7 +5,7 @@
 [![CI](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml)
 [![docs](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 
 Pure-Rust reader and writer for the **HIPO v6** binary container used at
 Jefferson Lab CLAS12. Built so that **read throughput meaningfully exceeds
@@ -34,15 +34,20 @@ layers are intentionally out of scope.
 - **Data-parallel scans.** `Chain::for_each(threads, f)` fans the work
   across cores out of order (`threads = 0` ⇒ all cores, `1` ⇒ sequential,
   `n` ⇒ exactly `n`); shared state in `f` is atomic or locked.
-> **Cross-implementation portability.** `none` / `lz4` / `lz4best` are read by
-> every HIPO implementation. `gzip` is read by the Java reader but **not** by the
-> reference C++ reader, which has no gzip decode path. The `lz4perbank` /
-> `lz4percolumn` extensions are not read by the released C++/Java readers.
-
+- **Random access that doesn't re-inflate.** `chain.event(i)` keeps the last
+  decoded record on the chain, so a run of lookups landing in the same record —
+  what replaying a list of interesting event indices actually looks like —
+  costs a slice rather than a fresh whole-record decompression. Sequential
+  iteration never consults the cache, so scan throughput is unchanged.
 - **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions
   that decompress only what an analysis actually reads: `Lz4PerBank`
   (per-bank streams) and `Lz4PerColumn` (per-column streams) — see the
   benchmarks below.
+
+  > **Cross-implementation portability.** `none` / `lz4` / `lz4best` are read by
+  > every HIPO implementation. `gzip` is read by the Java reader but **not** by
+  > the reference C++ reader, which has no gzip decode path. The `lz4perbank` /
+  > `lz4percolumn` extensions are not read by the released C++/Java readers.
 - **Event tagging.** Filter events by their per-event tag with pushdown
   (`Filter::event_tag_any`, read without inflating any bank), name the bits
   with the `tag_flags!` macro, persist the name registry *in the file* so tags
@@ -403,7 +408,6 @@ and **[Benchmarks](https://mathieuouillon.github.io/oxihipo/docs/performance/ben
   payloads like a classifier score). Deferred until a workload needs them; the
   five shipped phases cover the per-event-`u32` case. See the
   [event-tagging roadmap](https://mathieuouillon.github.io/oxihipo/docs/design/event-tagging#roadmap).
-- Bench-vs-`hipo4` comparator — deferred.
 - **Intra-stream parallel inflate** for the by-bank / per-column formats, for
   very large records where a single bank's (or column's) stream is multi-MB.
   Those streams already parallelise *across* banks in `for_each`; splitting a
@@ -411,20 +415,36 @@ and **[Benchmarks](https://mathieuouillon.github.io/oxihipo/docs/performance/ben
 
 ## CI gates
 
-Every PR runs:
-- `cargo fmt --check`
-- `cargo clippy --all-targets -- -D warnings`
+Every PR runs, on **Linux, macOS and Windows** — endianness, alignment and the
+`unsafe` decode paths are target-sensitive, so one platform is not enough:
+
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
 - `cargo test --all-targets` — unit + integration tests, including a broad
   end-to-end pass over the read/write API — metadata, sequential + random-access
   + parallel reads, every data type, filters, the columnar reader, `skim`, and
   multi-file chains (`tests/end_to_end.rs`) — plus an all-compression-format
-  write → read → cross-format-`skim` round-trip (`tests/all_formats.rs`)
+  write → read → cross-format-`skim` round-trip (`tests/all_formats.rs`), a
+  golden file from the reference C++ writer (`tests/cpp_golden.rs`), and
+  property tests (`tests/proptests.rs`)
+- `cargo test --doc` — `--all-targets` *compiles* doctests but never runs them,
+  so a broken `///` example would otherwise ship silently
+
+and on Linux:
+
+- the declared **MSRV (1.95)** builds and tests, so it cannot silently drift
+- **every feature combination** compiles (`cargo hack --feature-powerset`),
+  plus full test runs under `--no-default-features` — the pure-Rust `lz4_flex`
+  decode path nothing else exercises — and `--all-features`
+- **`cargo-deny`** — advisories, licences, banned/duplicate crates, sources
+- the **fuzz targets build** on nightly, so an API change cannot rot them
+  unnoticed (running the fuzzer stays a manual job)
+- `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings`
 - a smoke-run of the core examples end-to-end (write → read → recook → read; plus
   a small all-format encode/read sweep) so a runtime break in an example fails CI
-- `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings`
 
-The Python wheel workflow additionally runs pytest, `mypy`, and `mypy.stubtest`
-against a freshly built wheel.
+The Python wheel workflow additionally runs pytest, `mypy` and `mypy.stubtest`
+against a freshly built wheel, and builds wheels for Linux (x86_64 + aarch64),
+macOS (x86_64 + arm64) and Windows.
 
 ## License
 

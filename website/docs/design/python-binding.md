@@ -260,7 +260,7 @@ Each bank field carries its **own** shared offsets (banks have different per-eve
 - Because every bank's offsets count *every surviving event* (including the 0s), arrays from different banks are all length-`n` at the outer level and can be `ak.zip`'d / masked together. **This is why `for_each_column` cannot be reused** — its fallback emits nothing for absent events, so offsets become unreconstructable and banks silently misalign (verdict 5, R8).
 - **Bank absent from the dict entirely** → `KeyError` (a typo, fail-fast).
 - **Column absent from the schema** → `KeyError`, resolved up front before any pass (the byte-level path has no element type to synthesize a default). Documented; revisit if users want silent-empty.
-- **Composite/opaque banks** (schema-less) → excluded from `keys()` by default; error clearly if requested columnar, plus a raw `f.raw(bank, entry) -> bytes` escape hatch.
+- **Composite/opaque banks** (schema-less) → still excluded from `keys()`, and invisible to `arrays()` / `read_columns()`, which resolve banks through the dictionary. *Shipped differently from the sketch below:* rather than a raw `f.raw(bank, entry) -> bytes` escape hatch, they read columnar through [`f.composite(bank)`](../python/reading.md#composite-banks), with fields named positionally (`f0`, `f1`, …) because the inline format string carries types but no names.
 
 Invariants the materializer asserts before handoff (violation raises, never returns a misaligned array):
 ```
@@ -465,7 +465,7 @@ Distilled from the critic's risk register and the verdicts. Each is a design rul
 
 **Phase 3 — streaming & scale.** `iterate(step_size)` (int + "200 MB") over `column_batches`, module-level `oxihipo.iterate(glob, …)`, `report=True`. Fused multi-column single-pass (`arrays` shares one directory parse per record). Optional `decompress_column_into` to erase the last post-inflate copy.
 
-**Phase 4 — reach.** Native Arrow C-Data-Interface export (`to_arrow`, bypassing awkward for polars/duckdb); `threads=` tuning; composite-bank raw accessor.
+**Phase 4 — reach.** Native Arrow C-Data-Interface export (`to_arrow`, bypassing awkward for polars/duckdb); `threads=` tuning; composite-bank accessor — **shipped**, and columnar (`f.composite`) rather than the raw-bytes accessor originally sketched.
 
 ### Open decisions for the user
 
@@ -474,7 +474,7 @@ Distilled from the critic's risk register and the verdicts. Each is a design rul
 3. **`library="np"` jagged policy.** Object-dtype ndarray (uproot parity) vs `(content, counts)` flat tuple (what physicists usually want, fully zero-copy). Recommend `jagged="object"` default with a `jagged="flat"` opt-in.
 4. **`iterate` default step.** `Record` (natural boundaries, non-uniform sizes) vs `Events(n)` (uniform, accumulates across records). Recommend `Events(1_000_000)` for predictability; confirm with a CLAS12 user whether per-chunk *exactness* (vs record-aligned interiors, uproot's cluster behavior) is ever required.
 5. **`skim` compression as a string.** `"lz4bybank"` etc. map to the `Compression` enum; `Lz4Chunked{events_per_chunk}` needs a `(str,int)` form or a small `Compression` pyclass. Minor surface decision.
-6. **Composite banks.** Which CLAS12 banks (if any) users actually want columnar — likely none. Until confirmed, exclude from `keys()` and error clearly on request.
+6. ~~**Composite banks.** Which CLAS12 banks (if any) users actually want columnar — likely none. Until confirmed, exclude from `keys()` and error clearly on request.~~ **Resolved:** they read columnar via `f.composite(bank)` (positional fields, `library="ak"`/`"np"`), while staying out of `keys()` and out of the dictionary-resolved `arrays()` path.
 7. **Arrow native export (Phase 4).** Worth native C-Data-Interface, or is `ak.to_arrow_table` enough? Depends on how many users leave the awkward ecosystem for polars/duckdb.
 
 ---

@@ -82,11 +82,21 @@ to catch:
 |---|---|
 | missing bank or column | `KeyError` |
 | dtype mismatch | `TypeError` |
+| bad shape or value — mismatched column lengths, an unparseable schema, a bad glob, an unknown compression name | `ValueError` |
+| event index out of range | `IndexError` |
 | I/O failure | `OSError` |
 | malformed record | `oxihipo.CorruptFileError` |
+| thread-pool or internal failure | `oxihipo.OxihipoError` |
 
 `CorruptFileError` derives from `oxihipo.OxihipoError`, so `except OxihipoError`
 catches everything library-specific.
+
+The last row is a deliberate split. A thread pool that fails to build, or an
+internal invariant that trips, says nothing about the file — reporting those as
+`CorruptFileError` would send you hunting a bad file that isn't there, so they
+surface as the plain base class. Likewise a length disagreement between columns
+is a shape problem, not a type one, so it raises `ValueError` rather than
+`TypeError`.
 
 ## Typing
 

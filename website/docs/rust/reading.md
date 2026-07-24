@@ -50,6 +50,36 @@ surfaces as an `Err` you propagate with `?` rather than a panic. Each
 `OwnedEvent` is a slice into a shared, ref-counted record buffer — there is no
 per-event allocation.
 
+## Random access
+
+When you already know which events you want — a list of indices from an earlier
+pass, say — `chain.event(i)` fetches one directly:
+
+```rust
+let chain = Chain::open("rec.hipo")?;
+for &i in &interesting {
+    let Some(ev) = chain.event(i) else { continue };   // None if out of range
+    let _ = ev.bank("REC::Particle");
+}
+```
+
+HIPO stores events inside compressed records, so reaching event `i` means
+decoding the record that contains it. The chain keeps **the last decoded record**
+(one entry, shared across clones), so a lookup landing in the same record as the
+previous one costs a slice or an index rather than a fresh inflate. All three
+record layouts are cached — the classic decompressed payload and the lazy
+by-bank / per-column records.
+
+That makes the access *pattern* matter more than the call count: an ascending
+run of indices mostly hits the cache, while a wide scatter mostly misses it and
+pays a record decode each time. If you are visiting most events anyway, iterate
+with `events()` instead.
+
+:::info
+The cache is consulted **only** by `Chain::event`. `events()` and `for_each`
+never touch it, so sequential and parallel scan throughput are unaffected.
+:::
+
 :::tip Filters
 `Filter::require([...])` keeps only events carrying every named bank;
 `.record_tag([…])` skips whole records by their tag; `.event_tag([…])` /

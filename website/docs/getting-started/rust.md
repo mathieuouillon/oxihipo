@@ -15,7 +15,8 @@ Not yet published to crates.io — depend on it via git:
 oxihipo = { git = "https://github.com/mathieuouillon/oxihipo" }
 ```
 
-Requires Rust 1.87+.
+Requires Rust 1.95+. CI builds and tests against exactly that version, so the
+declared MSRV cannot silently drift.
 
 ### Optional features
 
