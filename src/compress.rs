@@ -178,8 +178,8 @@ pub fn decompress(
                 // -1 on overflow, and never reads the destination.
                 let n = unsafe {
                     lz4_sys::LZ4_decompress_safe(
-                        src.as_ptr() as *const i8,
-                        dst_ptr as *mut i8,
+                        src.as_ptr() as *const core::ffi::c_char,
+                        dst_ptr as *mut core::ffi::c_char,
                         src.len() as i32,
                         target_len as i32,
                     )
@@ -297,8 +297,8 @@ pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) 
                 // takes raw pointers + sizes.
                 let n = unsafe {
                     lz4_sys::LZ4_decompress_safe(
-                        src.as_ptr() as *const i8,
-                        dst.as_mut_ptr() as *mut i8,
+                        src.as_ptr() as *const core::ffi::c_char,
+                        dst.as_mut_ptr() as *mut core::ffi::c_char,
                         src.len() as i32,
                         dst.len() as i32,
                     )
@@ -378,16 +378,16 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
                         // Level 9 ≈ `LZ4HC_CLEVEL_OPT_MIN`, matching what
                         // CLAS12 / `hipo4` use.
                         lz4_sys::LZ4_compress_HC(
-                            src.as_ptr() as *const i8,
-                            spare.as_mut_ptr() as *mut i8,
+                            src.as_ptr() as *const core::ffi::c_char,
+                            spare.as_mut_ptr() as *mut core::ffi::c_char,
                             src.len() as i32,
                             spare.len() as i32,
                             9,
                         )
                     } else {
                         lz4_sys::LZ4_compress_default(
-                            src.as_ptr() as *const i8,
-                            spare.as_mut_ptr() as *mut i8,
+                            src.as_ptr() as *const core::ffi::c_char,
+                            spare.as_mut_ptr() as *mut core::ffi::c_char,
                             src.len() as i32,
                             spare.len() as i32,
                         )
