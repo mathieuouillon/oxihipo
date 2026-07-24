@@ -162,6 +162,57 @@ Drop to 16 MB for marginally faster reads, or raise it for maximum ratio, via
 `WriterBuilder::max_record_bytes`.
 :::
 
+## Record size and parallel scaling
+
+That knee is a **single-thread** result. If you read in parallel there is a
+second, larger effect, and it points the other way.
+
+`for_each` parallelises over **records** — the work unit is one whole record,
+and within it a worker inflates streams lazily and serially. Nothing inflates
+two banks at once. So a parallel scan cannot use more cores than the file has
+records, and a 32 MB flush target on a mid-sized file leaves cores idle.
+
+Re-encoding a 134 MB CLAS12 file (100k events, 19 banks) as `Lz4PerBank` at
+several flush targets, then reading **every bank of every event**; 12 logical
+cores, best-of-3:
+
+| record target | records | size MB | vs 32 MB | 1 thread | all cores | speed-up |
+|---|--:|--:|--:|--:|--:|--:|
+| 32 MB (default) | 9 | 106.8 | — | 513 ms | 73 ms | 6.8× |
+| 16 MB | 17 | 106.9 | +0.14% | 507 ms | 76 ms | 6.7× |
+| 8 MB | 33 | 107.3 | +0.43% | 492 ms | 64 ms | 7.7× |
+| **4 MB** | **66** | **107.9** | **+1.00%** | **484 ms** | **59 ms** | **8.2×** |
+| 2 MB | 132 | 109.4 | +2.47% | 482 ms | 58 ms | 8.3× |
+| 1 MB | 264 | 110.8 | +3.79% | 485 ms | 58 ms | 8.5× |
+
+Most of the parallel headroom is bought by 4 MB records for **1%** of file size,
+and it flattens after that while the size cost keeps climbing. Single-thread
+time does not regress — it improves slightly, a smaller record being kinder to
+cache.
+
+:::tip
+Rule of thumb: you want **at least a few records per core**. Divide the
+uncompressed payload by (cores × 4) and use that as the flush target, floored at
+a few MB. The default 32 MB is tuned for ratio and single-thread selective
+reads; it is the wrong default for a parallel scan of anything under ~1 GB.
+:::
+
+:::info Why not split a single stream instead?
+This sat on the roadmap as "intra-stream parallel inflate" and is now closed.
+Each stream is one LZ4 block — a chain of back-references that cannot be
+inflated in parallel — so splitting one means a **writer-side format change**
+emitting independent sub-blocks, each restarting LZ4's match window. That buys
+what the table above already gets from `max_record_bytes` at 1% size. And for
+`Lz4PerColumn` it could never have helped: profiling three real files puts the
+largest *column* stream at 2–8% of its record (199 streams on the ALERT file),
+so no single stream is the bottleneck. The largest *bank* stream is 26–38%,
+which is why the idea looked plausible for `Lz4PerBank` — but record-level
+parallelism reaches it more cheaply and needs no format change.
+
+Reproduce with `cargo run --release --example profile_streams -- file.hipo`
+and `cargo run --release --example record_size_scaling -- file.hipo`.
+:::
+
 ## Head-to-head — all formats
 
 The same 50,000 events of a real CLAS12 file (`rec_clas_022083`, 274 banks)

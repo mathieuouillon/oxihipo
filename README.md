@@ -408,10 +408,20 @@ and **[Benchmarks](https://mathieuouillon.github.io/oxihipo/docs/performance/ben
   payloads like a classifier score). Deferred until a workload needs them; the
   five shipped phases cover the per-event-`u32` case. See the
   [event-tagging roadmap](https://mathieuouillon.github.io/oxihipo/docs/design/event-tagging#roadmap).
-- **Intra-stream parallel inflate** for the by-bank / per-column formats, for
-  very large records where a single bank's (or column's) stream is multi-MB.
-  Those streams already parallelise *across* banks in `for_each`; splitting a
-  single large stream is the next step if profiles say one dominates.
+- ~~**Intra-stream parallel inflate** for the by-bank / per-column formats.~~
+  **Closed — measured, not worth doing.** The premise was wrong: streams do
+  *not* parallelise across banks. `for_each` parallelises over **records** (the
+  work unit is one record), and within a record a worker inflates streams
+  lazily and serially. So the ceiling on a parallel scan is the record *count*,
+  not the size of any one stream — and record count is already tunable with
+  `max_record_bytes`. On real CLAS12 data, dropping 32 MB → 4 MB records took a
+  full parallel scan from 73 ms to 59 ms (6.8× → 8.2× on 12 cores) for **+1.0%**
+  file size; splitting a stream would need a writer-side format change, cost
+  ratio, and chase a bottleneck the existing knob already reaches. For
+  `Lz4PerColumn` it could never have paid off at all — the largest column stream
+  is only 2–8% of a record. See
+  [Record size and parallel scaling](https://mathieuouillon.github.io/oxihipo/docs/performance/compression#record-size-and-parallel-scaling)
+  (`examples/profile_streams.rs`, `examples/record_size_scaling.rs`).
 
 ## CI gates
 
