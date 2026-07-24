@@ -562,14 +562,19 @@ fn synthesize_event_bytes(record: &ByBankRecord, event_idx: u32) -> Vec<u8> {
         // Bank data — decompress this bank's stream (lazy / cached) and
         // copy our event's slice.
         if size > 0 {
-            // `bank_stream` returns Result; for synthesis we panic on
-            // failure because the only failures are corruption that
-            // would already have triggered at iterator construction.
-            let stream = record
-                .bank_stream(b)
-                .expect("by-bank: bank stream decompression failed during synthesis");
+            // `bank_stream` is lazy — `ByBankRecord::parse` does not decompress
+            // individual bank streams, so a valid directory with one corrupt
+            // bank stream reaches here. Emit zeros on failure rather than
+            // panicking (matching the per-column synthesizer), keeping the
+            // event length-consistent. Reachable from `skim`/`bytes()` on a
+            // crafted file.
             let range = record.bank_byte_range(event_idx, b);
-            out.extend_from_slice(&stream[range]);
+            match record.bank_stream(b) {
+                Ok(stream) if stream.get(range.clone()).is_some() => {
+                    out.extend_from_slice(&stream[range]);
+                }
+                _ => out.resize(out.len() + size as usize, 0),
+            }
         }
     }
     let total = out.len() as u32;

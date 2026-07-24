@@ -70,6 +70,24 @@ pub fn decompress(
     expected: usize,
 ) -> Result<()> {
     dst.clear();
+    // Reject an implausibly large decompressed size *before* reserving, so a
+    // tiny record whose header claims a huge `data_length` can't force a
+    // multi-GB allocation (a cheap amplification DoS on untrusted input). LZ4
+    // expands at most ~255x and DEFLATE ~1032x; the generous 1056x ceiling
+    // never rejects a valid stream. `None` can't produce more than its input.
+    let max_plausible = match kind {
+        CompressionType::None => src.len(),
+        _ => src
+            .len()
+            .saturating_mul(1056)
+            .saturating_add(DECOMPRESS_SLACK),
+    };
+    if expected > max_plausible {
+        return Err(HipoError::CorruptRecord {
+            offset: 0,
+            reason: "decompressed size implausibly large for compressed input",
+        });
+    }
     let need = expected + DECOMPRESS_SLACK;
     if dst.capacity() < need {
         dst.reserve_exact(need - dst.capacity());
@@ -111,16 +129,15 @@ pub fn decompress(
             if dst.capacity() < bound {
                 dst.reserve_exact(bound - dst.capacity());
             }
+            // Reserved spare capacity to decode into. We keep it as
+            // `&mut [MaybeUninit<u8>]` and hand the backends a raw pointer +
+            // length, so no `&mut [u8]` is ever fabricated over uninitialized
+            // memory for the FFI backends (the default builds). Only the
+            // pure-Rust `lz4_flex` backend needs a slice, and it is confined to
+            // that branch. `set_len` below commits only the bytes produced.
             let spare = dst.spare_capacity_mut();
-            // SAFETY: spare is `&mut [MaybeUninit<u8>]`; both lz4 backends
-            // write only valid u8 bytes, never read uninitialized memory.
-            // We cast, bound by `target_len`, then `set_len` only the
-            // bytes actually produced.
-            let spare: &mut [u8] = unsafe {
-                std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, spare.len())
-            };
             let target_len = std::cmp::min(spare.len(), bound);
-            let target = &mut spare[..target_len];
+            let dst_ptr = spare.as_mut_ptr() as *mut u8;
 
             // Decompression backend priority (best to worst):
             //   1. Apple `libcompression` (Apple Silicon NEON-tuned)  [macOS only]
@@ -131,14 +148,13 @@ pub fn decompress(
             // of these can decode any of the others' output.
             #[cfg(all(feature = "lz4-apple", target_os = "macos"))]
             let produced = {
-                // compression_decode_buffer returns 0 on failure, else
-                // the number of bytes written (≤ dst_size).
-                // SAFETY: src/target are valid borrows; the function
-                // never reads `target` and writes ≤ `target.len()` bytes.
+                // SAFETY: `dst_ptr` points at `target_len` bytes of reserved
+                // capacity we own; the function only writes (≤ target_len) and
+                // never reads the destination. No reference over uninit memory.
                 let n = unsafe {
                     apple_compression::compression_decode_buffer(
-                        target.as_mut_ptr(),
-                        target.len(),
+                        dst_ptr,
+                        target_len,
                         src.as_ptr(),
                         src.len(),
                         std::ptr::null_mut(),
@@ -157,15 +173,15 @@ pub fn decompress(
                 not(all(feature = "lz4-apple", target_os = "macos"))
             ))]
             let produced = {
-                // LZ4_decompress_safe: bounded, returns -1 on overflow.
-                // SAFETY: src/target are `&[u8]` / `&mut [u8]`; the C
-                // signature takes raw pointers + sizes.
+                // SAFETY: `dst_ptr`/`target_len` describe reserved capacity we
+                // own; LZ4_decompress_safe writes ≤ target_len bytes, returns
+                // -1 on overflow, and never reads the destination.
                 let n = unsafe {
                     lz4_sys::LZ4_decompress_safe(
                         src.as_ptr() as *const i8,
-                        target.as_mut_ptr() as *mut i8,
+                        dst_ptr as *mut i8,
                         src.len() as i32,
-                        target.len() as i32,
+                        target_len as i32,
                     )
                 };
                 if n < 0 {
@@ -174,8 +190,25 @@ pub fn decompress(
                 n as usize
             };
             #[cfg(not(any(all(feature = "lz4-apple", target_os = "macos"), feature = "lz4-c")))]
-            let produced = lz4_flex::block::decompress_into(src, target)
-                .map_err(|_| HipoError::Compression("lz4 decompress failed"))?;
+            let produced = {
+                // SAFETY: `dst_ptr`/`target_len` describe the reserved spare
+                // capacity we own; the fabricated `&mut [u8]` is confined to
+                // this call and never escapes. lz4_flex is built with the
+                // `safe-decode` feature (see Cargo.toml), whose `decompress_into`
+                // writes forward and reads back-references only within
+                // `[0, capacity)`. Its wild-copy (`copy_within`) can memmove a
+                // few not-yet-written bytes past the write cursor, but that is a
+                // byte-wise `ptr::copy` over `u8`, which is defined over
+                // uninitialized memory (it propagates, never *interprets*, the
+                // bytes); every *typed* read is of an already-written byte. So
+                // `[0, produced)` is fully initialized on return and no
+                // uninitialized value is ever produced. (This reasoning is
+                // specific to `safe-decode`; the unsafe-decode path differs.)
+                let target: &mut [u8] =
+                    unsafe { std::slice::from_raw_parts_mut(dst_ptr, target_len) };
+                lz4_flex::block::decompress_into(src, target)
+                    .map_err(|_| HipoError::Compression("lz4 decompress failed"))?
+            };
 
             if produced + DECOMPRESS_SLACK < expected {
                 return Err(HipoError::DecompressUnderflow { produced, expected });
@@ -186,25 +219,21 @@ pub fn decompress(
             Ok(())
         }
         CompressionType::Gzip => {
-            let mut decoder = flate2::read::GzDecoder::new(src);
-            let spare = dst.spare_capacity_mut();
-            let spare: &mut [u8] = unsafe {
-                std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, spare.len())
-            };
-            let mut filled = 0;
-            while filled < expected {
-                let n = decoder
-                    .read(&mut spare[filled..expected])
-                    .map_err(HipoError::Io)?;
-                if n == 0 {
-                    return Err(HipoError::DecompressUnderflow {
-                        produced: filled,
-                        expected,
-                    });
-                }
-                filled += n;
+            // `read_to_end` appends inflated bytes into the pre-reserved
+            // capacity, initializing only the bytes it actually reads (std uses
+            // a `BorrowedBuf` internally) — sound *and* single-write: no
+            // `&mut [u8]` over uninitialized memory and no whole-payload
+            // zero-fill. `take` bounds the output to `expected + slack` so a
+            // gzip bomb can't grow `dst` without limit (the up-front
+            // `max_plausible` check bounds `expected`; this bounds the stream).
+            let limit = (expected as u64).saturating_add(DECOMPRESS_SLACK as u64);
+            let produced = flate2::read::GzDecoder::new(src)
+                .take(limit)
+                .read_to_end(dst)
+                .map_err(HipoError::Io)?;
+            if produced + DECOMPRESS_SLACK < expected {
+                return Err(HipoError::DecompressUnderflow { produced, expected });
             }
-            unsafe { dst.set_len(filled) };
             Ok(())
         }
     }
@@ -458,6 +487,29 @@ mod tests {
     #[test]
     fn roundtrip_none_empty() {
         round_trip(CompressionType::None, &[]);
+    }
+
+    // A tiny compressed input claiming a huge decompressed size must be
+    // rejected before any large allocation (amplification-DoS guard). The
+    // capacity of `dst` must stay small.
+    #[test]
+    fn rejects_implausible_decompressed_size() {
+        let src = vec![0u8; 64]; // 64 compressed bytes
+        for kind in [
+            CompressionType::Lz4,
+            CompressionType::Gzip,
+            CompressionType::None,
+        ] {
+            let mut dst = Vec::new();
+            let huge = 3_000_000_000usize; // ~3 GB
+            let err = decompress(kind, &src, &mut dst, huge);
+            assert!(err.is_err(), "{kind:?}: huge expected must Err");
+            assert!(
+                dst.capacity() < 16 * 1024 * 1024,
+                "{kind:?}: must not allocate for an implausible size (cap = {})",
+                dst.capacity()
+            );
+        }
     }
 
     #[test]
