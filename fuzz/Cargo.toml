@@ -1,0 +1,47 @@
+[package]
+name = "oxihipo-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+oxihipo = { path = "..", features = ["fuzz-api"] }
+arbitrary = { version = "1", features = ["derive"] }
+# `open_file` writes each input to a temp file (Chain::open takes a path).
+tempfile = "3"
+
+[[bin]]
+name = "open_file"
+path = "fuzz_targets/open_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "read_record"
+path = "fuzz_targets/read_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "schema_text"
+path = "fuzz_targets/schema_text.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzzing is a debug-assertions build: an integer overflow or a slice
+# out-of-bounds should trip rather than wrap silently.
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+# The workspace root is a separate crate; keep this one independent so
+# `cargo build` at the repo root doesn't drag in libfuzzer.
+[workspace]
