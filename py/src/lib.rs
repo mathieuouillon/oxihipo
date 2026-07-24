@@ -266,6 +266,37 @@ impl PyChain {
             .collect())
     }
 
+    /// Number of records across every file in the chain, counted from the
+    /// record index. The file header's `record_count` is writer-dependent and
+    /// commonly 0, so this is the number to trust.
+    fn record_count(&self) -> usize {
+        self.inner.record_count()
+    }
+
+    /// The HIPO file header of the chain's first file, as the flat tuple the
+    /// Python `FileHeader` NamedTuple is built from. `None` for an empty chain.
+    ///
+    /// Multi-file chains share one dictionary by construction, so the first
+    /// file's header is the canonical one.
+    fn file_header(&self) -> Option<(u32, u32, u32, String, bool, bool, u64, u32, u32, u32)> {
+        let h = self.inner.file_header()?;
+        Some((
+            h.version(),
+            h.file_number,
+            h.record_count,
+            match h.endianness {
+                oxihipo::Endianness::Little => "little".to_string(),
+                oxihipo::Endianness::Big => "big".to_string(),
+            },
+            h.has_dictionary(),
+            h.has_trailer_with_index(),
+            h.user_register,
+            h.user_int1,
+            h.user_int2,
+            h.bit_info,
+        ))
+    }
+
     /// `[(bank, (group, item))]` — the wire identifiers of every dictionary
     /// bank. The Python wrapper surfaces this as `Chain.bank_ids`.
     fn bank_ids(&self) -> Vec<(String, (u16, u8))> {

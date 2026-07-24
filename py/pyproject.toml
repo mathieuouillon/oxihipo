@@ -45,12 +45,16 @@ dependencies = ["numpy>=1.24", "awkward>=2.6", "pandas>=2.0", "pyarrow>=14"]
 awkward = ["awkward>=2.6"]
 pandas = ["awkward>=2.6", "pandas>=2.0"]
 arrow = ["pyarrow>=14"]
+# `dask` = the lazy `to_dask()` bridge. Deliberately *not* a default: it is a
+# large dependency and only pays off with a cluster or an existing dask graph;
+# `iterate()` / `workers=` cover single-machine scans with no extra install.
+dask = ["dask-awkward>=2024.2"]
 # `root` = the ROOT RDataFrame bridge. Awkward's ROOT interop generates the
 # RDataSource, so it's the pip-installable part; ROOT/PyROOT itself is NOT on
 # PyPI — install it via conda-forge or your system so `import ROOT` works.
 # This is the one extra still worth naming: it documents that split.
 root = ["awkward>=2.6"]
-all = ["awkward>=2.6", "pandas>=2.0", "pyarrow>=14"]
+all = ["awkward>=2.6", "pandas>=2.0", "pyarrow>=14", "dask-awkward>=2024.2"]
 
 [project.urls]
 Homepage = "https://mathieuouillon.github.io/oxihipo/"

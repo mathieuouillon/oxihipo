@@ -191,6 +191,79 @@ one record costs a single decode — while a shuffled list re-decodes per lookup
 `entries=sorted(interesting)` is materially faster on a big file.
 :::
 
+## Handing off to other tools
+
+### Parquet
+
+`to_parquet()` writes the selection straight out — the handover format for
+polars / duckdb / pandas. Each bank column becomes a `large_list`, one list per
+event, so the jagged structure survives:
+
+```python
+f.to_parquet("electrons.parquet", "REC::Particle", ["px", "py", "pz"],
+             cut="pid == 11")
+```
+
+`step_size=` streams instead of materialising, writing one row group per chunk,
+so inputs far bigger than RAM work in about one chunk of memory. `compression=`
+is the Parquet codec (`"zstd"` by default).
+
+:::note Arrow adds nullability
+Reading back with `ak.from_arrow(pq.read_table(...))` gives
+`{px: option[var * ?float32]}` rather than `var * {px: float32}` — the values are
+identical, Arrow just marks everything nullable. That is Arrow/Parquet
+behaviour, not something lost in the write.
+:::
+
+### Dask
+
+`to_dask()` returns a lazy [dask-awkward](https://dask-awkward.readthedocs.io)
+array — the counterpart to `uproot.dask`. One partition per `step_size` batch,
+aligned to records exactly as `iterate` is; nothing is read until `.compute()`:
+
+```python
+import dask_awkward as dak
+p = f.to_dask("REC::Particle", ["px", "py"])
+dak.sum(p.px).compute()
+```
+
+Needs `pip install oxihipo[dask]` — dask-awkward is deliberately **not** a
+default dependency.
+
+:::tip Reach for this last
+For a scan on one machine, `iterate()` or `workers=` is simpler, has no extra
+dependency, and is usually faster. `to_dask()` earns its keep when you already
+have a cluster, or want HIPO to be one node in a bigger dask graph. Note
+`threads` defaults to `1` here: dask already runs partitions concurrently, so
+letting each also fan out over rayon oversubscribes the machine.
+:::
+
+## File and container metadata
+
+```python
+f.record_count            # records in the chain, from the record index
+f.file_header             # FileHeader(version=6, endianness='little', ...)
+f.config                  # user key/value store written into the dictionary
+```
+
+`record_count` is worth knowing before you write: a reader parallelises over
+**records**, so it bounds how many cores a scan of this file can use. If it is
+below your core count, the file was written with too large a
+[`max_record_bytes`](../performance/compression.md#record-size-and-parallel-scaling).
+
+:::warning Some header fields are not set by the reference writers
+Measured on real files, so do not branch on these:
+
+* `file_header.record_count` is **0** from every writer checked, including this
+  one. Use `f.record_count`.
+* `has_dictionary` / `has_trailer_index` are `False` on C++ and Java written
+  files even though a dictionary is present — as it is on every CLAS12 file.
+
+`version`, `endianness` and `file_number` are dependable. And the run number is
+in the `RUN::config` bank, not the header.
+:::
+
+
 ## Composite banks
 
 A few CLAS12 structures (`RUN::scaler` and friends) carry an **inline format
