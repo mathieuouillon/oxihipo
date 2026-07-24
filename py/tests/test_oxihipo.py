@@ -1063,3 +1063,69 @@ def test_composite_error_distinguishes_absent_from_not_composite(chain):
         chain.composite("REC::Particle")
     with pytest.raises(KeyError, match="no bank"):
         chain.composite("NOT::areal::bank")
+
+
+# --- file_header, record_count, to_parquet, to_dask -----------------------
+
+
+def test_file_header_and_record_count(chain):
+    h = chain.file_header
+    assert h is not None
+    # These are the dependable fields.
+    assert h.version == 6
+    assert h.endianness in ("little", "big")
+    # record_count in the *header* is writer-dependent and in practice 0; the
+    # index-derived count is the one to trust, so they must not be conflated.
+    assert chain.record_count >= 1
+    assert isinstance(h.record_count, int)
+    # NamedTuple: positional unpacking still works.
+    assert h[0] == h.version
+
+
+def test_to_parquet_round_trips(chain, tmp_path):
+    pq = pytest.importorskip("pyarrow.parquet")
+    out = tmp_path / "p.parquet"
+    groups = chain.to_parquet(str(out), "REC::Particle", ["pid", "px"])
+    assert groups == 1
+    got = pq.read_table(str(out))
+    # Must equal exactly what the arrow backend produces for the same read.
+    assert got.equals(chain.arrays("REC::Particle", ["pid", "px"], library="arrow"))
+
+
+def test_to_parquet_streaming_matches_single_shot(chain, tmp_path):
+    pq = pytest.importorskip("pyarrow.parquet")
+    one, many = tmp_path / "one.parquet", tmp_path / "many.parquet"
+    chain.to_parquet(str(one), "REC::Particle", ["pid"])
+    groups = chain.to_parquet(str(many), "REC::Particle", ["pid"], step_size=2)
+    assert groups > 1, "step_size must produce several row groups"
+    assert pq.read_table(str(many)).equals(pq.read_table(str(one)))
+
+
+def test_to_parquet_applies_cut_when_streaming(chain, tmp_path):
+    # The cut must survive the streaming path, not just the single-shot one —
+    # silently dropping it would write the wrong file.
+    pq = pytest.importorskip("pyarrow.parquet")
+    out = tmp_path / "cut.parquet"
+    chain.to_parquet(str(out), "REC::Particle", ["px"], cut="pid == 11", step_size=2)
+    want = chain.arrays("REC::Particle", ["px"], cut="pid == 11", library="arrow")
+    assert pq.read_table(str(out)).equals(want)
+
+
+def test_to_dask_matches_eager(chain):
+    dak = pytest.importorskip("dask_awkward")
+    ak = pytest.importorskip("awkward")
+    lazy = chain.to_dask("REC::Particle", ["pid", "px"], step_size=2)
+    assert lazy.npartitions >= 1
+    assert ak.almost_equal(lazy.compute(), chain.arrays("REC::Particle", ["pid", "px"]))
+
+
+def test_to_dask_preserves_a_chain_filter(chain):
+    # Partitions are read in a reconstructed chain; forgetting the filter there
+    # would silently widen every partition.
+    dak = pytest.importorskip("dask_awkward")
+    ak = pytest.importorskip("awkward")
+    g = chain.filtered(require=["REC::Particle"])
+    assert ak.almost_equal(
+        g.to_dask("REC::Particle", ["pid"], step_size=2).compute(),
+        g.arrays("REC::Particle", ["pid"]),
+    )

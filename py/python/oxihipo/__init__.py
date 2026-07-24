@@ -58,6 +58,7 @@ __all__ = [
     "SkimSummary",
     "CorruptFileError",
     "OxihipoError",
+    "FileHeader",
     "__version__",
 ]
 
@@ -74,6 +75,39 @@ class NumpyColumn(NamedTuple):
     values: "np.ndarray"
     offsets: "np.ndarray"  # int64, length = n_events + 1
     inner_len: int  # > 1 for fixed-size ``T#N`` array columns
+
+
+class FileHeader(NamedTuple):
+    """Return of :attr:`Chain.file_header` — the HIPO **file** header of the
+    chain's first file (multi-file chains share one dictionary, so that header
+    is the canonical one).
+
+    This is container metadata, not physics. CLAS12 keeps the run number in the
+    ``RUN::config`` bank, not here — ``user_int1`` / ``user_int2`` /
+    ``user_register`` are free fields whose meaning is up to whoever wrote the
+    file, and are commonly zero.
+
+    **Several fields are unreliable across writers**, because the reference
+    writers do not set them. Measured on real files:
+
+    * ``record_count`` is **0** from every writer checked, including this one.
+      Use :attr:`Chain.record_count`, which counts the record index.
+    * ``has_dictionary`` / ``has_trailer_index`` are ``False`` on files written
+      by the C++ and Java writers even when a dictionary is present — as it is
+      on every CLAS12 file. Do not branch on them.
+
+    ``version``, ``endianness`` and ``file_number`` are dependable."""
+
+    version: int
+    file_number: int
+    record_count: int
+    endianness: str  # 'little' or 'big'
+    has_dictionary: bool
+    has_trailer_index: bool
+    user_register: int
+    user_int1: int
+    user_int2: int
+    bit_info: int
 
 
 class SkimSummary(NamedTuple):
@@ -551,6 +585,7 @@ class Chain:
     def arrays(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
         *, filter_name: str | None = ..., library: Literal["ak"] = ...,
+        entries: "Sequence[int] | None" = ..., cut: str | None = ...,
         entry_start: int | None = ..., entry_stop: int | None = ...,
         threads: int = ..., workers: int = ...,
     ) -> "ak.Array": ...
@@ -558,6 +593,7 @@ class Chain:
     def arrays(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
         *, filter_name: str | None = ..., library: Literal["np"],
+        entries: "Sequence[int] | None" = ..., cut: str | None = ...,
         entry_start: int | None = ..., entry_stop: int | None = ...,
         threads: int = ..., workers: int = ...,
     ) -> "dict[str, np.ndarray]": ...
@@ -565,6 +601,7 @@ class Chain:
     def arrays(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
         *, filter_name: str | None = ..., library: Literal["pd"],
+        entries: "Sequence[int] | None" = ..., cut: str | None = ...,
         entry_start: int | None = ..., entry_stop: int | None = ...,
         threads: int = ..., workers: int = ...,
     ) -> "pd.DataFrame | dict[str, pd.DataFrame]": ...
@@ -572,6 +609,7 @@ class Chain:
     def arrays(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
         *, filter_name: str | None = ..., library: Literal["arrow"],
+        entries: "Sequence[int] | None" = ..., cut: str | None = ...,
         entry_start: int | None = ..., entry_stop: int | None = ...,
         threads: int = ..., workers: int = ...,
     ) -> "pa.Table": ...
@@ -632,17 +670,7 @@ class Chain:
         selection, single = self._resolve(banks, columns, filter_name)
         keep_columns: set[str] | None = None
         if cut is not None:
-            if len(selection) != 1:
-                raise ValueError(
-                    f"`cut` needs exactly one bank; the selection has {len(selection)}"
-                )
-            bank_name, requested = selection[0]
-            available = c.columns(bank_name)
-            extra = sorted(_cut_identifiers(cut) & set(available) - set(requested))
-            if requested and extra:
-                # Read what the cut needs, remember to drop it afterwards.
-                keep_columns = set(requested)
-                selection = [(bank_name, list(requested) + extra)]
+            selection, keep_columns = self._cut_plan(selection, cut)
 
         def finish(res):
             if cut is not None:
@@ -677,6 +705,156 @@ class Chain:
                     finish,
                 )
         return finish(c.read_columns(selection, entry_start, entry_stop, threads))
+
+    def to_dask(
+        self,
+        banks: "str | Sequence[str] | None" = None,
+        columns: "Sequence[str] | None" = None,
+        *,
+        step_size: "int | str" = 100_000,
+        filter_name: str | None = None,
+        cut: str | None = None,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 1,
+    ) -> "Any":
+        """A lazy `dask-awkward <https://dask-awkward.readthedocs.io>`_ array
+        over the chain — the counterpart to ``uproot.dask``.
+
+        One partition per ``step_size`` batch, aligned to record and file
+        boundaries exactly as :meth:`iterate` is, so nothing is read until you
+        ``.compute()``::
+
+            import dask_awkward as dak
+            p = f.to_dask("REC::Particle", ["px", "py"])
+            dak.sum(p.px).compute()
+
+        Needs ``dask-awkward``, which is **not** a dependency of this package
+        (``pip install dask-awkward``).
+
+        ``threads`` defaults to ``1``, not all cores: dask is already running
+        partitions concurrently, so letting each one also fan out over rayon
+        oversubscribes the machine. Raise it only for a single-partition read.
+
+        Prefer :meth:`iterate` or ``workers=`` for a single-machine scan — they
+        are simpler and have no extra dependency. This is for when you already
+        have a dask cluster, or want to compose HIPO into a larger dask graph.
+        """
+        try:
+            import dask_awkward as dak
+        except ImportError as e:  # pragma: no cover - depends on environment
+            raise ImportError(
+                "to_dask() needs dask-awkward: pip install dask-awkward"
+            ) from e
+        from . import _parallel
+
+        c = self._reader()
+        mode, size = _parse_step_size(step_size)
+        spans = self._record_spans()
+        sizes = self._record_decompressed_sizes() if mode == "bytes" else None
+        total = c.num_entries
+        lo = 0 if entry_start is None else max(0, entry_start)
+        hi = total if entry_stop is None else min(total, entry_stop)
+        batches = [
+            (start, stop)
+            for start, stop, _fi in self._iter_batches(spans, sizes, mode, size, lo, hi)
+        ]
+        if not batches:
+            raise ValueError("nothing to read: the requested range is empty")
+
+        spec = (
+            self._source, self._require, self._record_tag,
+            self._event_tag, self._event_tag_any, banks, columns,
+            {"filter_name": filter_name, "cut": cut, "library": "ak",
+             "threads": threads},
+        )
+        return dak.from_map(
+            _parallel.dask_partition, [spec] * len(batches), batches,
+            label="from-hipo",
+        )
+
+    def to_parquet(
+        self,
+        path: StrPath,
+        banks: "str | Sequence[str] | None" = None,
+        columns: "Sequence[str] | None" = None,
+        *,
+        filter_name: str | None = None,
+        cut: str | None = None,
+        step_size: "int | str | None" = None,
+        compression: str = "zstd",
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 0,
+    ) -> int:
+        """Write the selection to a Parquet file. Returns the row-group count.
+
+        Parquet is the handover format for the polars / duckdb / pandas side of
+        an analysis, and a HIPO bank maps onto it directly: each bank column
+        becomes a ``large_list`` column, one list per event, so the jagged
+        structure survives the round-trip.
+
+            f.to_parquet("electrons.parquet", "REC::Particle",
+                         ["px", "py", "pz"], cut="pid == 11")
+
+        ``step_size`` streams instead of materialising: the file is written in
+        row groups of that many events (or that many bytes, e.g. ``"200 MB"``),
+        so resident memory stays about one chunk and inputs far bigger than RAM
+        work. Without it the whole selection is built in memory as one row group.
+
+        ``compression`` is passed to Parquet (``"zstd"`` default, or
+        ``"snappy"`` / ``"gzip"`` / ``"lz4"`` / ``None``). ``banks`` / ``columns``
+        / ``filter_name`` / ``cut`` / ``entry_start`` / ``entry_stop`` /
+        ``threads`` mean what they do on :meth:`arrays`.
+        """
+        import pyarrow.parquet as pq
+
+        common: dict[str, Any] = {
+            "filter_name": filter_name,
+            "library": "arrow",
+            "entry_start": entry_start,
+            "entry_stop": entry_stop,
+            "threads": threads,
+        }
+        if step_size is None:
+            table = self.arrays(banks, columns, cut=cut, **common)
+            pq.write_table(table, str(path), compression=compression)
+            return 1
+
+        # Streaming: one row group per chunk. The writer needs a schema up
+        # front, so it is opened from the first chunk and closed in `finally`
+        # (a half-written Parquet file with no footer is unreadable).
+        writer = None
+        groups = 0
+        try:
+            for chunk in self.iterate(
+                banks, columns, step_size=step_size, cut=cut, **common
+            ):
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        str(path), chunk.schema, compression=compression
+                    )
+                writer.write_table(chunk)
+                groups += 1
+        finally:
+            if writer is not None:
+                writer.close()
+        return groups
+
+    def _cut_plan(self, selection, cut: str):
+        """Widen ``selection`` so the cut's columns are read, and report which
+        columns the caller actually asked to keep. Shared by ``arrays`` and
+        ``iterate`` so there is one cut implementation, not two."""
+        if len(selection) != 1:
+            raise ValueError(
+                f"`cut` needs exactly one bank; the selection has {len(selection)}"
+            )
+        bank_name, requested = selection[0]
+        available = self._reader().columns(bank_name)
+        extra = sorted(_cut_identifiers(cut) & set(available) - set(requested))
+        if requested and extra:
+            return [(bank_name, list(requested) + extra)], set(requested)
+        return selection, None
 
     def _apply_cut(self, res, cut: str, keep_columns: "set[str] | None"):
         """Filter the raw column buffers by ``cut``, then drop any column that
@@ -908,15 +1086,15 @@ class Chain:
     def iterate(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
         *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
-        report: Literal[False] = ..., entry_start: int | None = ..., entry_stop: int | None = ...,
-        threads: int = ..., workers: int = ...,
+        report: Literal[False] = ..., cut: str | None = ..., entry_start: int | None = ...,
+        entry_stop: int | None = ..., threads: int = ..., workers: int = ...,
     ) -> "Iterator[Any]": ...
     @overload
     def iterate(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
         *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
-        report: Literal[True], entry_start: int | None = ..., entry_stop: int | None = ...,
-        threads: int = ..., workers: int = ...,
+        report: Literal[True], cut: str | None = ..., entry_start: int | None = ...,
+        entry_stop: int | None = ..., threads: int = ..., workers: int = ...,
     ) -> "Iterator[tuple[Any, Report]]": ...
     def iterate(
         self,
@@ -927,6 +1105,7 @@ class Chain:
         filter_name: str | None = None,
         library: _Library = "ak",
         report: bool = False,
+        cut: str | None = None,
         entry_start: int | None = None,
         entry_stop: int | None = None,
         threads: int = 0,
@@ -950,6 +1129,15 @@ class Chain:
         """
         c = self._reader()
         selection, single = self._resolve(banks, columns, filter_name)
+        keep_columns: set[str] | None = None
+        if cut is not None:
+            selection, keep_columns = self._cut_plan(selection, cut)
+
+        def finish(res):
+            if cut is not None:
+                res = self._apply_cut(res, cut, keep_columns)
+            return self._assemble(res, single, library)
+
         mode, size = _parse_step_size(step_size)
         spans = self._record_spans()
         sizes = self._record_decompressed_sizes() if mode == "bytes" else None
@@ -966,15 +1154,14 @@ class Chain:
                 self._source, self._require, self._record_tag,
                 self._event_tag, self._event_tag_any, selection, batches,
                 workers, _worker_threads(threads, workers),
-                lambda res: self._assemble(res, single, library),
+                finish,
             )
             for chunk, start, stop, fi in stream:
                 yield (chunk, Report(start, stop, files[fi])) if report else chunk
             return
 
         for start, stop, fi in batches:
-            res = c.read_columns(selection, start, stop, threads)
-            chunk = self._assemble(res, single, library)
+            chunk = finish(c.read_columns(selection, start, stop, threads))
             yield (chunk, Report(start, stop, files[fi])) if report else chunk
 
     @staticmethod
@@ -1085,6 +1272,28 @@ class Chain:
         # `tuple[int, ...]`, which does not satisfy the declared
         # `tuple[int, int]`.
         return {name: (group, item) for name, (group, item) in self._reader().bank_ids()}
+
+    @property
+    def record_count(self) -> int:
+        """Number of records across the chain, from the record index.
+
+        Worth knowing when writing: a reader parallelises over **records**, so
+        this bounds how many cores a scan of this file can use. If it is smaller
+        than your core count, the file was written with too large a
+        ``max_record_bytes``.
+
+        Not to be confused with ``file_header.record_count``, which is
+        writer-dependent and in practice 0."""
+        return self._reader().record_count()
+
+    @property
+    def file_header(self) -> "FileHeader | None":
+        """The HIPO file header (:class:`FileHeader`), or ``None`` for an empty
+        chain. Container metadata — version, record count, endianness, and the
+        writer's free ``user_*`` fields. The run number lives in ``RUN::config``,
+        not here."""
+        raw = self._reader().file_header()
+        return None if raw is None else FileHeader(*raw)
 
     @property
     def config(self) -> dict[str, str]:
@@ -1295,6 +1504,7 @@ def iterate(
 def arrays(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
     *, filter_name: str | None = ..., library: Literal["ak"] = ...,
+    entries: "Sequence[int] | None" = ..., cut: str | None = ...,
     entry_start: int | None = ..., entry_stop: int | None = ...,
     threads: int = ..., workers: int = ...,
 ) -> "ak.Array": ...
@@ -1302,6 +1512,7 @@ def arrays(
 def arrays(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
     *, filter_name: str | None = ..., library: Literal["np"],
+    entries: "Sequence[int] | None" = ..., cut: str | None = ...,
     entry_start: int | None = ..., entry_stop: int | None = ...,
     threads: int = ..., workers: int = ...,
 ) -> "dict[str, np.ndarray]": ...
@@ -1309,6 +1520,7 @@ def arrays(
 def arrays(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
     *, filter_name: str | None = ..., library: Literal["pd"],
+    entries: "Sequence[int] | None" = ..., cut: str | None = ...,
     entry_start: int | None = ..., entry_stop: int | None = ...,
     threads: int = ..., workers: int = ...,
 ) -> "pd.DataFrame | dict[str, pd.DataFrame]": ...
@@ -1316,6 +1528,7 @@ def arrays(
 def arrays(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
     *, filter_name: str | None = ..., library: Literal["arrow"],
+    entries: "Sequence[int] | None" = ..., cut: str | None = ...,
     entry_start: int | None = ..., entry_stop: int | None = ...,
     threads: int = ..., workers: int = ...,
 ) -> "pa.Table": ...
@@ -1326,6 +1539,8 @@ def arrays(
     *,
     filter_name: str | None = None,
     library: _Library = "ak",
+    entries: "Sequence[int] | None" = None,
+    cut: str | None = None,
     entry_start: int | None = None,
     entry_stop: int | None = None,
     threads: int = 0,
@@ -1340,6 +1555,7 @@ def arrays(
     chain: Any = open(source)  # widen: see the note in `iterate` above
     return chain.arrays(
         banks, columns, filter_name=filter_name, library=library,
+        entries=entries, cut=cut,
         entry_start=entry_start, entry_stop=entry_stop, threads=threads,
         workers=workers,
     )

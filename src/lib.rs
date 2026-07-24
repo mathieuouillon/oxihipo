@@ -50,6 +50,13 @@ pub use crate::read::{
 pub use crate::schema::{ColumnHandle, DataType, Dict, Schema, SchemaEntry};
 pub use crate::tag::{TagRegistry, TagSet};
 pub use crate::write::{BankWriter, Compression, RowWriter, WriteSummary, Writer};
+// `Chain::file_header` returns a `&FileHeader` whose `endianness` field is an
+// `Endianness`, and both lived behind the private `wire` module. A caller could
+// read the integer fields — inference hands over the value — but could not name
+// the type to write a signature over it, nor `match` the enum at all, which
+// left the accessor effectively unusable downstream.
+pub use crate::wire::bytes::Endianness;
+pub use crate::wire::file_header::FileHeader;
 
 /// Internal entry points exposed **only** for fuzzing (`fuzz-api` feature).
 ///
