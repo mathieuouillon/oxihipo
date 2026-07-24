@@ -62,19 +62,19 @@ impl FileHeader {
             expected: HEADER_MAGIC,
         })?;
 
-        // Big-endian is identifiable via the magic word but unsupported: bank
-        // column/scalar payload is reinterpreted native little-endian with no
-        // per-element swap (see `Bank::cast_column_unchecked` and the
-        // `read_*_le` helpers), so a BE file would parse its headers fine and
-        // then yield byte-swapped garbage with no error. Reject it loudly at
-        // open time instead.
-        if matches!(endianness, Endianness::Big) {
-            return Err(HipoError::UnsupportedEndianness {
-                offset: FH_MAGIC_NUMBER as u64,
-            });
-        }
-        let r32 = |off| read_u32_le(buf, off);
-        let r64 = |off| read_u64_le(buf, off);
+        // Big-endian files are supported: header words are swapped here, and a
+        // big-endian record's decompressed payload is normalized to
+        // little-endian once per record (see `wire::endian`), so every
+        // downstream read path stays native-endian and zero-copy.
+        let big = matches!(endianness, Endianness::Big);
+        let r32 = |off| {
+            let v = read_u32_le(buf, off);
+            if big { v.swap_bytes() } else { v }
+        };
+        let r64 = |off| {
+            let v = read_u64_le(buf, off);
+            if big { v.swap_bytes() } else { v }
+        };
 
         let header = Self {
             file_number: r32(FH_FILE_NUMBER),
@@ -164,14 +164,41 @@ mod tests {
     }
 
     #[test]
-    fn rejects_big_endian() {
-        let mut buf = [0u8; FILE_HEADER_SIZE];
-        sample().write(&mut buf);
-        // Keep the (LE) unique word valid so we reach the endian check, then
-        // stamp the big-endian magic marker.
-        write_u32_le(&mut buf, FH_MAGIC_NUMBER, HEADER_MAGIC_BE);
-        let err = FileHeader::parse(&buf).unwrap_err();
-        assert!(matches!(err, HipoError::UnsupportedEndianness { .. }));
+    fn parses_big_endian() {
+        // Build the little-endian header, then byte-swap every multi-byte
+        // field and stamp the big-endian magic — a minimal BE file header.
+        // Parsing it must yield exactly the little-endian values.
+        let mut le = [0u8; FILE_HEADER_SIZE];
+        sample().write(&mut le);
+        let expect = FileHeader::parse(&le).unwrap();
+
+        let mut be = le;
+        for off in [
+            FH_FILE_NUMBER,
+            FH_HEADER_LENGTH,
+            FH_RECORD_COUNT,
+            FH_INDEX_ARRAY_LEN,
+            FH_BIT_INFO,
+            FH_USER_HEADER_LEN,
+            FH_USER_INT1,
+            FH_USER_INT2,
+        ] {
+            be[off..off + 4].reverse();
+        }
+        be[FH_USER_REGISTER..FH_USER_REGISTER + 8].reverse();
+        be[FH_TRAILER_POS..FH_TRAILER_POS + 8].reverse();
+        write_u32_le(&mut be, FH_MAGIC_NUMBER, HEADER_MAGIC_BE);
+
+        let got = FileHeader::parse(&be).unwrap();
+        assert!(matches!(got.endianness, Endianness::Big));
+        assert_eq!(got.file_number, expect.file_number);
+        assert_eq!(got.header_length, expect.header_length);
+        assert_eq!(got.record_count, expect.record_count);
+        assert_eq!(got.index_array_length, expect.index_array_length);
+        assert_eq!(got.user_header_length, expect.user_header_length);
+        assert_eq!(got.user_register, expect.user_register);
+        assert_eq!(got.trailer_position, expect.trailer_position);
+        assert_eq!(got.version(), expect.version());
     }
 
     #[test]

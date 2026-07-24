@@ -358,7 +358,8 @@ impl Chain {
         // Degrade to `None` on a corrupt record rather than panicking — the
         // by-bank / per-column branches above already do (`.ok()?`), and the
         // documented contract is `None` on failure, not an abort.
-        let decoded = decode_record_into(&raw, &mut payload, &mut offsets).ok()?;
+        let decoded =
+            decode_record_into(&raw, &mut payload, &mut offsets, Some(&self.dict)).ok()?;
         if ev_local as usize + 1 >= offsets.len() {
             return None;
         }
@@ -451,7 +452,8 @@ impl Chain {
                 // Fallback (Bytes / ByBank / chunked): decode + per-event read.
                 payload.clear();
                 offsets.clear();
-                let decoded = decode_record_into(&raw, &mut payload, &mut offsets)?;
+                let decoded =
+                    decode_record_into(&raw, &mut payload, &mut offsets, Some(&self.dict))?;
                 for w in offsets.windows(2) {
                     let s = (decoded.data_start + w[0]) as usize;
                     let e = (decoded.data_start + w[1]) as usize;
@@ -930,7 +932,7 @@ where
             local_out += 1;
         }
     } else {
-        record.load_with_header(read_buf, header)?;
+        record.load_with_header(read_buf, header, Some(&inner.dict))?;
         for ev_idx in 0..record.event_count() {
             let raw = record.event(ev_idx).expect("event in range");
             let event = Event::new(raw);

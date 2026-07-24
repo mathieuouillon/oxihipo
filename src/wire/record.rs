@@ -26,6 +26,7 @@ pub fn decode_record_into(
     src: &[u8],
     payload: &mut Vec<u8>,
     event_offsets: &mut Vec<u32>,
+    dict: Option<&crate::schema::Dict>,
 ) -> Result<DecodedRecord> {
     let header = RecordHeader::parse(src)?;
     if src.len() < header.total_bytes() as usize {
@@ -54,6 +55,14 @@ pub fn decode_record_into(
         decompressed_size,
     )?;
 
+    // Big-endian input: swap the whole payload to little-endian once, here, so
+    // every downstream read (offsets below, zero-copy column casts, the
+    // columnar materializer) stays native-endian. Little-endian files — all
+    // current writers — skip this with a single branch per record.
+    if matches!(header.endianness, Endianness::Big) {
+        crate::wire::endian::normalize_be_payload(payload, &header, dict);
+    }
+
     // Build event offsets from the index array (first `index_array_length`
     // bytes of the decompressed payload). `event_count` comes straight from
     // the header and is decoupled from the produced payload length: a short
@@ -73,12 +82,9 @@ pub fn decode_record_into(
     event_offsets.push(0u32);
     let mut acc: u32 = 0;
     for i in 0..n {
-        let raw = read_u32_le(payload, i * 4);
-        let size = if matches!(header.endianness, Endianness::Big) {
-            raw.swap_bytes()
-        } else {
-            raw
-        };
+        // The payload is little-endian here: a big-endian record was
+        // normalized above.
+        let size = read_u32_le(payload, i * 4);
         acc = acc.saturating_add(size);
         event_offsets.push(acc);
     }
@@ -162,7 +168,18 @@ impl Record {
     /// offset 0 followed by the payload.
     pub fn load(&mut self, compressed_record: &[u8]) -> Result<()> {
         let header = RecordHeader::parse(compressed_record)?;
-        self.load_with_header(compressed_record, header)
+        self.load_with_header(compressed_record, header, None)
+    }
+
+    /// [`Self::load`] with the dictionary available, so a big-endian record's
+    /// bank payloads can be normalized using the column layout.
+    pub fn load_with_dict(
+        &mut self,
+        compressed_record: &[u8],
+        dict: Option<&crate::schema::Dict>,
+    ) -> Result<()> {
+        let header = RecordHeader::parse(compressed_record)?;
+        self.load_with_header(compressed_record, header, dict)
     }
 
     /// Same as [`Self::load`] but the caller has already parsed the header.
@@ -170,6 +187,7 @@ impl Record {
         &mut self,
         compressed_record: &[u8],
         header: RecordHeader,
+        dict: Option<&crate::schema::Dict>,
     ) -> Result<()> {
         if header.compression.is_by_bank() {
             // By-bank records can't be loaded into a single payload buffer —
@@ -208,6 +226,11 @@ impl Record {
             decompressed_size,
         )?;
 
+        // See `decode_record_into`: big-endian payloads are normalized once.
+        if matches!(header.endianness, Endianness::Big) {
+            crate::wire::endian::normalize_be_payload(self.payload.vec_mut(), &header, dict);
+        }
+
         self.build_event_offsets(&header)?;
         self.header = header;
         Ok(())
@@ -232,12 +255,8 @@ impl Record {
 
         let mut acc: u32 = 0;
         for i in 0..n {
-            let raw = read_u32_le(payload, i * 4);
-            let size = if matches!(header.endianness, Endianness::Big) {
-                raw.swap_bytes()
-            } else {
-                raw
-            };
+            // Payload is little-endian by this point (see `decode_record_into`).
+            let size = read_u32_le(payload, i * 4);
             acc = acc.saturating_add(size);
             self.event_offsets.push(acc);
         }

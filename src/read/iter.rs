@@ -270,7 +270,8 @@ impl EventIter {
             // Bytes-backed path. Reclaim the decompression buffers, then
             // decode the streamed record into them.
             let (mut buf, mut event_offsets) = self.take_bytes_buffers();
-            let decoded = decode_record_into(&read_buf, &mut buf, &mut event_offsets)?;
+            let decoded =
+                decode_record_into(&read_buf, &mut buf, &mut event_offsets, Some(&self.dict))?;
             let data_start = decoded.data_start;
             self.read_buf = read_buf;
             self.cur = CurrentRecord::Bytes {
