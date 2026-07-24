@@ -123,3 +123,99 @@ fn events_surfaces_corruption_as_err() {
         "events() + unwrap must panic on the corrupt record"
     );
 }
+
+fn write_small_none(path: &std::path::Path, n_events: i32) {
+    let mut dict = Dict::new();
+    dict.add(Schema::parse_text("{T/300/1}{x/I}").unwrap());
+    let mut w = Writer::create(path)
+        .schemas(&dict)
+        .compression(Compression::None)
+        .max_record_events(1)
+        .build()
+        .unwrap();
+    for i in 0..n_events {
+        w.event(|ev| {
+            ev.bank("T", |b| {
+                b.row(|r| {
+                    r.set("x", i)?;
+                    Ok(())
+                })?;
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+}
+
+/// A wildcard-free path that does not exist must error, not silently open an
+/// empty (0-event) chain. Regression for the "typo'd filename = 0 events"
+/// footgun.
+#[test]
+fn open_missing_file_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("definitely-not-here.hipo");
+    assert!(Chain::open(&missing).is_err(), "missing file must Err");
+}
+
+/// Random access (`Chain::event`) on a corrupt record must return `None`,
+/// never panic/abort — matching the `events()` iterator. Regression for the
+/// `.expect("decompress well-formed record")` that previously aborted.
+#[test]
+fn random_access_on_corrupt_record_returns_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt_ra.hipo");
+    write_small_lz4(&path, 6);
+
+    let mut bytes = std::fs::read(&path).unwrap();
+    let heads = record_header_offsets(&bytes);
+    let hdr = heads[2];
+    let record_len = u32::from_le_bytes(bytes[hdr..hdr + 4].try_into().unwrap()) as usize * 4;
+    for b in &mut bytes[hdr + 56..hdr + record_len] {
+        *b = 0xFF;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+
+    let chain = Chain::open(&path).unwrap();
+    // Touch every event by index; the corrupt record's event must be None,
+    // and no call may panic/abort.
+    let n = chain.event_count();
+    let got_none = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        (0..n).any(|i| chain.event(i).is_none())
+    }));
+    assert!(
+        matches!(got_none, Ok(true)),
+        "Chain::event on a corrupt record must return None without panicking"
+    );
+}
+
+/// An index array claiming an event larger than the record payload must be
+/// rejected as `Err`, not slice out of bounds (panic/abort). Regression for
+/// the unchecked cumulative-offset -> `payload[lo..hi]` slice.
+#[test]
+fn oversized_event_offset_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad_index.hipo");
+    write_small_none(&path, 4);
+
+    // For a `None` record the decompressed payload is stored verbatim, so the
+    // first data record's payload begins with its index array (one u32 per
+    // event; here 1 event/record). Overwrite that event-size word with a huge
+    // value so the cumulative offset runs past the payload.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let heads = record_header_offsets(&bytes);
+    let hdr = heads[2];
+    let payload_start = hdr + 56; // 56-byte record header, then the index array
+    bytes[payload_start..payload_start + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let chain = Chain::open(&path).unwrap();
+    let saw_err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        chain.events().any(|r| r.is_err())
+    }));
+    assert!(
+        matches!(saw_err, Ok(true)),
+        "a record with oversized event offsets must surface Err, not abort"
+    );
+}

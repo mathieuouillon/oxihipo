@@ -186,6 +186,15 @@ fn parse_type(ty: &str) -> Result<(DataType, u32)> {
                     "array length must be > 0 (got {s:?})"
                 )));
             }
+            // Cap `#N` at the 24-bit HIPO bank-size ceiling. A larger array
+            // cell cannot fit in a bank and, unchecked, would overflow the
+            // schema's row-offset accumulation on hostile dictionary text.
+            if n > (1 << 24) {
+                return Err(HipoError::SchemaParse(format!(
+                    "array length {n} exceeds the maximum ({})",
+                    1u32 << 24
+                )));
+            }
             n
         }
     };
@@ -281,6 +290,31 @@ mod tests {
     fn rejects_negative_length_array() {
         let err = Schema::parse_text("{X/1/1}{a/F#-3}").unwrap_err();
         assert!(err.to_string().contains("array length"));
+    }
+
+    // A `#N` beyond the 24-bit bank-size ceiling must be rejected (it would
+    // otherwise overflow the schema's row-offset accumulation).
+    #[test]
+    fn rejects_oversized_array_length() {
+        let err = Schema::parse_text("{X/1/1}{a/D#600000000}").unwrap_err();
+        assert!(err.to_string().contains("exceeds the maximum"));
+    }
+
+    // A hostile schema with a huge column count must not panic; `from_columns`
+    // caps at u16::MAX and saturates the offset instead of overflowing.
+    #[test]
+    fn many_columns_do_not_panic() {
+        let cols = (0..70_000).map(|i| {
+            (
+                format!("c{i}"),
+                crate::schema::types::DataType::Double,
+                1u32,
+            )
+        });
+        let s = crate::schema::types::Schema::from_columns("X", 1, 1, cols);
+        // Reaching this line at all is the point: no panic. The count is capped
+        // (indices are u16, so 0..=u16::MAX => at most 65536 entries).
+        assert!(s.entries().len() <= u16::MAX as usize + 1);
     }
 
     #[test]

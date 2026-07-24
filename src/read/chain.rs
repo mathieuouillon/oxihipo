@@ -329,8 +329,10 @@ impl Chain {
         }
         let mut payload = Vec::new();
         let mut offsets = Vec::new();
-        let decoded = decode_record_into(&raw, &mut payload, &mut offsets)
-            .expect("decompress well-formed record");
+        // Degrade to `None` on a corrupt record rather than panicking — the
+        // by-bank / per-column branches above already do (`.ok()?`), and the
+        // documented contract is `None` on failure, not an abort.
+        let decoded = decode_record_into(&raw, &mut payload, &mut offsets).ok()?;
         if ev_local as usize + 1 >= offsets.len() {
             return None;
         }

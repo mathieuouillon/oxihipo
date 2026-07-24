@@ -83,8 +83,23 @@ pub fn decode_record_into(
         event_offsets.push(acc);
     }
 
-    let data_start =
-        header.index_array_length + header.user_header_length + header.user_header_padding as u32;
+    // The largest event ends at `data_start + acc`; validate it fits inside the
+    // decompressed payload so the later zero-copy `payload[lo..hi]` slices (in
+    // `Chain::event` and the event iterator) cannot go out of bounds. Offsets
+    // are monotonic, so one check per record covers every event — the
+    // per-event read path stays untouched. u64 math also closes the u32
+    // overflow in the `data_start` sum on hostile headers.
+    let data_start_u64 = header.index_array_length as u64
+        + header.user_header_length as u64
+        + header.user_header_padding as u64;
+    let end = data_start_u64.checked_add(acc as u64);
+    if data_start_u64 > u32::MAX as u64 || end.is_none_or(|e| e > payload.len() as u64) {
+        return Err(HipoError::CorruptRecord {
+            offset: 0,
+            reason: "event offsets extend past record payload",
+        });
+    }
+    let data_start = data_start_u64 as u32;
 
     Ok(DecodedRecord { header, data_start })
 }
@@ -225,6 +240,21 @@ impl Record {
             };
             acc = acc.saturating_add(size);
             self.event_offsets.push(acc);
+        }
+        // Validate the largest event stays inside the payload, so `event()`'s
+        // zero-copy `payload[lo..hi]` slice can never go out of bounds. One
+        // check per record (offsets are monotonic); `event()` is untouched.
+        let data_start = header.index_array_length as usize
+            + header.user_header_length as usize
+            + header.user_header_padding as usize;
+        if data_start
+            .checked_add(acc as usize)
+            .is_none_or(|end| end > payload.len())
+        {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "event offsets extend past record payload",
+            });
         }
         Ok(())
     }
