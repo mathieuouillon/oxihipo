@@ -849,6 +849,16 @@ class Chain:
         """
         return dict(self._reader().tag_names())
 
+    @property
+    def config(self) -> dict[str, str]:
+        """The file's user key/value configuration (the ``(32555,…)`` run-config
+        store shared with the C++/Java writers) as ``{key: value}`` — empty if
+        the file carries none. Write it with ``create(..., config={...})``::
+
+            f.config             # {'run': '5042', 'torus': '-1.0'}
+        """
+        return dict(self._reader().user_config())
+
     def filtered(
         self,
         require: Sequence[str] | None = None,
@@ -1232,8 +1242,11 @@ class Writer:
 
     _w: "_RustWriter | None"
 
-    def __init__(self, path, compression="lz4percolumn", source=None, _inplace=None):
+    def __init__(self, path, compression="lz4percolumn", source=None, _inplace=None, config=None):
         self._w = _RustWriter(str(path), compression, None if source is None else str(source))
+        if config:
+            for key, value in dict(config).items():
+                self._w.add_config(str(key), str(value))
         self._schemas: dict[str, dict[str, str]] = {}
         self._inplace = _inplace  # (final_path, temp_path) for recreate(dst=None)
         self._summary: SkimSummary | None = None
@@ -1299,12 +1312,19 @@ class Writer:
         return f"<oxihipo.Writer: {'closed' if self._summary else 'open'}>"
 
 
-def create(path: StrPath, compression: str = "lz4percolumn") -> Writer:
+def create(
+    path: StrPath,
+    compression: str = "lz4percolumn",
+    config: "Mapping[str, str] | None" = None,
+) -> Writer:
     """Open a new HIPO file for writing (overwrites). Declare banks with
     :meth:`Writer.new_bank`, feed batches with :meth:`Writer.extend`, then
     :meth:`Writer.close`. Compression is one of ``none`` / ``lz4`` / ``lz4best``
-    / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``."""
-    return Writer(path, compression=compression)
+    / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``.
+
+    ``config`` writes a user key/value store into the dictionary record (read
+    back via :attr:`Chain.config`); it interoperates with the C++/Java writers."""
+    return Writer(path, compression=compression, config=config)
 
 
 def recreate(

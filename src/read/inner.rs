@@ -56,6 +56,9 @@ pub(crate) struct FileInner {
     /// Name↔bit tag registry parsed from the dictionary record — empty if
     /// the file carries none. Shared by `Arc` like `dict`.
     pub tag_registry: Arc<TagRegistry>,
+    /// User key/value configuration from the dictionary record (the
+    /// `(32555,…)` "run config" store), in file order. Empty if none.
+    pub config: Arc<Vec<(String, String)>>,
     /// Regular records only (no dictionary, no trailer).
     pub index: FileEventIndex,
 }
@@ -87,7 +90,7 @@ impl FileInner {
         let first_data_record_offset =
             dict_record_offset + u64::from(file_header.user_header_length);
 
-        let (dict, tag_registry) = parse_dictionary(&shared, len, dict_record_offset)?;
+        let (dict, tag_registry, config) = parse_dictionary(&shared, len, dict_record_offset)?;
 
         // Build the data-record index. The trailer at `trailer_position`
         // (when present) lists every record including the dictionary; we
@@ -109,6 +112,7 @@ impl FileInner {
             file_header,
             dict: Arc::new(dict),
             tag_registry: Arc::new(tag_registry),
+            config: Arc::new(config),
             index,
         })
     }
@@ -188,16 +192,22 @@ fn read_record_into(
 /// `Dict`, and parse the tag-name registry if one is present (an extra
 /// `(DICT_GROUP, TAG_REGISTRY_ITEM)` text bank). Missing or unreadable
 /// records are treated as "empty" — same tolerance as the C++ reader.
-fn parse_dictionary(file: &SharedFile, file_len: u64, offset: u64) -> Result<(Dict, TagRegistry)> {
+#[allow(clippy::type_complexity)]
+fn parse_dictionary(
+    file: &SharedFile,
+    file_len: u64,
+    offset: u64,
+) -> Result<(Dict, TagRegistry, Vec<(String, String)>)> {
     let mut dict = Dict::new();
     let mut tag_registry = TagRegistry::new();
+    let mut config: Vec<(String, String)> = Vec::new();
     let mut buf = Vec::new();
     if read_record_into(file, file_len, offset, &mut buf).is_err() {
-        return Ok((dict, tag_registry));
+        return Ok((dict, tag_registry, config));
     }
     let mut record = Record::new();
     if record.load(&buf).is_err() {
-        return Ok((dict, tag_registry));
+        return Ok((dict, tag_registry, config));
     }
     for ev_idx in 0..record.event_count() {
         let Some(ev_buf) = record.event(ev_idx) else {
@@ -216,9 +226,22 @@ fn parse_dictionary(file: &SharedFile, file_len: u64, offset: u64) -> Result<(Di
             if !parsed.is_empty() {
                 tag_registry = parsed;
             }
+        } else if let Some((_, key)) = ev.find(CONFIG_GROUP, CONFIG_KEY_ITEM) {
+            // A user-config entry: key at (32555,1), value at (32555,2). Read
+            // type-agnostically (the string payload bytes) and keep the last
+            // value for a repeated key, matching the C++/Java readers' map.
+            if let Some((_, value)) = ev.find(CONFIG_GROUP, CONFIG_STRING_ITEM) {
+                let k = parse_evio_string(key).to_string();
+                let v = parse_evio_string(value).to_string();
+                if let Some(slot) = config.iter_mut().find(|(ek, _)| *ek == k) {
+                    slot.1 = v;
+                } else {
+                    config.push((k, v));
+                }
+            }
         }
     }
-    Ok((dict, tag_registry))
+    Ok((dict, tag_registry, config))
 }
 
 /// Extract a schema from one dictionary event, in either on-disk form.

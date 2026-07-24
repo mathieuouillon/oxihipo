@@ -54,6 +54,8 @@ pub struct Chain {
     /// Name↔bit tag registry (first non-empty across the chain's files);
     /// empty if none of them carry one.
     tag_registry: Arc<TagRegistry>,
+    /// User key/value config from the dictionary record (first non-empty).
+    config: Arc<Vec<(String, String)>>,
     filter: Option<Filter>,
     record_tags: Option<Vec<u64>>,
 }
@@ -77,6 +79,7 @@ impl Default for Chain {
             file_event_offsets: vec![0],
             dict: Arc::new(Dict::new()),
             tag_registry: Arc::new(TagRegistry::new()),
+            config: Arc::new(Vec::new()),
             filter: None,
             record_tags: None,
         }
@@ -157,6 +160,13 @@ impl Chain {
             .find(|r| !r.is_empty())
             .map(Arc::clone)
             .unwrap_or_else(|| Arc::clone(&files[0].tag_registry));
+        // User config travels with the dict too; prefer the first non-empty.
+        let config = files
+            .iter()
+            .map(|f| &f.config)
+            .find(|c| !c.is_empty())
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&files[0].config));
         let mut file_event_offsets = Vec::with_capacity(files.len() + 1);
         file_event_offsets.push(0_u64);
         let mut acc = 0_u64;
@@ -169,6 +179,7 @@ impl Chain {
             file_event_offsets,
             dict,
             tag_registry,
+            config,
             filter: None,
             record_tags: None,
         })
@@ -210,6 +221,21 @@ impl Chain {
     /// ```
     pub fn tag_registry(&self) -> &TagRegistry {
         &self.tag_registry
+    }
+
+    /// The user key/value configuration written into the dictionary record —
+    /// the `(32555,…)` "run config" store shared with the C++/Java writers — in
+    /// file order. Empty if the file carries none.
+    pub fn user_config(&self) -> &[(String, String)] {
+        &self.config
+    }
+
+    /// Look up a single user-config value by key (see [`Self::user_config`]).
+    pub fn config(&self, key: &str) -> Option<&str> {
+        self.config
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Iterate the paths in input order.

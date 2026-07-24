@@ -832,3 +832,26 @@ def test_show(chain, capsys):
     chain.show("REC::Event")
     out2 = capsys.readouterr().out
     assert "REC::Event" in out2 and "evno" in out2
+
+
+def test_user_config_round_trip(tmp_path):
+    import awkward as ak
+
+    p = str(tmp_path / "cfg.hipo")
+    w = oxihipo.create(p, compression="lz4", config={"run": "5042", "torus": "-1.0"})
+    w.new_bank("T::a", {"x": "I"})
+    w.extend({"T::a": {"x": ak.Array([[1], [2]])}})
+    w.close()
+    f = oxihipo.open(p)
+    assert f.config == {"run": "5042", "torus": "-1.0"}
+
+
+def test_no_config_is_empty(tmp_path):
+    import awkward as ak
+
+    p = str(tmp_path / "nocfg.hipo")
+    w = oxihipo.create(p, compression="lz4")
+    w.new_bank("T::a", {"x": "I"})
+    w.extend({"T::a": {"x": ak.Array([[1]])}})
+    w.close()
+    assert oxihipo.open(p).config == {}

@@ -69,6 +69,9 @@ pub struct WriterBuilder {
     path: PathBuf,
     dict: Option<Dict>,
     tag_registry: TagRegistry,
+    /// User key/value configuration written into the dictionary record, in
+    /// insertion order (`(120,…)` schemas plus these `(32555,…)` entries).
+    config: Vec<(String, String)>,
     options: WriterOptions,
     /// Whether the caller set `max_record_bytes` explicitly. When they
     /// didn't, [`Self::build`] picks a per-compression default (larger
@@ -110,6 +113,17 @@ impl WriterBuilder {
         self
     }
 
+    /// Attach a user configuration key/value pair, stored in the dictionary
+    /// record as a `(32555,1)=key` / `(32555,2)=value` string pair — the same
+    /// "run config" store the C++ and Java writers emit and read. Call once per
+    /// entry; later calls with the same key append (readers keep the last).
+    /// Read back with [`Chain::config`](crate::read::Chain::config) /
+    /// [`Chain::user_config`](crate::read::Chain::user_config).
+    pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.push((key.into(), value.into()));
+        self
+    }
+
     pub fn compression(mut self, c: Compression) -> Self {
         self.options.compression = c;
         self
@@ -131,6 +145,7 @@ impl WriterBuilder {
             path,
             dict,
             tag_registry,
+            config,
             mut options,
             record_bytes_explicit,
         } = self;
@@ -138,7 +153,7 @@ impl WriterBuilder {
             options.max_record_bytes = default_max_record_bytes(options.compression);
         }
         let dict = dict.unwrap_or_default();
-        Writer::create_inner(path, dict, tag_registry, options)
+        Writer::create_inner(path, dict, tag_registry, config, options)
     }
 }
 
@@ -187,6 +202,7 @@ pub struct Writer {
     file: BufWriter<File>,
     dict: Dict,
     tag_registry: TagRegistry,
+    config: Vec<(String, String)>,
     opts: WriterOptions,
     /// Current data-record builder.
     builder: RecordBuilder,
@@ -215,6 +231,7 @@ impl Writer {
             path: path.as_ref().to_path_buf(),
             dict: None,
             tag_registry: TagRegistry::new(),
+            config: Vec::new(),
             options: WriterOptions::default(),
             record_bytes_explicit: false,
         }
@@ -224,10 +241,11 @@ impl Writer {
         path: PathBuf,
         dict: Dict,
         tag_registry: TagRegistry,
+        config: Vec<(String, String)>,
         opts: WriterOptions,
     ) -> Result<Self> {
         let path_for_err = path.clone();
-        Self::create_inner_impl(path, dict, tag_registry, opts)
+        Self::create_inner_impl(path, dict, tag_registry, config, opts)
             .map_err(|e| e.with_path(path_for_err))
     }
 
@@ -235,6 +253,7 @@ impl Writer {
         path: PathBuf,
         dict: Dict,
         tag_registry: TagRegistry,
+        config: Vec<(String, String)>,
         opts: WriterOptions,
     ) -> Result<Self> {
         let file = OpenOptions::new()
@@ -248,6 +267,7 @@ impl Writer {
             file: BufWriter::new(file),
             dict,
             tag_registry,
+            config,
             opts,
             builder: RecordBuilder::new(),
             compress_buf: ScratchBuf::new(),
@@ -390,7 +410,7 @@ impl Writer {
     }
 
     fn write_file_header_and_dictionary(&mut self) -> Result<()> {
-        let dict_record = build_dictionary_record(&self.dict, &self.tag_registry)?;
+        let dict_record = build_dictionary_record(&self.dict, &self.tag_registry, &self.config)?;
         self.user_header_length = dict_record.len() as u32;
 
         let mut bit_info: u32 = HIPO_VERSION;
@@ -483,8 +503,12 @@ impl Drop for Writer {
 /// (`(DICT_GROUP, TAG_REGISTRY_ITEM)`). The registry event is additive: readers
 /// that don't recognise the item skip it, so the file stays readable by tools
 /// that predate it.
-fn build_dictionary_record(dict: &Dict, tag_registry: &TagRegistry) -> Result<Vec<u8>> {
-    let mut events: Vec<Vec<u8>> = Vec::with_capacity(dict.len() + 1);
+fn build_dictionary_record(
+    dict: &Dict,
+    tag_registry: &TagRegistry,
+    config: &[(String, String)],
+) -> Result<Vec<u8>> {
+    let mut events: Vec<Vec<u8>> = Vec::with_capacity(dict.len() + 1 + config.len());
     for schema in dict.iter() {
         events.push(build_meta_event(DICT_GROUP, DICT_ITEM, &schema.to_text()));
     }
@@ -494,6 +518,11 @@ fn build_dictionary_record(dict: &Dict, tag_registry: &TagRegistry) -> Result<Ve
             TAG_REGISTRY_ITEM,
             &tag_registry.to_text(),
         ));
+    }
+    // User config: one event per entry, with a key structure and a value
+    // structure (both type-6 STRING so the C++ and Java readers accept them).
+    for (key, value) in config {
+        events.push(build_config_event(key, value));
     }
     let event_refs: Vec<&[u8]> = events.iter().map(|e| e.as_slice()).collect();
     let mut payload_buf = Vec::new();
@@ -522,6 +551,28 @@ fn build_meta_event(group: u16, item: u8, text: &str) -> Vec<u8> {
     let mut event = vec![0u8; EVENT_HEADER_SIZE];
     event[0..4].copy_from_slice(b"EVNT");
     event.extend_from_slice(&bank);
+    let total = event.len() as u32;
+    write_u32_le(&mut event, EH_SIZE, total);
+    event
+}
+
+/// A dictionary-record event carrying one user-config entry: a key structure
+/// at `(CONFIG_GROUP, CONFIG_KEY_ITEM)` and a value structure at
+/// `(CONFIG_GROUP, CONFIG_STRING_ITEM)`, packed back-to-back (no padding, as
+/// the C++/Java writers do). Both are type 6 (STRING) so a strict reader (the
+/// Java `Node.getString`) accepts them.
+fn build_config_event(key: &str, value: &str) -> Vec<u8> {
+    fn push_string_struct(out: &mut Vec<u8>, group: u16, item: u8, text: &str) {
+        out.extend_from_slice(&group.to_le_bytes());
+        out.push(item);
+        out.push(6); // STRING
+        out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
+    }
+    let mut event = vec![0u8; EVENT_HEADER_SIZE];
+    event[0..4].copy_from_slice(b"EVNT");
+    push_string_struct(&mut event, CONFIG_GROUP, CONFIG_KEY_ITEM, key);
+    push_string_struct(&mut event, CONFIG_GROUP, CONFIG_STRING_ITEM, value);
     let total = event.len() as u32;
     write_u32_le(&mut event, EH_SIZE, total);
     event
