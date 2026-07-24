@@ -233,6 +233,40 @@ NumPy zero-copy, so the binding costs ~10%. Method + reproduction:
 [Python vs Rust benchmark](https://mathieuouillon.github.io/oxihipo/docs/design/python-vs-rust-benchmark)
 (`examples/bench_columns.rs`, `py/examples/bench_columns.py`).
 
+**Against the other HIPO implementations.** Same file, same work, each using
+its own documented fast path; every implementation prints a checksum and the
+run is only valid if they all agree. 200k events, LZ4, Apple Silicon.
+`warm` = best of 10 in-process passes, `cold` = first pass in a fresh process:
+
+| per-event read | Rust | C++ | Java |
+|---|--:|--:|--:|
+| iterate only, no bank | **6.0** | 16.3 | 6.7 |
+| one column (`pid`) | 13.0 | 16.9 | **10.1** |
+| two columns (`pid,px`) | 15.8 | 17.3 | **9.7** |
+| all 8 columns | 33.0 | **19.9** | 16.4 |
+| *cold, two columns* | **17.2** | 18.3 | 40.0 |
+
+Read that honestly. Java is quick once its JIT is warm and wins several rows,
+but a **cold** pass — what a short job or a per-file batch worker actually pays
+— costs it 2.6–4.3× more. C++ barely moves as columns are added and so wins the
+all-columns row outright: oxihipo's per-event accessor sets up a column view per
+call, which never amortises over 1–5 rows.
+
+The answer to that is the **columnar API**, which is also what the Python
+binding drives:
+
+| columnar read (`read_columns`) | 1 thread | all cores |
+|---|--:|--:|
+| Rust, all 8 columns | 16.9 | **7.1** |
+| Python, all 8 columns | 14.8 | 7.3 |
+
+All-columns drops 33.0 → 16.9 ms serial and 7.1 ms across cores, and the Python
+binding costs ~0–10% over native Rust rather than a multiple. **If you read many
+columns, don't loop events.** Full matrix, compression sweep, and the two
+measurement traps that produced wrong numbers before being caught:
+[vs C++ and Java](https://mathieuouillon.github.io/oxihipo/docs/performance/cross-implementation)
+— harness in [`benches/cross-impl/`](benches/cross-impl/).
+
 ## Layout
 
 Single-crate repo (`oxihipo` — error, wire, compress, schema, event, read,
