@@ -66,10 +66,11 @@ they were measured on.
 
 - `SortedWriter` and `StreamWriter` (per-tag bin writers, auto-flush) —
   deferred.
-- **Intra-stream parallel inflate for the by-bank / per-column formats**, for
-  very large records where a single bank's (or column's) stream is multi-MB.
-  Those streams already parallelise *across* banks in `for_each`; splitting a
-  single large stream is the next step if profiles say one dominates.
+Intra-stream parallel inflate used to be listed here. It is **closed as
+not-worth-doing**, on measurement: the parallel work unit is a whole record, not
+a stream, so record *count* — already tunable with `max_record_bytes` — is what
+limits a scan. See
+[Record size and parallel scaling](./performance/compression.md#record-size-and-parallel-scaling).
 
 ## License
 

@@ -38,3 +38,13 @@ stored baseline; these do not.
 | `bench_read_compression` | one dataset re-encoded into every format, then read |
 | `bench_event_tags` | the per-event tag read paths |
 | `bench_par` | single-threaded vs parallel scan |
+
+## Layout diagnostics
+
+Tools for deciding how a file should be written, rather than measuring the
+reader. Both take a real file and answer a tuning question.
+
+| example | answers |
+| --- | --- |
+| `profile_streams` | how concentrated is a record's payload? Largest bank / column stream as a share of its record, and the top streams overall |
+| `record_size_scaling` | what does `max_record_bytes` buy? Record count, file size, and parallel speed-up across a sweep of flush targets |
