@@ -36,12 +36,15 @@ pub(crate) fn to_pyerr(err: HipoError) -> PyErr {
             HipoError::UnknownSchema { .. } | HipoError::UnknownColumn { .. } => {
                 PyKeyError::new_err(msg)
             }
-            HipoError::TypeMismatch { .. } | HipoError::ColumnLengthMismatch { .. } => {
-                PyTypeError::new_err(msg)
-            }
-            HipoError::SchemaParse(_)
+            HipoError::TypeMismatch { .. } => PyTypeError::new_err(msg),
+            // A shape/length disagreement is a value problem, not a type one.
+            HipoError::ColumnLengthMismatch { .. }
+            | HipoError::SchemaParse(_)
             | HipoError::InvalidGlob { .. }
-            | HipoError::InPlaceTagUnsupported { .. } => PyValueError::new_err(msg),
+            | HipoError::InPlaceTagUnsupported { .. }
+            | HipoError::UnknownCompression(_) => PyValueError::new_err(msg),
+            // Infrastructure / internal failures are not file corruption.
+            HipoError::ThreadPool(_) | HipoError::Internal(_) => OxihipoError::new_err(msg),
             // An out-of-range event index is Python's `IndexError`.
             HipoError::EventIndexOutOfRange { .. } => PyIndexError::new_err(msg),
             // Unwrap the path context to classify by the underlying cause.

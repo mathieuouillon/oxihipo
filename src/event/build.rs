@@ -129,8 +129,24 @@ impl<'s> BankBuilder<'s> {
         self.set_i32_at(name, row, value)
     }
 
+    /// Bounds-check a random-access row index. The `set_*_at` setters index
+    /// the column buffer directly, so an out-of-range `row` would slice past
+    /// the end — the one failure mode a random-access writer actually hits.
+    /// Every other error here is a `Result`, so this is too.
+    #[inline]
+    fn check_row(&self, row: u32) -> Result<()> {
+        if row >= self.rows {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "BankBuilder row index out of range (call push_rows first)",
+            });
+        }
+        Ok(())
+    }
+
     pub fn set_i32_at(&mut self, name: &str, row: u32, value: i32) -> Result<&mut Self> {
         let col = self.check_col_scalar(name, DataType::Int)?;
+        self.check_row(row)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 4;
         bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
@@ -144,6 +160,7 @@ impl<'s> BankBuilder<'s> {
 
     pub fn set_i64_at(&mut self, name: &str, row: u32, value: i64) -> Result<&mut Self> {
         let col = self.check_col_scalar(name, DataType::Long)?;
+        self.check_row(row)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 8;
         bytes[off..off + 8].copy_from_slice(&value.to_le_bytes());
@@ -157,6 +174,7 @@ impl<'s> BankBuilder<'s> {
 
     pub fn set_i16_at(&mut self, name: &str, row: u32, value: i16) -> Result<&mut Self> {
         let col = self.check_col_scalar(name, DataType::Short)?;
+        self.check_row(row)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 2;
         bytes[off..off + 2].copy_from_slice(&value.to_le_bytes());
@@ -170,6 +188,7 @@ impl<'s> BankBuilder<'s> {
 
     pub fn set_i8_at(&mut self, name: &str, row: u32, value: i8) -> Result<&mut Self> {
         let col = self.check_col_scalar(name, DataType::Byte)?;
+        self.check_row(row)?;
         let bytes = &mut self.columns[col];
         bytes[row as usize] = value as u8;
         Ok(self)
@@ -182,6 +201,7 @@ impl<'s> BankBuilder<'s> {
 
     pub fn set_f32_at(&mut self, name: &str, row: u32, value: f32) -> Result<&mut Self> {
         let col = self.check_col_scalar(name, DataType::Float)?;
+        self.check_row(row)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 4;
         bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
@@ -195,6 +215,7 @@ impl<'s> BankBuilder<'s> {
 
     pub fn set_f64_at(&mut self, name: &str, row: u32, value: f64) -> Result<&mut Self> {
         let col = self.check_col_scalar(name, DataType::Double)?;
+        self.check_row(row)?;
         let bytes = &mut self.columns[col];
         let off = row as usize * 8;
         bytes[off..off + 8].copy_from_slice(&value.to_le_bytes());
@@ -217,6 +238,7 @@ impl<'s> BankBuilder<'s> {
         values: &[T],
     ) -> Result<&mut Self> {
         let col = self.check_col(name, T::DATA_TYPE)?;
+        self.check_row(row)?;
         let entry = &self.schema.entries()[col];
         let expected_len = entry.length as usize;
         if values.len() != expected_len {

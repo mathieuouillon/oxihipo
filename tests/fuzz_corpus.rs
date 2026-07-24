@@ -214,3 +214,54 @@ fn hostile_schema_text_does_not_panic() {
         }
     }
 }
+
+#[test]
+fn composite_accessors_are_bounds_safe() {
+    // Composite getters used to index `fields` / `data` directly, so an
+    // out-of-range field or row aborted the process. They must return the
+    // type's default instead, matching the lenient `Bank::get`.
+    use oxihipo::event::{Composite, CompositeFormat};
+    let format = CompositeFormat::parse("ilf").unwrap();
+    // Two rows' worth of zeroed data.
+    let data = vec![0u8; format.row_size() as usize * 2];
+    let c = Composite::from_parts(format, &data).unwrap();
+    for field in [0usize, 1, 2, 3, 99, usize::MAX] {
+        for row in [0u32, 1, 2, 1000, u32::MAX] {
+            let _ = c.i8(field, row);
+            let _ = c.i16(field, row);
+            let _ = c.i32(field, row);
+            let _ = c.i64(field, row);
+            let _ = c.f32(field, row);
+            let _ = c.f64(field, row);
+        }
+    }
+}
+
+#[test]
+fn bank_builder_rejects_out_of_range_rows() {
+    // `set_*_at` indexed the column buffer directly; a row past the pushed
+    // count sliced out of bounds. It must be an error, not a panic.
+    use oxihipo::DataType;
+    use oxihipo::event::BankBuilder;
+
+    let schema = Schema::from_columns(
+        "T",
+        1,
+        1,
+        [
+            ("x".into(), DataType::Int, 1),
+            ("arr".into(), DataType::Float, 2),
+        ],
+    );
+    let mut b = BankBuilder::with_row_capacity(&schema, 2);
+    b.push_rows(2);
+    assert!(b.set_i32_at("x", 0, 7).is_ok());
+    assert!(b.set_i32_at("x", 1, 8).is_ok());
+    for bad in [2u32, 3, 1000, u32::MAX] {
+        assert!(b.set_i32_at("x", bad, 9).is_err(), "row {bad} must Err");
+        assert!(
+            b.set_array_at("arr", bad, &[1.0f32, 2.0]).is_err(),
+            "array row {bad} must Err"
+        );
+    }
+}

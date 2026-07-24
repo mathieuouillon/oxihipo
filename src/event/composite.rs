@@ -149,22 +149,46 @@ impl<'b> Composite<'b> {
         &self.format.fields
     }
 
-    fn offset(&self, field: usize, row: u32) -> usize {
-        let f = &self.format.fields[field];
-        row as usize * self.format.row_size as usize + f.row_offset as usize
+    /// Byte offset of `(field, row)`, or `None` if either is out of range or
+    /// the element would not fit. The typed getters below return `T::default()`
+    /// in that case, matching the lenient `Bank::get` rather than panicking —
+    /// the accessors used to index straight into `fields` / `data`, so a bad
+    /// field index or row would abort the process.
+    fn offset(&self, field: usize, row: u32) -> Option<usize> {
+        let f = self.format.fields.get(field)?;
+        if row >= self.rows {
+            return None;
+        }
+        let off =
+            (row as usize).checked_mul(self.format.row_size as usize)? + f.row_offset as usize;
+        (off + f.ty.size() <= self.data.len()).then_some(off)
+    }
+
+    /// The declared type of `field`, if it exists.
+    #[inline]
+    fn field_ty(&self, field: usize) -> Option<DataType> {
+        self.format.fields.get(field).map(|f| f.ty)
     }
 
     pub fn i8(&self, field: usize, row: u32) -> i8 {
-        self.data[self.offset(field, row)] as i8
+        match self.offset(field, row) {
+            Some(off) => self.data[off] as i8,
+            None => 0,
+        }
     }
 
     pub fn i16(&self, field: usize, row: u32) -> i16 {
-        read_i16_le(self.data, self.offset(field, row))
+        match self.offset(field, row) {
+            Some(off) => read_i16_le(self.data, off),
+            None => 0,
+        }
     }
 
     pub fn i32(&self, field: usize, row: u32) -> i32 {
-        let off = self.offset(field, row);
-        match self.format.fields[field].ty {
+        let (Some(off), Some(ty)) = (self.offset(field, row), self.field_ty(field)) else {
+            return 0;
+        };
+        match ty {
             DataType::Byte => self.data[off] as i8 as i32,
             DataType::Short => read_i16_le(self.data, off) as i32,
             DataType::Int => read_u32_le(self.data, off) as i32,
@@ -173,8 +197,10 @@ impl<'b> Composite<'b> {
     }
 
     pub fn i64(&self, field: usize, row: u32) -> i64 {
-        let off = self.offset(field, row);
-        match self.format.fields[field].ty {
+        let (Some(off), Some(ty)) = (self.offset(field, row), self.field_ty(field)) else {
+            return 0;
+        };
+        match ty {
             DataType::Long => read_u64_le(self.data, off) as i64,
             DataType::Int => read_u32_le(self.data, off) as i32 as i64,
             DataType::Short => read_i16_le(self.data, off) as i64,
@@ -184,8 +210,10 @@ impl<'b> Composite<'b> {
     }
 
     pub fn f32(&self, field: usize, row: u32) -> f32 {
-        let off = self.offset(field, row);
-        match self.format.fields[field].ty {
+        let (Some(off), Some(ty)) = (self.offset(field, row), self.field_ty(field)) else {
+            return 0.0;
+        };
+        match ty {
             DataType::Float => read_f32_le(self.data, off),
             DataType::Double => read_f64_le(self.data, off) as f32,
             _ => 0.0,
@@ -193,8 +221,10 @@ impl<'b> Composite<'b> {
     }
 
     pub fn f64(&self, field: usize, row: u32) -> f64 {
-        let off = self.offset(field, row);
-        match self.format.fields[field].ty {
+        let (Some(off), Some(ty)) = (self.offset(field, row), self.field_ty(field)) else {
+            return 0.0;
+        };
+        match ty {
             DataType::Double => read_f64_le(self.data, off),
             DataType::Float => f64::from(read_f32_le(self.data, off)),
             _ => 0.0,

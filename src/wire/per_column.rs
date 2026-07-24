@@ -262,12 +262,19 @@ impl PerColumnRecord {
                 data_type: dir[off + 3],
             });
         }
-        debug_assert!(
-            descriptors
-                .windows(2)
-                .all(|w| (w[0].group, w[0].item) < (w[1].group, w[1].item)),
-            "PerColumn descriptors must be sorted ascending by (group, item)",
-        );
+        // `bank_index` binary-searches this slice, so ascending (group, item)
+        // is load-bearing. Verify it rather than `debug_assert`ing: in a release
+        // build an unsorted (corrupt or hostile) directory would make the search
+        // silently miss banks that are present — wrong data, no error.
+        if !descriptors
+            .windows(2)
+            .all(|w| (w[0].group, w[0].item) < (w[1].group, w[1].item))
+        {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "PerColumn bank descriptors are not sorted by (group, item)",
+            });
+        }
 
         // num_cols + streams-per-bank prefix sum
         let mut num_cols: Vec<u16> = Vec::with_capacity(num_banks);

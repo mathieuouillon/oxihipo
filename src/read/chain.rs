@@ -959,7 +959,7 @@ fn build_pool(threads: usize) -> Result<rayon::ThreadPool> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
-        .map_err(|_| HipoError::Compression("rayon thread pool init failed"))
+        .map_err(|e| HipoError::ThreadPool(e.to_string()))
 }
 
 // ---- In-place tag update helpers -----------------------------------------
