@@ -50,6 +50,10 @@ col.offsets                   # int64, length = n_events + 1
 These work on `arrays` / `array` / `numpy` / `iterate`:
 
 - **`entry_start=` / `entry_stop=`** — restrict to a global event range.
+- **`entries=[...]`** (`arrays` only) — read exactly these global event indices
+  instead of a range. See [Replaying a list of events](#replaying-a-list-of-events).
+- **`cut="..."`** (`arrays` only) — filter rows or events with an expression.
+  See [Cuts](#cuts).
 - **`filter_name="REC::*"`** — glob over `bank` / `bank/column` keys.
 - **`library=`** — `"ak"` (default, `ak.Array`), `"np"` (dict of object-dtype
   `ndarray`), `"pd"` (pandas, one frame per bank), `"arrow"` (`pyarrow.Table`,
@@ -124,12 +128,74 @@ differ.
 how the C++ and Java tools address banks. You need it when handing a bank
 identifier to something outside this library; reading here is by name.
 
+## Cuts
+
+`cut=` filters the result with a Python expression, evaluated with the bank's
+columns bound to jagged `ak.Array` values. **One keyword covers two
+granularities**, and which you get is decided by what the expression evaluates
+to:
+
+```python
+# per-ROW — keeps matching rows; every event survives, some possibly empty
+electrons = f.arrays("REC::Particle", ["px", "py", "pz"], cut="pid == 11")
+
+# per-EVENT — keeps whole events, drops the rest
+has_e = f.arrays("REC::Particle", ["px"], cut="ak.any(pid == 11, axis=1)")
+```
+
+The difference is the shape of the mask: `pid == 11` is jagged (one flag per
+row), while `ak.any(..., axis=1)` reduces to one flag per event. Anything else —
+a non-boolean result, or the wrong length — raises `ValueError` rather than
+silently mis-slicing.
+
+A column named **only** in the cut is read for it and then dropped, so you do not
+have to ask for `pid` just to cut on it:
+
+```python
+px = f.arrays("REC::Particle", ["px"], cut="pid == 11")
+px.fields          # ['px'] — pid was read for the cut, then discarded
+```
+
+`ak`, `np` and `abs` are in scope. Array columns (`T#N`) keep their inner width
+through a cut. It composes with `entries=`, `entry_start`/`entry_stop`, every
+`library=`, and `workers=`.
+
+:::warning A cut is code
+The expression is `eval`'d in a namespace with builtins removed. That blocks the
+obvious mistakes but it is **not** a sandbox — build cuts from your own source,
+never from user input or a file you did not write.
+:::
+
+:::note One bank at a time
+A cut needs exactly one bank, because the column names have to be unambiguous.
+For a multi-bank read, cut each bank separately or mask the result yourself.
+:::
+
+## Replaying a list of events
+
+When an earlier pass has already told you which events are interesting,
+`entries=` reads exactly those:
+
+```python
+interesting = [12, 40, 41, 42, 900]           # e.g. from a previous scan
+p = f.arrays("REC::Particle", ["px", "py"], entries=interesting)
+```
+
+The result is aligned 1:1 with the list, so your order is preserved and
+duplicates are honoured; an out-of-range index gives an empty entry rather than
+an error. Mutually exclusive with `entry_start`/`entry_stop`.
+
+:::tip Sort the list
+Each lookup goes through the reader's record cache, so a run of indices inside
+one record costs a single decode — while a shuffled list re-decodes per lookup.
+`entries=sorted(interesting)` is materially faster on a big file.
+:::
+
 ## Composite banks
 
 A few CLAS12 structures (`RUN::scaler` and friends) carry an **inline format
-string** instead of a dictionary schema. `arrays()` and `read_columns()` resolve
-banks through the dictionary, so composites are invisible to them — and absent
-from `keys()`. Read them with `composite()`:
+string** in place of a schema: the dictionary names them, but the layout lives in
+the structure itself. Read those with `composite()`:
 
 ```python
 ev = f.composite("RUN::scaler")
@@ -140,6 +206,17 @@ f.composite("RUN::scaler", library="np")  # {'f0': ndarray(object), ...}
 Composite fields are **positional** — the format string carries types, not
 names — so they come back as `f0`, `f1`, … in format order. `library` is `"ak"`
 (default) or `"np"`; `entry_start` / `entry_stop` narrow the range as elsewhere.
+
+:::warning `keys()` cannot tell you which banks are composite
+Composites are resolved *through* the dictionary, exactly like schema'd banks, so
+they appear in `keys()` alongside everything else — being listed says nothing
+about which reader to use. What makes a bank composite is the shape of its
+structure on the wire, not its dictionary entry.
+
+There is no discovery call yet. Until there is, `composite()` at least tells you
+which case you are in: it reports a bank that exists but is schema'd separately
+from one that is not in the file at all.
+:::
 
 :::tip
 There is a module-level shorthand for one-off reads:

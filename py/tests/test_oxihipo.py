@@ -938,3 +938,128 @@ def test_unknown_bank_and_column_raise_keyerror(chain):
 def test_unknown_compression_is_value_error(tmp_path):
     with pytest.raises(ValueError):
         oxihipo.create(str(tmp_path / "x.hipo"), compression="not-a-codec")
+
+
+# --- entries=, cut=, and max_record_bytes ---------------------------------
+
+
+def test_entries_matches_the_equivalent_range(chain):
+    ak = pytest.importorskip("awkward")
+    n = min(20, chain.num_entries)
+    rng = chain.arrays("REC::Particle", ["pid", "px"], entry_start=5, entry_stop=n)
+    ent = chain.arrays("REC::Particle", ["pid", "px"], entries=list(range(5, n)))
+    assert ak.almost_equal(rng, ent)
+
+
+def test_entries_preserves_order_and_duplicates(chain):
+    ak = pytest.importorskip("awkward")
+    want = [3, 3, 1, 0]
+    got = chain.arrays("REC::Particle", ["pid"], entries=want)
+    assert len(got) == len(want)
+    # Slot k must equal a standalone read of entries[k] — the alignment
+    # guarantee the keyword rests on.
+    for k, e in enumerate(want):
+        one = chain.arrays("REC::Particle", ["pid"], entries=[e])
+        assert ak.almost_equal(got[k : k + 1], one)
+
+
+def test_entries_out_of_range_is_empty_not_an_error(chain):
+    got = chain.arrays("REC::Particle", ["pid"], entries=[0, 10**9])
+    # Still one entry per requested index, the bogus one simply empty.
+    assert len(got) == 2
+    assert len(got[1].pid) == 0
+
+
+def test_entries_rejects_conflicting_and_negative(chain):
+    with pytest.raises(ValueError):
+        chain.arrays("REC::Particle", ["pid"], entries=[0], entry_start=0)
+    with pytest.raises(ValueError):
+        chain.arrays("REC::Particle", ["pid"], entries=[-1])
+
+
+def test_cut_per_row_keeps_every_event(chain):
+    ak = pytest.importorskip("awkward")
+    base = chain.arrays("REC::Particle", ["pid", "px"])
+    cut = chain.arrays("REC::Particle", ["pid", "px"], cut="pid == 11")
+    # A row-level cut filters rows, never events.
+    assert len(cut) == len(base)
+    assert ak.almost_equal(cut, base[base.pid == 11])
+
+
+def test_cut_per_event_drops_events(chain):
+    ak = pytest.importorskip("awkward")
+    base = chain.arrays("REC::Particle", ["pid"])
+    cut = chain.arrays("REC::Particle", ["pid"], cut="ak.any(pid == 11, axis=1)")
+    assert ak.almost_equal(cut, base[ak.any(base.pid == 11, axis=1)])
+
+
+def test_cut_column_is_read_then_dropped(chain):
+    ak = pytest.importorskip("awkward")
+    # `pid` is only named by the cut, so it must not come back in the result.
+    proj = chain.arrays("REC::Particle", ["px"], cut="pid == 11")
+    assert proj.fields == ["px"]
+    full = chain.arrays("REC::Particle", ["pid", "px"], cut="pid == 11")
+    assert ak.almost_equal(proj.px, full.px)
+
+
+def test_cut_preserves_array_column_width(tmp_path):
+    ak = pytest.importorskip("awkward")
+    p = tmp_path / "cutarr.hipo"
+    w = oxihipo.create(str(p), compression="lz4")
+    w.new_bank("T::B", {"pid": "I", "cov": "F#3"})
+    w.extend({"T::B": {
+        "pid": ak.Array([[11, 22, 11]]),
+        "cov": ak.Array([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]),
+    }})
+    w.close()
+    got = oxihipo.open(str(p)).arrays("T::B", cut="pid == 11")
+    # Rows 0 and 2 survive and each stays 3 wide — the inner_len must not be
+    # disturbed by filtering rows out from under it.
+    assert got.cov.tolist() == [[[1.0, 2.0, 3.0], [7.0, 8.0, 9.0]]]
+
+
+def test_cut_error_paths(chain):
+    for bad in ("pid ==", "nosuchcolumn == 1", "px * 2", "__import__('os')"):
+        with pytest.raises(ValueError):
+            chain.arrays("REC::Particle", ["px"], cut=bad)
+    # A cut spans one bank only; a multi-bank selection must say so.
+    with pytest.raises(ValueError):
+        chain.arrays(["REC::Particle", "REC::Event"], cut="pid == 11")
+
+
+def test_max_record_bytes_changes_record_count(tmp_path):
+    ak = pytest.importorskip("awkward")
+
+    def write(name, mrb):
+        p = tmp_path / name
+        kw = {} if mrb is None else {"max_record_bytes": mrb}
+        w = oxihipo.create(str(p), compression="lz4perbank", **kw)
+        w.new_bank("T::B", {"x": "F"})
+        for _ in range(20):
+            w.extend({"T::B": {"x": ak.Array([[float(i)] * 40 for i in range(400)])}})
+        w.close()
+        return oxihipo.open(str(p))
+
+    big = write("big.hipo", None)
+    small = write("small.hipo", 256 * 1024)
+    # Same events either way; more records is the point — a reader parallelises
+    # over records, so this is the knob that decides how many cores it can use.
+    assert small.num_entries == big.num_entries
+    n_big = len(big._reader().record_spans())
+    n_small = len(small._reader().record_spans())
+    assert n_small > n_big, f"{n_small} !> {n_big}"
+
+
+def test_max_record_bytes_rejects_zero(tmp_path):
+    with pytest.raises(ValueError):
+        oxihipo.create(str(tmp_path / "z.hipo"), max_record_bytes=0)
+
+
+def test_composite_error_distinguishes_absent_from_not_composite(chain):
+    # A schema'd bank is present but not composite. Saying "no composite bank X"
+    # for it is false — X is in the file — and on real data every bank lands
+    # here, so the two causes must read differently.
+    with pytest.raises(KeyError, match="not a composite bank"):
+        chain.composite("REC::Particle")
+    with pytest.raises(KeyError, match="no bank"):
+        chain.composite("NOT::areal::bank")

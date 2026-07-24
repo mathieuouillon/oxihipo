@@ -654,6 +654,53 @@ impl Chain {
         Ok(merge_chunks(&plan, chunks))
     }
 
+    /// [`Self::read_columns`] for an explicit list of global event indices,
+    /// rather than a contiguous range.
+    ///
+    /// This is the columnar counterpart to [`Chain::event`]: replaying a list
+    /// of interesting events found by an earlier pass. Output is aligned 1:1
+    /// with `entries` — element *k* of every bank's offsets describes
+    /// `entries[k]` — so the caller's order is preserved and duplicates are
+    /// honoured.
+    ///
+    /// Indices out of range contribute a 0-row sub-list rather than an error,
+    /// matching how an absent bank is already reported.
+    ///
+    /// **Pass ascending indices when you can.** Each lookup goes through
+    /// [`Chain::event`], which caches the last decoded record, so a run of
+    /// indices inside one record costs a single decode. A shuffled list
+    /// defeats that and re-decodes per lookup. Sequential, not parallel: the
+    /// list is usually short next to the file, and per-record parallelism does
+    /// not apply to scattered single-event lookups.
+    pub fn read_columns_at(
+        &self,
+        selection: &[(&str, &[&str])],
+        entries: &[u64],
+    ) -> Result<Vec<ColumnBuffers>> {
+        let plan = build_plan(self.schemas(), selection)?;
+        if plan.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut chunk = RecordChunk::empty(&plan);
+        for &idx in entries {
+            match self.event(idx) {
+                Some(ev) => {
+                    for (bc, bp) in chunk.banks.iter_mut().zip(&plan) {
+                        bc.push_event(bp, ev.bank(&bp.name).as_ref());
+                    }
+                }
+                // Out of range: a present-but-empty entry keeps every bank's
+                // offsets the same length as `entries`.
+                None => {
+                    for (bc, bp) in chunk.banks.iter_mut().zip(&plan) {
+                        bc.push_event(bp, None);
+                    }
+                }
+            }
+        }
+        Ok(merge_chunks(&plan, vec![chunk]))
+    }
+
     /// Every surviving event's per-event tag (`EH_TAG`), in global event order —
     /// the tag column aligned 1:1 with [`Self::read_columns`] over the same
     /// `range` and chain filter. Cheap: the tag is read from the event header or

@@ -228,6 +228,44 @@ impl PyChain {
             .collect())
     }
 
+    /// `read_columns` for an explicit list of global event indices instead of a
+    /// contiguous range. Output is aligned 1:1 with `entries`, so the caller's
+    /// order and any duplicates are preserved and an out-of-range index is an
+    /// empty entry. Backs `arrays(..., entries=[...])`.
+    fn read_columns_at<'py>(
+        &self,
+        py: Python<'py>,
+        selection: Vec<(String, Vec<String>)>,
+        entries: Vec<u64>,
+    ) -> PyResult<Vec<BankColumns<'py>>> {
+        let cols: Vec<Vec<&str>> = selection
+            .iter()
+            .map(|(_, cs)| cs.iter().map(String::as_str).collect())
+            .collect();
+        let sel: Vec<(&str, &[&str])> = selection
+            .iter()
+            .zip(&cols)
+            .map(|((b, _), cs)| (b.as_str(), cs.as_slice()))
+            .collect();
+
+        let bufs = py
+            .detach(|| self.inner.read_columns_at(&sel, &entries))
+            .map_err(to_pyerr)?;
+
+        Ok(bufs
+            .into_iter()
+            .map(|b| {
+                let offsets = b.offsets.into_pyarray(py);
+                let columns = b
+                    .columns
+                    .into_iter()
+                    .map(|c| (c.name, column_data_to_py(py, c.data), c.inner_len))
+                    .collect();
+                (b.bank, offsets, columns)
+            })
+            .collect())
+    }
+
     /// `[(bank, (group, item))]` — the wire identifiers of every dictionary
     /// bank. The Python wrapper surfaces this as `Chain.bank_ids`.
     fn bank_ids(&self) -> Vec<(String, (u16, u8))> {
@@ -629,6 +667,10 @@ struct PyWriter {
     next_item: u8,
     /// User key/value config to write into the dictionary record, in order.
     config: Vec<(String, String)>,
+    /// Record-flush target in bytes. `None` keeps the core default (32 MB for
+    /// the per-bank/per-column formats, 8 MB otherwise). Smaller records mean
+    /// more parallel work units for a reader, at a small cost in ratio.
+    max_record_bytes: Option<usize>,
     writer: Option<Writer>,
     /// Decorate mode: the source event stream, merged event-by-event.
     source: Option<ChainEventIter>,
@@ -643,14 +685,20 @@ impl PyWriter {
     /// `source=None` → fresh file; `source=path` → decorate that file (copy its
     /// events, attaching the banks you declare + `extend`).
     #[new]
-    #[pyo3(signature = (dst, compression="lz4percolumn", source=None))]
+    #[pyo3(signature = (dst, compression="lz4percolumn", source=None, max_record_bytes=None))]
     fn new(
         py: Python<'_>,
         dst: String,
         compression: &str,
         source: Option<String>,
+        max_record_bytes: Option<usize>,
     ) -> PyResult<Self> {
         let comp = parse_compression(compression)?;
+        if max_record_bytes == Some(0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "max_record_bytes must be positive",
+            ));
+        }
         let (dict, next_item, source_iter, source_total) = match source {
             None => (Dict::new(), 1u8, None, None),
             Some(src) => {
@@ -672,6 +720,7 @@ impl PyWriter {
             dict,
             next_item,
             config: Vec::new(),
+            max_record_bytes,
             writer: None,
             source: source_iter,
             source_total,
@@ -901,6 +950,9 @@ impl PyWriter {
                 .compression(self.compression);
             for (k, v) in &self.config {
                 b = b.config(k, v);
+            }
+            if let Some(n) = self.max_record_bytes {
+                b = b.max_record_bytes(n);
             }
             self.writer = Some(b.build().map_err(to_pyerr)?);
         }
