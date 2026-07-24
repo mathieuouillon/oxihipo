@@ -849,6 +849,16 @@ class Chain:
         """
         return dict(self._reader().tag_names())
 
+    @property
+    def config(self) -> dict[str, str]:
+        """The file's user key/value configuration (the ``(32555,…)`` run-config
+        store shared with the C++/Java writers) as ``{key: value}`` — empty if
+        the file carries none. Write it with ``create(..., config={...})``::
+
+            f.config             # {'run': '5042', 'torus': '-1.0'}
+        """
+        return dict(self._reader().user_config())
+
     def filtered(
         self,
         require: Sequence[str] | None = None,
@@ -1232,8 +1242,11 @@ class Writer:
 
     _w: "_RustWriter | None"
 
-    def __init__(self, path, compression="lz4percolumn", source=None, _inplace=None):
+    def __init__(self, path, compression="lz4percolumn", source=None, _inplace=None, config=None):
         self._w = _RustWriter(str(path), compression, None if source is None else str(source))
+        if config:
+            for key, value in dict(config).items():
+                self._w.add_config(str(key), str(value))
         self._schemas: dict[str, dict[str, str]] = {}
         self._inplace = _inplace  # (final_path, temp_path) for recreate(dst=None)
         self._summary: SkimSummary | None = None
@@ -1262,17 +1275,22 @@ class Writer:
         self._writer().add_schema(bank, cols, group, item)
         self._schemas[bank] = dict(cols)
 
-    def extend(self, data: "dict[str, Any]") -> None:
+    def extend(self, data: "dict[str, Any]", tags: "Any | None" = None) -> None:
         """Append a batch of events. ``data`` is ``{bank: array}`` where each
         value is an ``ak.Array`` record (as :meth:`Chain.arrays` returns) or a
         dict of columns — a jagged ``ak.Array`` per column, or a 1-D NumPy array
         for a scalar-per-event bank. Every bank in one call must span the same
-        number of events. Mirrors uproot's ``extend``."""
+        number of events. Mirrors uproot's ``extend``.
+
+        ``tags`` optionally stamps a per-event tag: a sequence of ``uint32``,
+        one per event in the batch (read back via :meth:`Chain.event_tags` /
+        :meth:`Chain.filtered`)."""
         banks = []
         for bank, bdata in data.items():
             offsets, cols = _to_columnar(bank, bdata, self._schemas.get(bank, {}))
             banks.append((bank, offsets, cols))
-        self._writer().extend(banks)
+        tag_list = None if tags is None else [int(t) for t in tags]
+        self._writer().extend(banks, tag_list)
 
     def close(self) -> SkimSummary:
         """Finish the file (write the trailer index). Returns a
@@ -1299,12 +1317,19 @@ class Writer:
         return f"<oxihipo.Writer: {'closed' if self._summary else 'open'}>"
 
 
-def create(path: StrPath, compression: str = "lz4percolumn") -> Writer:
+def create(
+    path: StrPath,
+    compression: str = "lz4percolumn",
+    config: "Mapping[str, str] | None" = None,
+) -> Writer:
     """Open a new HIPO file for writing (overwrites). Declare banks with
     :meth:`Writer.new_bank`, feed batches with :meth:`Writer.extend`, then
     :meth:`Writer.close`. Compression is one of ``none`` / ``lz4`` / ``lz4best``
-    / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``."""
-    return Writer(path, compression=compression)
+    / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``.
+
+    ``config`` writes a user key/value store into the dictionary record (read
+    back via :attr:`Chain.config`); it interoperates with the C++/Java writers."""
+    return Writer(path, compression=compression, config=config)
 
 
 def recreate(

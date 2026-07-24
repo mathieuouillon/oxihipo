@@ -445,7 +445,7 @@ fn process_record_columns(
             }
         }
     } else {
-        record.load_with_header(read_buf, header)?;
+        record.load_with_header(read_buf, header, Some(&inner.dict))?;
         for e in 0..record.event_count() {
             if !in_range(range, global_first + u64::from(e)) {
                 continue;
@@ -518,7 +518,7 @@ fn record_event_tags(
             tags.push(rec.event_tag(e));
         }
     } else {
-        record.load_with_header(read_buf, header)?;
+        record.load_with_header(read_buf, header, Some(&inner.dict))?;
         for e in 0..record.event_count() {
             if !in_range(range, global_first + u64::from(e)) {
                 continue;

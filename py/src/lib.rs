@@ -259,6 +259,13 @@ impl PyChain {
             .collect()
     }
 
+    /// User key/value config from the dictionary record (the `(32555,…)` run
+    /// config store), as `[(key, value)]` in file order. The pure-Python
+    /// wrapper surfaces this as the `Chain.config` dict.
+    fn user_config(&self) -> Vec<(String, String)> {
+        self.inner.user_config().to_vec()
+    }
+
     /// A new `Chain` restricted to events carrying every bank in `require`,
     /// whose record tag is in `record_tag`, and whose per-event tag is in
     /// `event_tag` (or overlaps the `event_tag_any` bitmask). Cheap — clones
@@ -533,6 +540,8 @@ struct PyWriter {
     dict: Dict,
     /// Next auto-assigned (unique) item number for `new_bank` without an explicit item.
     next_item: u8,
+    /// User key/value config to write into the dictionary record, in order.
+    config: Vec<(String, String)>,
     writer: Option<Writer>,
     /// Decorate mode: the source event stream, merged event-by-event.
     source: Option<ChainEventIter>,
@@ -575,6 +584,7 @@ impl PyWriter {
             compression: comp,
             dict,
             next_item,
+            config: Vec::new(),
             writer: None,
             source: source_iter,
             source_total,
@@ -616,10 +626,29 @@ impl PyWriter {
         Ok(())
     }
 
+    /// Attach a user-config key/value pair (written into the dictionary record).
+    /// Must be called before the first `extend()`/write.
+    fn add_config(&mut self, key: String, value: String) -> PyResult<()> {
+        if self.writer.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "cannot add config after the first extend()/write",
+            ));
+        }
+        self.config.push((key, value));
+        Ok(())
+    }
+
     /// Append a batch of events. `banks` is `[(bank, offsets_i64, [(col, values)])]`;
-    /// every bank in one call must cover the same number of events.
-    #[pyo3(signature = (banks))]
-    fn extend(&mut self, py: Python<'_>, banks: ExtendBanks<'_>) -> PyResult<()> {
+    /// every bank in one call must cover the same number of events. `tags`, if
+    /// given, is one `u32` per event, stamped as that event's tag (and, in
+    /// decorate mode, overriding the copied source tag).
+    #[pyo3(signature = (banks, tags=None))]
+    fn extend(
+        &mut self,
+        py: Python<'_>,
+        banks: ExtendBanks<'_>,
+        tags: Option<Vec<u32>>,
+    ) -> PyResult<()> {
         if self.finished {
             return Err(pyo3::exceptions::PyValueError::new_err("writer is closed"));
         }
@@ -681,6 +710,14 @@ impl PyWriter {
             });
         }
         let n_events = n_events.unwrap_or(0);
+        if let Some(t) = &tags {
+            if t.len() != n_events {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "tags must have one entry per event ({} tags for {n_events} events)",
+                    t.len()
+                )));
+            }
+        }
         if let Some(total) = self.source_total {
             if self.events_written + n_events as u64 > total {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -711,6 +748,9 @@ impl PyWriter {
                             });
                         }
                     }
+                }
+                if let Some(t) = &tags {
+                    eb.set_tag(t[e]);
                 }
                 for rb in &resolved {
                     let lo = rb.offsets[e] as usize;
@@ -769,12 +809,13 @@ impl PyWriter {
 impl PyWriter {
     fn ensure_writer(&mut self) -> PyResult<()> {
         if self.writer.is_none() {
-            let w = Writer::create(&self.dst)
+            let mut b = Writer::create(&self.dst)
                 .schemas(&self.dict)
-                .compression(self.compression)
-                .build()
-                .map_err(to_pyerr)?;
-            self.writer = Some(w);
+                .compression(self.compression);
+            for (k, v) in &self.config {
+                b = b.config(k, v);
+            }
+            self.writer = Some(b.build().map_err(to_pyerr)?);
         }
         Ok(())
     }

@@ -10,6 +10,7 @@
 pub mod by_bank;
 pub mod bytes;
 pub mod constants;
+pub mod endian;
 pub mod event_index;
 pub mod file_header;
 pub mod per_column;

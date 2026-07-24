@@ -365,3 +365,58 @@ fn garbage_file_errors_on_open() {
         "opening a malformed file must error, not panic"
     );
 }
+
+#[test]
+fn user_config_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cfg.hipo");
+    let mut dict = Dict::new();
+    dict.add(Schema::parse_text("{T/300/1}{x/I}").unwrap());
+    let mut w = Writer::create(&path)
+        .schemas(&dict)
+        .config("run", "42")
+        .config("beam_energy", "10.6")
+        .config("target", "LD2 with spaces & symbols")
+        .build()
+        .unwrap();
+    for i in 0..3 {
+        w.event(|ev| {
+            ev.bank("T", |b| {
+                b.row(|r| {
+                    r.set("x", i)?;
+                    Ok(())
+                })?;
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+
+    let chain = Chain::open(&path).unwrap();
+    assert_eq!(chain.config("run"), Some("42"));
+    assert_eq!(chain.config("beam_energy"), Some("10.6"));
+    assert_eq!(chain.config("target"), Some("LD2 with spaces & symbols"));
+    assert_eq!(chain.config("missing"), None);
+    assert_eq!(chain.user_config().len(), 3);
+    // data still reads correctly alongside the config
+    assert_eq!(chain.event_count(), 3);
+}
+
+#[test]
+fn no_user_config_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nocfg.hipo");
+    let mut dict = Dict::new();
+    dict.add(Schema::parse_text("{T/300/1}{x/I}").unwrap());
+    Writer::create(&path)
+        .schemas(&dict)
+        .build()
+        .unwrap()
+        .finish()
+        .unwrap();
+    let chain = Chain::open(&path).unwrap();
+    assert!(chain.user_config().is_empty());
+    assert_eq!(chain.config("anything"), None);
+}

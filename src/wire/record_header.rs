@@ -64,15 +64,18 @@ impl RecordHeader {
             found: magic,
             expected: HEADER_MAGIC,
         })?;
-        // Big-endian records are unsupported — column data is read native LE
-        // with no swap (see `FileHeader::parse` for the rationale).
-        if matches!(endianness, Endianness::Big) {
-            return Err(HipoError::UnsupportedEndianness {
-                offset: RH_MAGIC_NUMBER as u64,
-            });
-        }
-        let r32 = |off| read_u32_le(buf, off);
-        let r64 = |off| read_u64_le(buf, off);
+        // Big-endian records are supported: the header words are swapped here,
+        // and the decompressed payload is normalized to little-endian once per
+        // record (see `wire::endian`).
+        let big = matches!(endianness, Endianness::Big);
+        let r32 = |off| {
+            let v = read_u32_le(buf, off);
+            if big { v.swap_bytes() } else { v }
+        };
+        let r64 = |off| {
+            let v = read_u64_le(buf, off);
+            if big { v.swap_bytes() } else { v }
+        };
 
         let record_length_words = r32(RH_RECORD_LENGTH);
         let record_number = r32(RH_RECORD_NUMBER);
@@ -208,14 +211,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_big_endian() {
-        let mut buf = [0u8; RECORD_HEADER_SIZE];
-        sample().write(&mut buf);
-        // Re-stamp the endian magic with the big-endian marker; the reader
-        // identifies BE but does not support it (column data is read LE).
-        write_u32_le(&mut buf, RH_MAGIC_NUMBER, HEADER_MAGIC_BE);
-        let err = RecordHeader::parse(&buf).unwrap_err();
-        assert!(matches!(err, HipoError::UnsupportedEndianness { .. }));
+    fn parses_big_endian() {
+        // Swap every multi-byte field and stamp the big-endian magic; the
+        // parsed values must match the little-endian original exactly.
+        let mut le = [0u8; RECORD_HEADER_SIZE];
+        sample().write(&mut le);
+        let expect = RecordHeader::parse(&le).unwrap();
+
+        let mut be = le;
+        for off in [
+            RH_RECORD_LENGTH,
+            RH_RECORD_NUMBER,
+            RH_HEADER_LENGTH,
+            RH_EVENT_COUNT,
+            RH_INDEX_ARRAY_LEN,
+            RH_BIT_INFO,
+            RH_USER_HEADER_LEN,
+            RH_DATA_LENGTH,
+            RH_COMP_WORD,
+        ] {
+            be[off..off + 4].reverse();
+        }
+        be[RH_USER_WORD1..RH_USER_WORD1 + 8].reverse();
+        be[RH_USER_WORD2..RH_USER_WORD2 + 8].reverse();
+        write_u32_le(&mut be, RH_MAGIC_NUMBER, HEADER_MAGIC_BE);
+
+        let got = RecordHeader::parse(&be).unwrap();
+        assert!(matches!(got.endianness, Endianness::Big));
+        assert_eq!(got.record_length, expect.record_length);
+        assert_eq!(got.event_count, expect.event_count);
+        assert_eq!(got.index_array_length, expect.index_array_length);
+        assert_eq!(got.data_length, expect.data_length);
+        assert_eq!(got.compression, expect.compression);
+        assert_eq!(got.user_word_1, expect.user_word_1);
+        assert_eq!(got.user_word_2, expect.user_word_2);
     }
 
     #[test]
