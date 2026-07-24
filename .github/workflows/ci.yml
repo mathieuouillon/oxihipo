@@ -97,7 +97,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo +nightly fuzz build
+      # `--target` is not optional here. The prebuilt cargo-fuzz is a
+      # musl-static binary, and cargo-fuzz defaults the target to its *own*
+      # build triple — so it would try to cross-compile the fuzz targets to
+      # musl, where the target is not installed and ASan cannot link against a
+      # static libc. Build for the host instead.
+      - run: cargo +nightly fuzz build --target "$(rustc +nightly -vV | sed -n 's/^host: //p')"
 
   docs:
     name: docs
