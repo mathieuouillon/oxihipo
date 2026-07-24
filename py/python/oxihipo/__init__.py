@@ -903,7 +903,10 @@ class Chain:
     def bank_ids(self) -> dict[str, tuple[int, int]]:
         """``{bank: (group, item)}`` — the wire identifiers of every bank in the
         dictionary. Needed when talking to tools that address banks by id."""
-        return {name: tuple(ids) for name, ids in self._reader().bank_ids()}
+        # Unpack rather than `tuple(ids)`: the latter widens to
+        # `tuple[int, ...]`, which does not satisfy the declared
+        # `tuple[int, int]`.
+        return {name: (group, item) for name, (group, item) in self._reader().bank_ids()}
 
     @property
     def config(self) -> dict[str, str]:
