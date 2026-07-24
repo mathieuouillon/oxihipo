@@ -45,6 +45,10 @@ __all__ = [
     "create",
     "recreate",
     "iterate",
+    "numpy",
+    "event_tags",
+    "composite",
+    "skim",
     "arrays",
     "rdataframe",
     "iterate_rdataframe",
@@ -849,6 +853,61 @@ class Chain:
         """
         return dict(self._reader().tag_names())
 
+    def composite(
+        self,
+        bank: str,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        library: str = "ak",
+    ) -> "Any":
+        """Read a **composite** bank — the CLAS12 structures that carry an inline
+        format string instead of a dictionary schema.
+
+        Composite fields are positional, so they come back named ``f0``, ``f1``,
+        … in format order. These banks are invisible to :meth:`arrays` /
+        :meth:`read_columns`, which resolve banks through the dictionary.
+
+            ev = f.composite("RUN::scaler")
+            ev.f0            # first field, one sublist per event
+
+        ``library`` is ``"ak"`` (default, jagged Awkward array) or ``"np"``
+        (dict of object-dtype arrays, one entry per field)."""
+        offsets, fields = self._reader().composite_columns(bank, entry_start, entry_stop)
+        if not fields:
+            raise KeyError(f"no composite bank {bank!r} in this file")
+        if library == "np":
+            import numpy as _np
+
+            return {
+                f"f{i}": _np.array(
+                    [values[offsets[e] : offsets[e + 1]] for e in range(len(offsets) - 1)],
+                    dtype=object,
+                )
+                for i, (_dtype, values) in enumerate(fields)
+            }
+        if library != "ak":
+            raise ValueError(f"unknown library {library!r} (expected 'ak' or 'np')")
+        import awkward as ak
+        import numpy as _np
+
+        counts = _np.diff(offsets)
+        return ak.zip(
+            {
+                f"f{i}": ak.unflatten(values, counts)
+                for i, (_dtype, values) in enumerate(fields)
+            },
+            depth_limit=2,
+        )
+
+    @property
+    def bank_ids(self) -> dict[str, tuple[int, int]]:
+        """``{bank: (group, item)}`` — the wire identifiers of every bank in the
+        dictionary. Needed when talking to tools that address banks by id."""
+        # Unpack rather than `tuple(ids)`: the latter widens to
+        # `tuple[int, ...]`, which does not satisfy the declared
+        # `tuple[int, int]`.
+        return {name: (group, item) for name, (group, item) in self._reader().bank_ids()}
+
     @property
     def config(self) -> dict[str, str]:
         """The file's user key/value configuration (the ``(32555,…)`` run-config
@@ -1330,6 +1389,26 @@ def create(
     ``config`` writes a user key/value store into the dictionary record (read
     back via :attr:`Chain.config`); it interoperates with the C++/Java writers."""
     return Writer(path, compression=compression, config=config)
+
+
+def numpy(path: StrPath, bank: str, column: str, **kwargs: "Any") -> "Any":
+    """Module-level :meth:`Chain.numpy` — ``oxihipo.numpy(path, bank, col)``."""
+    return open(path).numpy(bank, column, **kwargs)
+
+
+def event_tags(path: StrPath, **kwargs: "Any") -> "Any":
+    """Module-level :meth:`Chain.event_tags`."""
+    return open(path).event_tags(**kwargs)
+
+
+def composite(path: StrPath, bank: str, **kwargs: "Any") -> "Any":
+    """Module-level :meth:`Chain.composite`."""
+    return open(path).composite(bank, **kwargs)
+
+
+def skim(path: StrPath, dst: StrPath, **kwargs: "Any") -> "SkimSummary":
+    """Module-level :meth:`Chain.skim`."""
+    return open(path).skim(dst, **kwargs)
 
 
 def recreate(

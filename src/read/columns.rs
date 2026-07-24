@@ -63,6 +63,48 @@ pub enum ColumnData {
 }
 
 impl ColumnData {
+    /// A fresh empty buffer of the variant matching `dt`. Public counterpart of
+    /// the internal `empty`, for callers materializing columns themselves (the
+    /// Python binding's composite reader, which has no dictionary schema to
+    /// plan from).
+    pub fn empty_for(dt: DataType) -> Self {
+        Self::empty(dt)
+    }
+
+    /// Append one value. Each pushes only into its matching variant; a
+    /// mismatched call is a no-op, so a caller driving these from a field's
+    /// declared type can't corrupt the buffer.
+    pub fn push_i8(&mut self, v: i8) {
+        if let Self::I8(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_i16(&mut self, v: i16) {
+        if let Self::I16(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_i32(&mut self, v: i32) {
+        if let Self::I32(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_i64(&mut self, v: i64) {
+        if let Self::I64(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_f32(&mut self, v: f32) {
+        if let Self::F32(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_f64(&mut self, v: f64) {
+        if let Self::F64(b) = self {
+            b.push(v);
+        }
+    }
+
     /// A fresh empty buffer of the variant matching `dt`.
     fn empty(dt: DataType) -> Self {
         match dt {

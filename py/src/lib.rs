@@ -228,6 +228,93 @@ impl PyChain {
             .collect())
     }
 
+    /// `[(bank, (group, item))]` — the wire identifiers of every dictionary
+    /// bank. The Python wrapper surfaces this as `Chain.bank_ids`.
+    fn bank_ids(&self) -> Vec<(String, (u16, u8))> {
+        self.inner
+            .schemas()
+            .iter()
+            .map(|s| (s.name().to_string(), (s.group(), s.item())))
+            .collect()
+    }
+
+    /// Read a **composite** bank columnarly: one array per positional field,
+    /// plus the shared per-event row offsets.
+    ///
+    /// Composite banks carry an inline format string instead of a dictionary
+    /// schema, so their fields are positional (`f0`, `f1`, …) and they are
+    /// invisible to `read_columns`, which resolves banks through the dict.
+    /// Returns `(offsets, [(dtype_name, values)])` with `values` in the field's
+    /// own dtype.
+    ///
+    /// Unlike `read_columns` this walks events rather than whole records:
+    /// composite banks are rare in CLAS12 data and have no columnar layout on
+    /// disk to exploit.
+    #[pyo3(signature = (bank, entry_start=None, entry_stop=None))]
+    fn composite_columns<'py>(
+        &self,
+        py: Python<'py>,
+        bank: &str,
+        entry_start: Option<u64>,
+        entry_stop: Option<u64>,
+    ) -> PyResult<CompositeColumns<'py>> {
+        let range = mk_range(entry_start, entry_stop);
+        let lo = range.as_ref().map(|r| r.start).unwrap_or(0);
+        let hi = range.as_ref().map(|r| r.end);
+
+        // Heavy work off the GIL; the closure holds no Python handle.
+        type CompositeAccum = (Vec<i64>, Vec<(DataType, ColumnData)>);
+        let collected = py.detach(|| -> oxihipo::Result<CompositeAccum> {
+            let mut offsets: Vec<i64> = vec![0];
+            let mut fields: Vec<(DataType, ColumnData)> = Vec::new();
+            let mut total: i64 = 0;
+            for (i, ev) in self.inner.events().enumerate() {
+                let idx = i as u64;
+                if idx < lo {
+                    continue;
+                }
+                if hi.is_some_and(|h| idx >= h) {
+                    break;
+                }
+                let ev = ev?;
+                match ev.composite(bank) {
+                    Some(c) => {
+                        // First event that carries the bank defines the fields.
+                        if fields.is_empty() {
+                            for f in c.fields() {
+                                fields.push((f.ty, ColumnData::empty_for(f.ty)));
+                            }
+                        }
+                        for (fi, (ty, data)) in fields.iter_mut().enumerate() {
+                            for r in 0..c.rows() {
+                                match ty {
+                                    DataType::Byte => data.push_i8(c.i8(fi, r)),
+                                    DataType::Short => data.push_i16(c.i16(fi, r)),
+                                    DataType::Int => data.push_i32(c.i32(fi, r)),
+                                    DataType::Long => data.push_i64(c.i64(fi, r)),
+                                    DataType::Float => data.push_f32(c.f32(fi, r)),
+                                    DataType::Double => data.push_f64(c.f64(fi, r)),
+                                }
+                            }
+                        }
+                        total += c.rows() as i64;
+                    }
+                    None => { /* bank absent this event: no rows */ }
+                }
+                offsets.push(total);
+            }
+            Ok((offsets, fields))
+        })
+        .map_err(to_pyerr)?;
+
+        let (offsets, fields) = collected;
+        let out = fields
+            .into_iter()
+            .map(|(ty, data)| (dtype_str(ty, 1), column_data_to_py(py, data)))
+            .collect();
+        Ok((offsets.into_pyarray(py), out))
+    }
+
     /// Per-event tag column (`EH_TAG`): one `uint32` per surviving event in
     /// global event order, aligned 1:1 with `read_columns` / `arrays` over the
     /// same filter and range. Read from the event header or record directory —
@@ -820,6 +907,9 @@ impl PyWriter {
         Ok(())
     }
 }
+
+/// `(offsets, [(dtype_name, values)])` — the return of `composite_columns`.
+type CompositeColumns<'py> = (Bound<'py, PyArray1<i64>>, Vec<(String, Bound<'py, PyAny>)>);
 
 /// Map a compression name to the core enum.
 fn parse_compression(name: &str) -> PyResult<oxihipo::Compression> {

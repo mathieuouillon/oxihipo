@@ -887,3 +887,54 @@ def test_writer_tags_length_mismatch_raises(tmp_path):
             {"REC::Particle": {"pid": ak.Array([[11], [22]])}},
             tags=[1, 2, 3],  # 3 tags for 2 events
         )
+
+
+# --- composite banks, bank ids, and the error mapping ----------------------
+def test_bank_ids(chain):
+    ids = chain.bank_ids
+    assert ids["REC::Particle"] == (300, 1)
+    assert ids["REC::Event"] == (300, 30)
+
+
+def test_module_level_helpers_exist():
+    # `numpy` / `event_tags` / `composite` / `skim` are methods *and* free
+    # functions, matching `arrays` / `iterate` (they were methods only).
+    for name in ("numpy", "event_tags", "composite", "skim", "arrays", "iterate"):
+        assert hasattr(oxihipo, name), name
+        assert name in oxihipo.__all__, name
+
+
+def test_corrupt_file_raises_mapped_exception(tmp_path):
+    # The exception tree was implemented but never exercised: a regression in
+    # the mapping would have shipped silently.
+    p = tmp_path / "garbage.hipo"
+    p.write_bytes(b"this is not a hipo file, not even close")
+    with pytest.raises(oxihipo.OxihipoError):
+        oxihipo.open(str(p))
+    assert issubclass(oxihipo.CorruptFileError, oxihipo.OxihipoError)
+
+
+def test_truncated_file_raises(tmp_path):
+    # A truncated record is genuine file corruption, so it must surface as
+    # CorruptFileError (a subclass of OxihipoError) rather than a bare panic.
+    import builtins
+
+    src = os.path.join(DATA, "sample.hipo")
+    data = builtins.open(src, "rb").read()
+    p = tmp_path / "trunc.hipo"
+    p.write_bytes(data[: len(data) // 3])
+    with pytest.raises(oxihipo.OxihipoError):
+        c = oxihipo.open(str(p))
+        c.arrays("REC::Particle", ["pid"])
+
+
+def test_unknown_bank_and_column_raise_keyerror(chain):
+    with pytest.raises(KeyError):
+        chain.arrays("NOT::abank", ["pid"])
+    with pytest.raises(KeyError):
+        chain.arrays("REC::Particle", ["not_a_column"])
+
+
+def test_unknown_compression_is_value_error(tmp_path):
+    with pytest.raises(ValueError):
+        oxihipo.create(str(tmp_path / "x.hipo"), compression="not-a-codec")
