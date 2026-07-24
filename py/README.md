@@ -252,8 +252,12 @@ and [`examples/bench_columns.py`](https://github.com/mathieuouillon/oxihipo/blob
 pip install oxihipo          # wheels for Linux / macOS / Windows, CPython >= 3.13
 ```
 
-Optional backends are extras: `oxihipo[awkward]`, `[pandas]`, `[arrow]`,
-`[root]`, or `[all]` (NumPy is always installed).
+That is the whole install: **every backend ships by default**, so `library="ak"`,
+`"pd"`, `"np"` and `"arrow"` all work out of the box. The imports stay lazy, so
+`import oxihipo` costs nothing for a backend you never call.
+
+The one piece pip cannot supply is ROOT itself — see
+[Dependencies](#dependencies).
 
 ### Build from source
 
@@ -272,14 +276,24 @@ it knows do you need `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
 
 ## Dependencies
 
-Each extra pulls in everything its backend actually imports, so a single
-`pip install oxihipo[<extra>]` gives a working backend:
+`pip install oxihipo` installs all of these:
 
-- `numpy >= 1.24` (required)
-- `oxihipo[awkward]` — `awkward >= 2.6`, for `array` / `arrays` (`library="ak"`)
-- `oxihipo[pandas]` — awkward + pandas, for `library="pd"`
-- `oxihipo[arrow]` — `pyarrow >= 14`, for `library="arrow"` (assembled directly
-  with pyarrow — no awkward needed on the polars / duckdb path)
-- `oxihipo[root]` — `awkward` for `rdataframe` / `iterate_rdataframe`; **plus** a
-  working ROOT/PyROOT, which is not on PyPI (install via conda-forge or system)
-- `oxihipo[all]` — awkward + pandas + pyarrow
+| package | powers |
+|---|---|
+| `numpy >= 1.24` | the columnar buffers themselves; `library="np"` |
+| `awkward >= 2.6` | `array` / `arrays` (`library="ak"`), and the pandas + ROOT paths |
+| `pandas >= 2.0` | `library="pd"` |
+| `pyarrow >= 14` | `library="arrow"`, assembled directly — no awkward on the polars / duckdb path |
+
+**ROOT is the exception.** `rdataframe` / `iterate_rdataframe` need a working
+ROOT/PyROOT, which is not on PyPI — install it via conda-forge
+(`conda install -c conda-forge root`) or your system. The `oxihipo[root]` extra
+covers only the awkward side, which you already have.
+
+The `[awkward]`, `[pandas]`, `[arrow]` and `[all]` extras still resolve, so old
+install commands keep working, but they are no-ops now.
+
+Nothing above is imported at `import oxihipo` time — each backend is imported on
+first use, so an unused one costs only disk. If you need the minimal footprint,
+`pip install --no-deps oxihipo numpy` still gives you the `numpy()` /
+`read_columns()` paths.
