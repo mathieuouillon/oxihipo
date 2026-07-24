@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::error::{HipoError, Result};
 use crate::event::Event;
-use crate::schema::Dict;
+use crate::schema::{Dict, Schema};
 use crate::tag::TagRegistry;
 use crate::wire::constants::*;
 use crate::wire::event_index::FileEventIndex;
@@ -204,11 +204,8 @@ fn parse_dictionary(file: &SharedFile, file_len: u64, offset: u64) -> Result<(Di
             continue;
         };
         let ev = Event::new(ev_buf);
-        if let Some((_, payload)) = ev.find(DICT_GROUP, DICT_ITEM) {
-            let text = parse_evio_string(payload);
-            if let Ok(schema) = crate::schema::Schema::parse_text(text.trim()) {
-                dict.add(schema);
-            }
+        if let Some(schema) = parse_dict_schema(&ev) {
+            dict.add(schema);
         } else if let Some((_, payload)) = ev.find(DICT_GROUP, TAG_REGISTRY_ITEM) {
             let parsed = TagRegistry::parse_text(parse_evio_string(payload).trim());
             if !parsed.is_empty() {
@@ -217,6 +214,24 @@ fn parse_dictionary(file: &SharedFile, file_len: u64, offset: u64) -> Result<(Di
         }
     }
     Ok((dict, tag_registry))
+}
+
+/// Extract a schema from one dictionary event, in either on-disk form.
+///
+/// A schema is carried as the compact text `{name/group/item}{cols}` at
+/// `(120, 2)` or as JSON at `(120, 1)`. The Rust and C++ writers emit the
+/// compact form (C++ and the Java writer additionally emit JSON); some
+/// producers — notably the Java `hipo4` writer path — may store *only* the
+/// JSON structure. Prefer the compact text when present and fall back to JSON,
+/// so a JSON-only dictionary is no longer read as schema-less.
+fn parse_dict_schema(ev: &Event) -> Option<Schema> {
+    if let Some((_, payload)) = ev.find(DICT_GROUP, DICT_ITEM) {
+        return Schema::parse_text(parse_evio_string(payload).trim()).ok();
+    }
+    if let Some((_, payload)) = ev.find(DICT_GROUP, DICT_JSON_ITEM) {
+        return Schema::parse_json(parse_evio_string(payload).trim()).ok();
+    }
+    None
 }
 
 /// Decode the schema text out of a `(120, 2)` dictionary structure payload.
@@ -344,4 +359,59 @@ fn build_index_by_scanning(
         }
     }
     Ok(idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a one-structure dictionary event (same on-disk layout the writer
+    /// emits): a 16-byte `EVNT` header, then group(2 LE) item(1) type(1)
+    /// size(4 LE) and the text. `find` matches on group/item, so the type byte
+    /// is irrelevant here.
+    fn dict_event(item: u8, text: &str) -> Vec<u8> {
+        let mut bank = Vec::new();
+        bank.extend_from_slice(&DICT_GROUP.to_le_bytes());
+        bank.push(item);
+        bank.push(6);
+        bank.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        bank.extend_from_slice(text.as_bytes());
+        let mut event = vec![0u8; EVENT_HEADER_SIZE];
+        event[0..4].copy_from_slice(b"EVNT");
+        event.extend_from_slice(&bank);
+        let total = event.len() as u32;
+        event[EH_SIZE..EH_SIZE + 4].copy_from_slice(&total.to_le_bytes());
+        event
+    }
+
+    // A schema stored ONLY as JSON at (120, 1) — no compact (120, 2) structure,
+    // as some Java-written files carry it — must still be parsed. Before the
+    // JSON fallback, parse_dict_schema saw no (120, 2) and returned None, so the
+    // dictionary came back empty and every bank read back with zero rows.
+    #[test]
+    fn reads_json_only_dictionary_event() {
+        let json = r#"{ "name": "REC::Particle", "group": 400, "item": 1,
+            "entries": [ { "name": "pid", "type": "I" }, { "name": "px", "type": "F" },
+                         { "name": "cov", "type": "F#5" } ] }"#;
+        let ev_buf = dict_event(DICT_JSON_ITEM, json);
+        let ev = Event::new(&ev_buf);
+        let schema = parse_dict_schema(&ev).expect("JSON-only dictionary event must parse");
+        assert_eq!(schema.name(), "REC::Particle");
+        assert_eq!(schema.group(), 400);
+        assert_eq!(schema.item(), 1);
+        assert_eq!(schema.entries().len(), 3);
+        assert_eq!(schema.entries()[2].length, 5); // the F#5 array column
+    }
+
+    // The compact text form at (120, 2) still parses, and wins when both are
+    // present (it is checked first).
+    #[test]
+    fn reads_compact_text_dictionary_event() {
+        let text = "{REC::Traj/100/1}{tid/I,cov/F#5,hit/S#3}";
+        let ev_buf = dict_event(DICT_ITEM, text);
+        let ev = Event::new(&ev_buf);
+        let schema = parse_dict_schema(&ev).expect("compact dictionary event must parse");
+        assert_eq!(schema.name(), "REC::Traj");
+        assert_eq!(schema.entries().len(), 3);
+    }
 }
