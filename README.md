@@ -228,6 +228,24 @@ NumPy zero-copy, so the binding costs ~10%. Method + reproduction:
 [Python vs Rust benchmark](https://mathieuouillon.github.io/oxihipo/docs/design/python-vs-rust-benchmark)
 (`examples/bench_columns.rs`, `py/examples/bench_columns.py`).
 
+**Against the other HIPO implementations.** Same file, same workload (scan every
+event, read `pid` + `px`), each using its own documented fast path with column
+indices resolved once. All three produce identical checksums, so they provably
+do the same work. 200k events, LZ4, Apple Silicon:
+
+| | cold (ms) | warm (ms) | warm Mevent/s | vs C++ warm |
+|---|--:|--:|--:|--:|
+| Rust (oxihipo) | **9.2** | 8.3 | 24.1 | **1.19×** |
+| C++ (`hipo4`) | 11.5 | 9.9 | 20.2 | 1.00× |
+| Java (`jnp-hipo4`) | 40.0 | **8.2** | 24.4 | 1.21× |
+
+Read that carefully: in **steady state** oxihipo is ~20% ahead of the C++ reader
+and level with Java — the Java reader is fast once its JIT has warmed up. The
+gap that matters is **cold start**: a single pass in a fresh process, which is
+what a short analysis job or a per-file batch worker actually pays, costs the
+JVM reader ~4.3× more (40 ms vs 9 ms). Method + reproduction:
+[`benches/cross-impl/`](benches/cross-impl/).
+
 ## Layout
 
 Single-crate repo (`oxihipo` — error, wire, compress, schema, event, read,
