@@ -37,11 +37,11 @@ jobs:
   # The declared MSRV has to actually build and test, or it silently drifts the
   # first time someone uses a newer API.
   msrv:
-    name: msrv (1.87)
+    name: msrv (1.95)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.87
+      - uses: dtolnay/rust-toolchain@1.95
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
