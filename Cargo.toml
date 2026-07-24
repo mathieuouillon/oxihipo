@@ -5,8 +5,17 @@ edition = "2024"
 rust-version = "1.87"
 license = "MIT"
 repository = "https://github.com/mathieuouillon/oxihipo"
+homepage = "https://github.com/mathieuouillon/oxihipo"
+documentation = "https://docs.rs/oxihipo"
+readme = "README.md"
 authors = ["hipo-rs contributors"]
 description = "Pure-Rust HIPO v6 reader and writer (Jefferson Lab CLAS12)."
+keywords = ["hipo", "clas12", "jefferson-lab", "columnar", "physics"]
+categories = ["parser-implementations", "science", "encoding"]
+# Keep the published crate tarball to the Rust library. Without this,
+# `cargo package` would bundle the docs website and the whole Python binding
+# tree (each a separate, nested workspace) into the crate.
+exclude = ["website/", "py/", "docs/", "out/", "proptest-regressions/", "fixtures/"]
 
 [dependencies]
 thiserror = "2"
