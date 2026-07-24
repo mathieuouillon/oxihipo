@@ -855,3 +855,35 @@ def test_no_config_is_empty(tmp_path):
     w.extend({"T::a": {"x": ak.Array([[1]])}})
     w.close()
     assert oxihipo.open(p).config == {}
+
+
+def test_writer_event_tags_round_trip(tmp_path):
+    import awkward as ak
+
+    p = str(tmp_path / "tags.hipo")
+    tags = np.array([1, 2, 4, 1, 2, 4], dtype=np.uint32)
+    w = oxihipo.create(p, compression="lz4")
+    w.new_bank("REC::Particle", {"pid": "I"})
+    w.extend(
+        {"REC::Particle": {"pid": ak.Array([[11], [22], [33], [44], [55], [66]])}},
+        tags=tags,
+    )
+    w.close()
+    f = oxihipo.open(p)
+    assert f.event_tags().tolist() == tags.tolist()
+    # tag-based filter selects the tag==1 events
+    sub = f.filtered(event_tag=[1]).arrays("REC::Particle", ["pid"])
+    assert ak.to_list(sub.pid) == [[11], [44]]
+
+
+def test_writer_tags_length_mismatch_raises(tmp_path):
+    import awkward as ak
+
+    p = str(tmp_path / "bad.hipo")
+    w = oxihipo.create(p, compression="lz4")
+    w.new_bank("REC::Particle", {"pid": "I"})
+    with pytest.raises(ValueError):
+        w.extend(
+            {"REC::Particle": {"pid": ak.Array([[11], [22]])}},
+            tags=[1, 2, 3],  # 3 tags for 2 events
+        )

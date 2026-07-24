@@ -86,5 +86,6 @@ class Writer:
     def extend(
         self,
         banks: Sequence[tuple[str, NDArray[np.int64], Sequence[tuple[str, NDArray[Any]]]]],
+        tags: Sequence[int] | None = ...,
     ) -> None: ...
     def close(self) -> dict[str, int]: ...

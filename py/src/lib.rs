@@ -639,9 +639,16 @@ impl PyWriter {
     }
 
     /// Append a batch of events. `banks` is `[(bank, offsets_i64, [(col, values)])]`;
-    /// every bank in one call must cover the same number of events.
-    #[pyo3(signature = (banks))]
-    fn extend(&mut self, py: Python<'_>, banks: ExtendBanks<'_>) -> PyResult<()> {
+    /// every bank in one call must cover the same number of events. `tags`, if
+    /// given, is one `u32` per event, stamped as that event's tag (and, in
+    /// decorate mode, overriding the copied source tag).
+    #[pyo3(signature = (banks, tags=None))]
+    fn extend(
+        &mut self,
+        py: Python<'_>,
+        banks: ExtendBanks<'_>,
+        tags: Option<Vec<u32>>,
+    ) -> PyResult<()> {
         if self.finished {
             return Err(pyo3::exceptions::PyValueError::new_err("writer is closed"));
         }
@@ -703,6 +710,14 @@ impl PyWriter {
             });
         }
         let n_events = n_events.unwrap_or(0);
+        if let Some(t) = &tags {
+            if t.len() != n_events {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "tags must have one entry per event ({} tags for {n_events} events)",
+                    t.len()
+                )));
+            }
+        }
         if let Some(total) = self.source_total {
             if self.events_written + n_events as u64 > total {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -733,6 +748,9 @@ impl PyWriter {
                             });
                         }
                     }
+                }
+                if let Some(t) = &tags {
+                    eb.set_tag(t[e]);
                 }
                 for rb in &resolved {
                     let lo = rb.offsets[e] as usize;

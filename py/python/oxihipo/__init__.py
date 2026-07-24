@@ -1275,17 +1275,22 @@ class Writer:
         self._writer().add_schema(bank, cols, group, item)
         self._schemas[bank] = dict(cols)
 
-    def extend(self, data: "dict[str, Any]") -> None:
+    def extend(self, data: "dict[str, Any]", tags: "Any | None" = None) -> None:
         """Append a batch of events. ``data`` is ``{bank: array}`` where each
         value is an ``ak.Array`` record (as :meth:`Chain.arrays` returns) or a
         dict of columns — a jagged ``ak.Array`` per column, or a 1-D NumPy array
         for a scalar-per-event bank. Every bank in one call must span the same
-        number of events. Mirrors uproot's ``extend``."""
+        number of events. Mirrors uproot's ``extend``.
+
+        ``tags`` optionally stamps a per-event tag: a sequence of ``uint32``,
+        one per event in the batch (read back via :meth:`Chain.event_tags` /
+        :meth:`Chain.filtered`)."""
         banks = []
         for bank, bdata in data.items():
             offsets, cols = _to_columnar(bank, bdata, self._schemas.get(bank, {}))
             banks.append((bank, offsets, cols))
-        self._writer().extend(banks)
+        tag_list = None if tags is None else [int(t) for t in tags]
+        self._writer().extend(banks, tag_list)
 
     def close(self) -> SkimSummary:
         """Finish the file (write the trailer index). Returns a
