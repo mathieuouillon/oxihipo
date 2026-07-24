@@ -1327,6 +1327,15 @@ def create(
     :meth:`Writer.close`. Compression is one of ``none`` / ``lz4`` / ``lz4best``
     / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``.
 
+    Portability, if the file will be read by other HIPO implementations:
+
+    * ``none`` / ``lz4`` / ``lz4best`` — read by every implementation. Prefer
+      these.
+    * ``gzip`` — read by the Java reader, **not** by the reference C++ reader,
+      which has no gzip decode path (it LZ4-decodes every non-``none`` tag).
+    * ``lz4perbank`` / ``lz4percolumn`` — format extensions with true partial
+      decompression; not read by the released C++/Java readers.
+
     ``config`` writes a user key/value store into the dictionary record (read
     back via :attr:`Chain.config`); it interoperates with the C++/Java writers."""
     return Writer(path, compression=compression, config=config)

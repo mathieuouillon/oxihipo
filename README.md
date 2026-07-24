@@ -34,6 +34,11 @@ layers are intentionally out of scope.
 - **Data-parallel scans.** `Chain::for_each(threads, f)` fans the work
   across cores out of order (`threads = 0` ⇒ all cores, `1` ⇒ sequential,
   `n` ⇒ exactly `n`); shared state in `f` is atomic or locked.
+> **Cross-implementation portability.** `none` / `lz4` / `lz4best` are read by
+> every HIPO implementation. `gzip` is read by the Java reader but **not** by the
+> reference C++ reader, which has no gzip decode path. The `lz4perbank` /
+> `lz4percolumn` extensions are not read by the released C++/Java readers.
+
 - **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions
   that decompress only what an analysis actually reads: `Lz4PerBank`
   (per-bank streams) and `Lz4PerColumn` (per-column streams) — see the
