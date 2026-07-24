@@ -157,8 +157,12 @@ impl Schema {
         let mut offset: u32 = 0;
         for (col_name, ty, length) in columns {
             let length = length.max(1);
-            let idx =
-                u16::try_from(s.entries.len()).expect("more than 65535 columns is unsupported");
+            // Stop at u16::MAX columns rather than panicking on hostile
+            // dictionary text; such a schema is invalid and simply won't match
+            // any bank. (A valid schema has a handful of columns.)
+            let Ok(idx) = u16::try_from(s.entries.len()) else {
+                break;
+            };
             s.by_name.insert(col_name.clone(), idx);
             s.entries.push(SchemaEntry {
                 name: col_name,
@@ -166,7 +170,11 @@ impl Schema {
                 row_offset: offset,
                 length,
             });
-            offset += ty.size() as u32 * length;
+            // Saturating so a crafted `#N` / column count can't overflow the
+            // running offset (which would debug-panic / release-wrap into a
+            // bogus layout). Identical to `+=` for any valid schema, whose row
+            // size is far below u32::MAX (HIPO bank sizes are 24-bit).
+            offset = offset.saturating_add((ty.size() as u32).saturating_mul(length));
         }
         s.row_size = offset;
         s

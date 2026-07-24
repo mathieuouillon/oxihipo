@@ -39,13 +39,16 @@ fn resolve_one(path: &Path) -> Result<Vec<PathBuf>> {
     if path.is_file() {
         return Ok(vec![path.to_path_buf()]);
     }
-    // Not present on disk as a file or dir → glob. (A literal existing
-    // file already returned above, so a real path that happens to contain
-    // a `*` still opens as that file.)
+    // Not present on disk as a file or dir. A path containing glob
+    // metacharacters is treated as a pattern; a wildcard-free path is a
+    // mistake (typo, wrong cwd) — error rather than silently returning an
+    // empty chain (0 events), which is a sharp footgun for a reader.
     match path.to_str() {
-        Some(pattern) => resolve_glob(pattern),
-        // Non-UTF-8 path that is neither a file nor a dir: nothing to match.
-        None => Ok(Vec::new()),
+        Some(pattern) if pattern.contains(['*', '?', '[']) => resolve_glob(pattern),
+        _ => Err(HipoError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no such file or directory: {}", path.display()),
+        ))),
     }
 }
 

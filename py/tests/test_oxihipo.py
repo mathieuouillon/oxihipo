@@ -173,9 +173,18 @@ def test_skim(chain, tmp_path):
     assert ak.to_list(reopened.array("REC::Event", "evno")) == [[1000 + i] for i in SURV]
 
 
-def test_open_missing_is_empty_chain():
-    # A bare name that isn't a file/dir is treated as a no-match glob → empty.
-    c = oxihipo.open("definitely-not-a-real-file.hipo")
+def test_open_missing_file_raises():
+    # A wildcard-free path that isn't a file/dir is a mistake (typo, wrong cwd)
+    # and must raise, not silently open an empty chain (that footgun made a
+    # typo'd filename look like "0 events").
+    with pytest.raises(OSError):
+        oxihipo.open("definitely-not-a-real-file.hipo")
+
+
+def test_open_glob_no_match_is_empty_chain():
+    # A pattern with glob metacharacters that matches nothing is still a
+    # legitimately empty chain, not an error.
+    c = oxihipo.open("definitely-not-a-real-dir-*/*.hipo")
     assert c.num_entries == 0 and c.file_count == 0
 
 

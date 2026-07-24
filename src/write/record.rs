@@ -18,9 +18,11 @@ use crate::wire::record_header::RecordHeader;
 /// The wire-level compression tag is derived from this enum by the record
 /// builder.
 ///
-/// - `None` / `Lz4` / `Lz4Best` / `Gzip` are interchangeable with the wire
-///   tag of the same name, and produce files readable by the C++ `hipo4`
+/// - `None` / `Lz4` / `Lz4Best` produce files readable by the C++ `hipo4`
 ///   reader.
+/// - `Gzip` (RFC 1952) is read by the Java `jnp-hipo4` reader but **not** by
+///   the reference C++ `hipo4` reader, which has no gzip decode path (it
+///   LZ4-decodes every non-`None` tag). Prefer `Lz4`/`Lz4Best` for portability.
 /// - `Lz4PerBank` and `Lz4PerColumn` are Rust-only format extensions that
 ///   enable true partial decompression — `ev.bank("name")` (or one column)
 ///   inflates only the stream it needs, leaving the rest compressed.

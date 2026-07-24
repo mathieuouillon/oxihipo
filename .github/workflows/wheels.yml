@@ -1,8 +1,10 @@
 name: wheels
 
 # Build (and, on a tag, publish) the `oxihipo` Python wheels. The extension is
-# abi3 (one wheel per OS/arch works on CPython >= 3.13) and pure-Rust
-# (default-features = false), so the aarch64 / cross builds need no C toolchain.
+# abi3 (one cp310-abi3 wheel per OS/arch works on CPython >= 3.10). It links the
+# C LZ4 backend (`lz4-sys`), so builds need a C compiler; every native runner
+# here has one, and the aarch64 Linux wheel builds on a native ARM64 runner
+# rather than cross-compiling (see the `linux` job).
 on:
   push:
     branches: [main, master]
@@ -70,11 +72,18 @@ jobs:
 
   linux:
     name: wheels linux ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - target: x86_64
+            runner: ubuntu-latest
+          # Build aarch64 on a native ARM64 runner (free for public repos)
+          # rather than cross-compiling: the `lz4-sys` C dependency has no
+          # aarch64 cross-compiler in the default manylinux-auto environment.
+          - target: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
       - uses: PyO3/maturin-action@v1

@@ -12,18 +12,21 @@ name = "_oxihipo"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Pure-Rust core (lz4_flex decode) — the binding only reads, so it needs no
-# C LZ4 / HC compression path.
-oxihipo = { path = "..", default-features = false }
-# abi3-py313: one cp313-abi3 wheel per (OS, arch), matching `requires-python =
-# ">=3.13"` (pyproject.toml) exactly.
+# Enable the C LZ4 backend (`lz4-c`) in the wheel: the binding *writes* too
+# (via `Writer`/`skim`), so it needs the real HC path — without it
+# `compression="lz4best"` silently produces plain-`lz4` output. `lz4-c` also
+# decodes ~10% faster than the pure-Rust `lz4_flex`. `lz4-sys` vendors and
+# builds the C source (no system liblz4 dependency), so the wheel build only
+# needs a C compiler, which every cibuildwheel image provides.
+oxihipo = { path = "..", features = ["lz4-c"] }
+# abi3-py310: one cp310-abi3 wheel per (OS, arch) covers CPython 3.10+ (matching
+# `requires-python = ">=3.10"` in pyproject.toml). `from __future__ import
+# annotations` + PEP 604 unions need only 3.10, so there is no reason to exclude
+# 3.10–3.12.
 # `generate-import-lib` lets the **Windows** wheel build *without* a Python
-# interpreter: on the CI runner maturin finds no `>=3.13` interpreter that
-# `requires-python` accepts, so it builds interpreter-free (which abi3 supports
-# via python3-dll-a). Without this feature that path errors ("Need a Python
-# interpreter to compile for Windows …"). No-op on Linux/macOS.
+# interpreter (abi3 supports this via python3-dll-a). No-op on Linux/macOS.
 pyo3 = { version = "0.29", features = [
-    "abi3-py313",
+    "abi3-py310",
     "extension-module",
     "generate-import-lib",
 ] }

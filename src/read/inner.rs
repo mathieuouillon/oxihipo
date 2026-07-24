@@ -205,7 +205,12 @@ fn parse_dictionary(file: &SharedFile, file_len: u64, offset: u64) -> Result<(Di
         };
         let ev = Event::new(ev_buf);
         if let Some(schema) = parse_dict_schema(&ev) {
-            dict.add(schema);
+            // Cap the dictionary at u16::MAX schemas (an id is a u16). A file
+            // with more is hostile/corrupt; stop adding rather than letting
+            // `Dict::add` panic. Replacing an existing name is always allowed.
+            if dict.get(schema.name()).is_some() || dict.len() < u16::MAX as usize {
+                dict.add(schema);
+            }
         } else if let Some((_, payload)) = ev.find(DICT_GROUP, TAG_REGISTRY_ITEM) {
             let parsed = TagRegistry::parse_text(parse_evio_string(payload).trim());
             if !parsed.is_empty() {

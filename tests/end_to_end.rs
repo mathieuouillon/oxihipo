@@ -343,9 +343,10 @@ fn multi_file_chain_reads_as_one() {
 
 #[test]
 fn missing_path_yields_empty_chain() {
-    // A path that is neither an existing file nor directory is treated as a
-    // glob; matching nothing gives an empty chain, not an error (the documented
-    // `IntoSources` behavior).
+    // A path containing glob metacharacters that matches nothing gives an empty
+    // chain, not an error (the documented `IntoSources` behavior). A
+    // wildcard-free non-existent path errors instead — see
+    // `corruption::open_missing_file_errors`.
     let chain = Chain::open("/definitely/not/a/real/dir/*.hipo").unwrap();
     assert_eq!(chain.event_count(), 0);
     assert_eq!(chain.file_count(), 0);
