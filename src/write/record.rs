@@ -248,7 +248,7 @@ fn build_single_block_record_bytes(
     let mut out = vec![0u8; total_bytes as usize];
     let hdr: &mut [u8; RECORD_HEADER_SIZE] = (&mut out[..RECORD_HEADER_SIZE])
         .try_into()
-        .map_err(|_| HipoError::Compression("record header slice"))?;
+        .map_err(|_| HipoError::Internal("record header slice"))?;
     header.write(hdr);
     out[RECORD_HEADER_SIZE..].copy_from_slice(&compress_buf[..compressed_with_pad]);
     Ok(out)
@@ -512,7 +512,7 @@ fn build_by_bank_record_bytes(
     let mut out = vec![0u8; total_bytes as usize];
     let hdr: &mut [u8; RECORD_HEADER_SIZE] = (&mut out[..RECORD_HEADER_SIZE])
         .try_into()
-        .map_err(|_| HipoError::Compression("record header slice"))?;
+        .map_err(|_| HipoError::Internal("record header slice"))?;
     header.write(hdr);
     out[RECORD_HEADER_SIZE..].copy_from_slice(&payload_buf[..compressed_with_pad]);
     Ok(out)
@@ -785,7 +785,7 @@ fn build_per_column_record_bytes(
     let mut out = vec![0u8; total_bytes as usize];
     let hdr: &mut [u8; RECORD_HEADER_SIZE] = (&mut out[..RECORD_HEADER_SIZE])
         .try_into()
-        .map_err(|_| HipoError::Compression("record header slice"))?;
+        .map_err(|_| HipoError::Internal("record header slice"))?;
     header.write(hdr);
     out[RECORD_HEADER_SIZE..].copy_from_slice(&payload_buf[..compressed_with_pad]);
     Ok(out)

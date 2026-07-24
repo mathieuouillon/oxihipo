@@ -604,7 +604,7 @@ impl Chain {
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
-                    .map_err(|_| HipoError::Compression("rayon thread pool init failed"))?;
+                    .map_err(|e| HipoError::ThreadPool(e.to_string()))?;
                 pool.install(run)?
             }
         };
@@ -661,7 +661,7 @@ impl Chain {
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
-                    .map_err(|_| HipoError::Compression("rayon thread pool init failed"))?;
+                    .map_err(|e| HipoError::ThreadPool(e.to_string()))?;
                 pool.install(run)?
             }
         };

@@ -374,10 +374,17 @@ fn build_index_by_scanning(
         read_at(file, off, &mut hdr)?;
         let h = RecordHeader::parse(&hdr)?;
         let len = h.total_bytes();
-        if h.event_count == 0 {
+        // A zero-length record can't be advanced past — treat it as the end
+        // rather than looping forever on a corrupt header.
+        if len == 0 {
             break;
         }
-        idx.push(off, len, h.event_count);
+        // An empty record is legal (e.g. a skim that kept nothing from a
+        // batch); skip it and keep scanning. Breaking here silently truncated
+        // every later record in a trailer-less file.
+        if h.event_count > 0 {
+            idx.push(off, len, h.event_count);
+        }
         off = off.checked_add(len).ok_or(HipoError::CorruptRecord {
             offset: off,
             reason: "record length overflows file offset",

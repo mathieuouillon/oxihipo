@@ -219,3 +219,33 @@ fn oversized_event_offset_is_rejected() {
         "a record with oversized event offsets must surface Err, not abort"
     );
 }
+
+/// An empty record mid-file must not truncate a trailer-less scan. Regression
+/// for `build_index_by_scanning` breaking on the first `event_count == 0`.
+#[test]
+fn empty_record_does_not_truncate_a_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty_mid.hipo");
+    write_small_none(&path, 6); // 6 records, 1 event each
+
+    // Zero the event count + index length of the 2nd data record (header
+    // offsets: [0]=file, [1]=dict, [2..]=data), making it a legitimately empty
+    // record, then blank the trailer position so the reader must scan.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let heads = record_header_offsets(&bytes);
+    assert!(heads.len() >= 5);
+    let hdr = heads[3];
+    bytes[hdr + 12..hdr + 16].copy_from_slice(&0u32.to_le_bytes()); // event_count
+    // File header trailer_position (offset 40, u64) -> 0 forces the scan path.
+    bytes[40..48].copy_from_slice(&0u64.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let chain = Chain::open(&path).unwrap();
+    // The records after the empty one must still be indexed: before the fix the
+    // scan stopped at the empty record and reported only what preceded it.
+    assert!(
+        chain.event_count() > 1,
+        "scan truncated at the empty record: {} events",
+        chain.event_count()
+    );
+}

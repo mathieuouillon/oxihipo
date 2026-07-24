@@ -82,6 +82,12 @@ pub enum HipoError {
     #[error("compression error: {0}")]
     Compression(&'static str),
 
+    #[error("could not create the reader thread pool: {0}")]
+    ThreadPool(String),
+
+    #[error("internal error: {0}")]
+    Internal(&'static str),
+
     #[error("decompression underflow: produced {produced} bytes, expected {expected}")]
     DecompressUnderflow { produced: usize, expected: usize },
 

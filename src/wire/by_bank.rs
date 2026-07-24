@@ -278,14 +278,19 @@ impl ByBankRecord {
                 data_type: dir[off + 3],
             });
         }
-        // `bank_index` binary-searches this slice, so the writer's sort-by
-        // (group, item) is a load-bearing invariant — assert it in debug.
-        debug_assert!(
-            descriptors
-                .windows(2)
-                .all(|w| (w[0].group, w[0].item) < (w[1].group, w[1].item)),
-            "ByBank descriptors must be sorted ascending by (group, item)",
-        );
+        // `bank_index` binary-searches this slice, so ascending (group, item)
+        // is load-bearing. Verify it rather than `debug_assert`ing: in a release
+        // build an unsorted (corrupt or hostile) directory would make the search
+        // silently miss banks that are present — wrong data, no error.
+        if !descriptors
+            .windows(2)
+            .all(|w| (w[0].group, w[0].item) < (w[1].group, w[1].item))
+        {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "ByBank bank descriptors are not sorted by (group, item)",
+            });
+        }
         // compressed / decompressed sizes
         let mut compressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
         let mut decompressed_sizes: Vec<u32> = Vec::with_capacity(num_banks);
