@@ -111,6 +111,7 @@ f.keys()                       # bank names
 f.keys(recursive=True)         # 'bank/column' keys
 f.keys(filter_name="REC::*")   # globbed
 f.typenames()                  # {'REC::Particle/px': 'float32', 'REC::Track/cov': 'float32[3]'}
+f.bank_ids                     # {'REC::Particle': (300, 31)} — the wire (group, item)
 "REC::Particle" in f
 list(f)                        # iterates bank names
 ```
@@ -118,6 +119,32 @@ list(f)                        # iterates bank names
 `len(f)` is the **event** count, not the number of banks — matching uproot,
 where `len(tree)` is `num_entries`. So `len(f)` and `len(list(f))` deliberately
 differ.
+
+`bank_ids` gives the on-the-wire `(group, item)` pair for each bank, which is
+how the C++ and Java tools address banks. You need it when handing a bank
+identifier to something outside this library; reading here is by name.
+
+## Composite banks
+
+A few CLAS12 structures (`RUN::scaler` and friends) carry an **inline format
+string** instead of a dictionary schema. `arrays()` and `read_columns()` resolve
+banks through the dictionary, so composites are invisible to them — and absent
+from `keys()`. Read them with `composite()`:
+
+```python
+ev = f.composite("RUN::scaler")
+ev.f0                                   # first field, one sublist per event
+f.composite("RUN::scaler", library="np")  # {'f0': ndarray(object), ...}
+```
+
+Composite fields are **positional** — the format string carries types, not
+names — so they come back as `f0`, `f1`, … in format order. `library` is `"ak"`
+(default) or `"np"`; `entry_start` / `entry_stop` narrow the range as elsewhere.
+
+:::tip
+There is a module-level shorthand for one-off reads:
+`ox.composite("run5042.hipo", "RUN::scaler")`.
+:::
 
 ## Selecting and writing
 
