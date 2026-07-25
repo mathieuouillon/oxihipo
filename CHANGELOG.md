@@ -7,6 +7,8 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
 ## [0.2.0] - 2026-07-24
 
 Eighteen merged changes. The headline is that the **Python binding stopped being
