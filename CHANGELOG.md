@@ -7,7 +7,19 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`scripts/release.py`** — one command per phase of a release, because a
+  release has to keep six files plus the changelog in step and only one of them
+  was ever checked. `prepare` rewrites every version site (both `Cargo.toml`s,
+  `pyproject.toml`, the static PyPI badge, both lockfiles), moves `[Unreleased]`
+  into a dated section, fixes the compare links, and runs the full check suite.
+  `tag` is gated on the tree being clean, `HEAD` matching the remote, **every
+  workflow green on that exact commit**, and the version not already existing on
+  PyPI — then asks you to type the version, since publishing cannot be undone.
+- A **`version-consistency` CI job** running `scripts/release.py check` on every
+  PR, so a forgotten manifest or badge is caught long before a release rather
+  than shipping, as it did in 0.2.1.
 
 ## [0.2.2] - 2026-07-24
 

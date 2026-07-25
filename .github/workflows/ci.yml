@@ -105,6 +105,17 @@ jobs:
       - run: |
           cargo +nightly fuzz build --target "$(rustc +nightly -vV | sed -n 's/^host: //p')"
 
+  # The version appears in six files plus the changelog, and only `tag-check`
+  # (tag vs pyproject, at release time) ever compared any of them. 0.2.1 shipped
+  # with a stale badge in the PyPI description because of exactly that gap, so
+  # the invariant is enforced on every PR now, not just at release.
+  version-consistency:
+    name: version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 scripts/release.py check
+
   docs:
     name: docs
     runs-on: ubuntu-latest

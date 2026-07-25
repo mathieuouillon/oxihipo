@@ -33,48 +33,62 @@ Because `oxihipo` does not exist on PyPI yet, register a **pending publisher**:
 
 ## Cut a release
 
-1. **Pick the version** `X.Y.Z` (SemVer; pre-1.0 minor bumps may break). Update it
-   in all three manifests so they agree — CI's `tag-check` job refuses a tag that
-   doesn't match `py/pyproject.toml`:
-   - `Cargo.toml` — `[package] version`
-   - `py/Cargo.toml` — `[package] version`
-   - `py/pyproject.toml` — `[project] version`
-   - `py/README.md` — the **static** `pypi-vX.Y.Z` badge at the top
+Use the script. It exists because a release has to keep **six files plus the
+changelog** in step, and until it existed only one of those was checked by
+anything — 0.2.1 shipped a stale `pypi-v0.1.1` badge in its PyPI description for
+exactly that reason.
 
-   That last one is easy to miss and there is no check for it. It is static on
-   purpose: `py/README.md` is the PyPI long description, which PyPI **freezes at
-   upload** and also serves on every older version's page. A dynamic
-   `pypi/v` badge there reports whatever is newest, so it is wrong on
-   `/project/oxihipo/<older>/` — and on the project page it lags up to three
-   hours behind, because shields.io caches with `max-age=10800` regardless of any
-   `cacheSeconds` you pass. A static badge is exactly right for a frozen page.
-   The root `README.md` and the docs site keep dynamic badges: those pages are
-   live, so "latest" is the correct meaning there.
-2. **Update [`CHANGELOG.md`](CHANGELOG.md)**: move items out of `[Unreleased]` into
-   a new `[X.Y.Z]` section with the date, and refresh the compare links at the
-   bottom.
-3. **Commit** on `main`: `git commit -am "release: vX.Y.Z"` and push.
-4. Wait for CI (`ci`, `wheels`, `docs`) to be green on that commit.
-5. **Tag and push the tag** — this is what triggers the publish:
-   ```sh
-   git tag -a vX.Y.Z -m "vX.Y.Z"
-   git push github vX.Y.Z
-   ```
-6. Watch the `wheels` run. `tag-check` → all builds → `release` (publish to PyPI).
-   The publish step is **irreversible**: a version can never be re-uploaded or
-   overwritten on PyPI, so a mistake means burning the number and shipping
-   `X.Y.Z+1`.
+```sh
+scripts/release.py check              # are all the version sites consistent?
+scripts/release.py prepare 0.3.0      # rewrite, verify, commit
+git push github main                  # or: prepare --push
+# wait for ci / wheels / docs to go green on that commit
+scripts/release.py tag                # gated on green CI, then publishes
+scripts/release.py github-release     # release notes from the changelog
+```
+
+`prepare` is reversible — it writes files and makes a local commit. It:
+
+1. refuses unless the tree is clean, you are on `main`, the version is semver,
+   the tag does not exist, and **the version is not already on PyPI** (a number
+   can never be reused, so this is the check that saves you);
+2. rewrites `Cargo.toml`, `py/Cargo.toml`, `py/pyproject.toml`, the static
+   `pypi-vX.Y.Z` badge in `py/README.md`, and both `Cargo.lock`s;
+3. moves `[Unreleased]` into a dated `[X.Y.Z]` section and fixes the compare
+   links (refusing an empty changelog unless you pass `--allow-empty`);
+4. runs fmt, clippy, tests, doctests and the docs build;
+5. commits as `release: vX.Y.Z`.
+
+`tag` is **not** reversible — pushing the tag publishes. So it re-checks
+consistency, requires `HEAD` to equal `github/main` (so the commit CI tested is
+the commit being tagged), requires **every workflow green on that exact commit**,
+re-checks PyPI, and then asks you to type the version before pushing.
+
+`scripts/release.py check` also runs as the `version-consistency` job on every
+PR, so drift is caught long before a release.
+
+### Why the PyPI badge is static
+
+`py/README.md` is the PyPI long description. PyPI **freezes it at upload** and
+serves it on every older version's page too, so a dynamic `pypi/v` badge there
+can only be right by luck: it reports whatever is newest — wrong on
+`/project/oxihipo/<older>/` — and on the project page it lags up to three hours,
+because shields.io caches with `max-age=10800` no matter what `cacheSeconds` you
+pass. A static badge is exactly right for a frozen page, and `prepare` bumps it
+so it cannot be forgotten.
+
+`README.md` and the docs site keep **dynamic** badges: those pages are live, so
+"latest" is the correct meaning there.
 
 ## After publishing
 
 - Verify: `pip install oxihipo==X.Y.Z` in a clean venv, then
   `python -c "import oxihipo; print(oxihipo.__version__)"`.
-- Optionally create a **GitHub Release** from the tag, pasting the changelog
-  section (`gh release create vX.Y.Z --notes-file <(...)`).
-- On the **first** release, flip the "Not yet on PyPI" install notes to
-  `pip install oxihipo` in `README.md`, `py/README.md`, and
-  `website/docs/getting-started/python.md`.
-- Start a fresh `[Unreleased]` section in the changelog.
+- `scripts/release.py github-release` creates the GitHub Release with the
+  changelog section as its notes.
+- Nothing to do about the changelog or the docs site: `prepare` already opened a
+  fresh `[Unreleased]`, and the docs site regenerates its release-notes page from
+  `CHANGELOG.md` on every build.
 
 ## Notes
 
