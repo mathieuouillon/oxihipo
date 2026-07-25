@@ -195,17 +195,21 @@ def cmd_check(_args: argparse.Namespace) -> int:
         )
 
     step("Licence")
-    # py/LICENSE is a copy: `license-files` paths cannot escape the project dir,
-    # so maturin can only see one under py/. A copy can drift from the original,
-    # and a wheel shipping the wrong licence text is worse than shipping none.
-    root_lic, py_lic = read("LICENSE"), read("py/LICENSE")
-    if root_lic != py_lic:
+    # PEP 639 `license-files` globs cannot escape the project directory, so the
+    # wheel can only pick up a licence living under py/. It is a SYMLINK to the
+    # real one, not a copy: a copy would be free to drift, and a wheel shipping
+    # stale licence text is worse than shipping none. It also must not be named
+    # LICENSE — maturin already places the repo-root LICENSE at the sdist root,
+    # and a second file with that name is a hard "already added" error.
+    link = ROOT / "py/LICENSE.txt"
+    if not link.is_symlink():
         raise Fail(
-            "py/LICENSE has drifted from LICENSE — they must be identical "
-            "(py/ needs its own copy because PEP 639 license-files cannot "
-            "reference a parent directory). Run: cp LICENSE py/LICENSE"
+            "py/LICENSE.txt must be a symlink to ../LICENSE, not a copy "
+            "(a copy can drift). Run: ln -sf ../LICENSE py/LICENSE.txt"
         )
-    ok("LICENSE and py/LICENSE identical")
+    if link.resolve() != (ROOT / "LICENSE").resolve():
+        raise Fail(f"py/LICENSE.txt points at {link.resolve()}, expected {ROOT / 'LICENSE'}")
+    ok("py/LICENSE.txt -> LICENSE (symlink, cannot drift)")
 
     step("Changelog")
     if changelog_section(version) is None:

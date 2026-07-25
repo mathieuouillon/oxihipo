@@ -39,7 +39,11 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 - Module-level `iterate()` gained `cut=`, which `Chain.iterate` already had.
 - `CITATION.cff`, and the wheel now ships the licence text (PEP 639
-  `license` + `license-files`) rather than only naming MIT in metadata.
+  `license` + `license-files`) rather than only naming MIT in metadata. The
+  file `license-files` points at is `py/LICENSE.txt`, a **symlink** to the real
+  `LICENSE` — a glob cannot escape the project directory, a copy could drift,
+  and the name cannot be `LICENSE` because maturin already places the repo-root
+  one at the sdist root.
 - `scripts/release.py check` also verifies `CITATION.cff`'s version and that
   `py/LICENSE` has not drifted from `LICENSE`.
 
