@@ -60,6 +60,7 @@ const sidebars = {
         'design/python-vs-rust-benchmark',
       ],
     },
+    'release-notes',
   ],
 };
 

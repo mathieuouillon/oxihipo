@@ -80,6 +80,11 @@ const config = {
             position: 'left',
           },
           {
+            to: '/docs/release-notes',
+            label: 'Releases',
+            position: 'right',
+          },
+          {
             href: 'https://github.com/mathieuouillon/oxihipo',
             label: 'GitHub',
             position: 'right',
