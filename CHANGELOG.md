@@ -20,6 +20,13 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Fixed
 
+- **A failed `with` block no longer produces output.** `Writer.__exit__` called
+  `close()` unconditionally, so an exception inside the block still finalised the
+  file — a failed run left one that opens cleanly. For the in-place
+  `recreate(dst=None)` it also ran `os.replace(temp, final)`, **overwriting the
+  source with a partial result**. And when `close()` itself raised, that
+  exception replaced the user's. It now aborts, removes the partial output, and
+  never masks the original error.
 - **`filtered()` composes.** Each call built its filter from its own arguments
   alone, so `f.filtered(require=…).filtered(event_tag=…)` silently dropped the
   `require` — and the record-tag clause was *widened* rather than dropped,
@@ -60,6 +67,14 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Added
 
+- `filter_name=` accepts a **sequence of globs** as a union, on `arrays`,
+  `iterate` and `keys` — asking for `REC::*` plus `RUN::config` needed two calls.
+- `library="pd"` frames carry `attrs["num_entries"]`. An event with no rows is
+  absent from the `(entry, subentry)` index entirely, so a frame cannot be
+  positionally joined against `event_tags()`. The frame is deliberately **not**
+  reindexed to the full range — that would insert a row per empty event, i.e.
+  invent a particle, and make `pd` disagree with `ak`/`np` on row counts — so the
+  true count travels alongside instead.
 - Module-level `iterate()` gained `cut=`, which `Chain.iterate` already had.
 - `CITATION.cff`, and the wheel now ships the licence text (PEP 639
   `license` + `license-files`) rather than only naming MIT in metadata. The

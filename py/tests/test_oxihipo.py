@@ -10,6 +10,7 @@ registry ``{dvcs: 0, sidis: 1, elastic: 2}``.
 """
 
 import os
+import pathlib
 import shutil
 
 import numpy as np
@@ -1303,3 +1304,47 @@ def test_module_and_method_signatures_agree():
         mod = set(inspect.signature(mod_fn).parameters) - {"source"}
         met = set(inspect.signature(meth).parameters) - {"self"}
         assert mod == met, f"{mod_fn.__name__}: {mod ^ met}"
+
+
+def test_writer_aborts_on_exception(tmp_path):
+    """A failed `with` block must not leave a finished file, must not overwrite
+    the source in-place, and must not mask the user's exception."""
+    ak = pytest.importorskip("awkward")
+    out = tmp_path / "out.hipo"
+    with pytest.raises(RuntimeError, match="boom"):
+        with oxihipo.create(str(out)) as w:
+            w.new_bank("X::y", {"v": "F"})
+            w.extend({"X::y": {"v": ak.Array([[1.0], [2.0]])}})
+            raise RuntimeError("boom")
+    assert not out.exists(), "a failed run left a complete-looking file"
+
+
+def test_writer_inplace_abort_keeps_the_source(tmp_path):
+    ak = pytest.importorskip("awkward")
+    src = tmp_path / "src.hipo"
+    src.write_bytes((pathlib.Path(DATA) / "sample.hipo").read_bytes())
+    before = src.read_bytes()
+    with pytest.raises(RuntimeError, match="boom"):
+        with oxihipo.recreate(str(src)) as w:   # dst=None -> in-place
+            w.new_bank("X::y", {"v": "F"})
+            raise RuntimeError("boom")
+    assert src.read_bytes() == before, "in-place recreate clobbered the source"
+    assert not list(tmp_path.glob("*.oxitmp")), "left a temp file behind"
+
+
+def test_pandas_carries_the_true_event_count(chain):
+    # The (entry, subentry) index omits empty events entirely, so the frame
+    # cannot be positionally joined against event_tags(). Not reindexed — that
+    # would invent a row per empty event — so the count travels in attrs.
+    pytest.importorskip("pandas")
+    ak = pytest.importorskip("awkward")
+    df = chain.arrays("REC::Particle", ["pid"], library="pd")
+    n = len(chain.arrays("REC::Particle", ["pid"]))
+    assert df.attrs["num_entries"] == n
+    assert len({i[0] for i in df.index}) <= n
+
+
+def test_filter_name_accepts_several_globs(chain):
+    one = chain.arrays(filter_name="REC::Particle*", library="np")
+    many = chain.arrays(filter_name=["REC::Particle*", "REC::Event*"], library="np")
+    assert set(one) < set(many)

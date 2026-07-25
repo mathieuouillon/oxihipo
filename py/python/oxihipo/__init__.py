@@ -492,15 +492,43 @@ class Chain:
     def __enter__(self) -> "Chain":
         return self
 
-    def __exit__(self, *exc) -> None:
-        self.close()
+    def __exit__(self, exc_type, exc, tb) -> None:
+        # Only finalise if the block succeeded. Closing on the way out of a
+        # failed block produced a complete-looking file from a failed run — and
+        # for the in-place `recreate(dst=None)` it ran `os.replace(temp, final)`,
+        # overwriting the user's source with a partial result. `close()` can also
+        # raise (e.g. "decorate covered 0 of 8 events"), which then replaced the
+        # user's real exception with a confusing one.
+        if exc_type is None:
+            self.close()
+        else:
+            self._abort()
 
-    def keys(self, recursive: bool = False, filter_name: str | None = None) -> list[str]:
+    def _abort(self) -> None:
+        """Discard the partial output without finalising it.
+
+        Never raises: it runs while another exception is propagating, and
+        masking that is exactly the bug this avoids.
+        """
+        if self._summary is not None:
+            return  # already finished successfully
+        self._w = None  # drop the writer (and the source handles) unfinalised
+        # A HIPO file with no trailer is unreadable, so leaving it behind is
+        # litter that looks like output.
+        victim = self._inplace[1] if self._inplace is not None else self._path
+        try:
+            os.remove(victim)
+        except OSError:
+            pass
+
+    def keys(self, recursive: bool = False, filter_name: "str | Sequence[str] | None" = None) -> list[str]:
         """Bank names, or ``bank/column`` keys (``recursive=True``); optionally
-        keep only those matching the ``filter_name`` glob."""
+        keep only those matching ``filter_name`` — one glob, or a sequence of
+        them taken as a union."""
         out = self._reader().keys(recursive)
         if filter_name is not None:
-            out = [k for k in out if fnmatch.fnmatch(k, filter_name)]
+            globs = [filter_name] if isinstance(filter_name, str) else list(filter_name)
+            out = [k for k in out if any(fnmatch.fnmatch(k, g) for g in globs)]
         return out
 
     def _schema_lines(self, bank: str | None = None) -> list[str]:
@@ -541,12 +569,16 @@ class Chain:
                 "selects across every bank and would ignore `banks`"
             )
         if filter_name is not None:
+            # A sequence of globs is a union — uproot accepts one or many, and
+            # needing two calls to ask for "REC::* plus RUN::config" was an
+            # arbitrary limit.
+            globs = [filter_name] if isinstance(filter_name, str) else list(filter_name)
             grouped: dict[str, list[str]] = {}
             for key in self._reader().keys(True):
                 bank = key.split("/", 1)[0]
-                if fnmatch.fnmatch(key, filter_name) or fnmatch.fnmatch(bank, filter_name):
+                if any(fnmatch.fnmatch(key, g) or fnmatch.fnmatch(bank, g) for g in globs):
                     grouped.setdefault(bank, [])
-                    if "/" in key and fnmatch.fnmatch(key, filter_name):
+                    if "/" in key and any(fnmatch.fnmatch(key, g) for g in globs):
                         grouped[bank].append(key.split("/", 1)[1])
             # A bank matched by name (not a column glob) keeps all its columns.
             return [(b, cols) for b, cols in grouped.items()], False
@@ -619,7 +651,7 @@ class Chain:
     @overload
     def arrays(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-        *, filter_name: str | None = ..., library: Literal["ak"] = ...,
+        *, filter_name: "str | Sequence[str] | None" = ..., library: Literal["ak"] = ...,
         entries: "Sequence[int] | None" = ..., cut: str | None = ...,
         entry_start: int | None = ..., entry_stop: int | None = ...,
         threads: int = ..., workers: int = ...,
@@ -627,7 +659,7 @@ class Chain:
     @overload
     def arrays(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-        *, filter_name: str | None = ..., library: Literal["np"],
+        *, filter_name: "str | Sequence[str] | None" = ..., library: Literal["np"],
         entries: "Sequence[int] | None" = ..., cut: str | None = ...,
         entry_start: int | None = ..., entry_stop: int | None = ...,
         threads: int = ..., workers: int = ...,
@@ -635,7 +667,7 @@ class Chain:
     @overload
     def arrays(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-        *, filter_name: str | None = ..., library: Literal["pd"],
+        *, filter_name: "str | Sequence[str] | None" = ..., library: Literal["pd"],
         entries: "Sequence[int] | None" = ..., cut: str | None = ...,
         entry_start: int | None = ..., entry_stop: int | None = ...,
         threads: int = ..., workers: int = ...,
@@ -643,7 +675,7 @@ class Chain:
     @overload
     def arrays(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-        *, filter_name: str | None = ..., library: Literal["arrow"],
+        *, filter_name: "str | Sequence[str] | None" = ..., library: Literal["arrow"],
         entries: "Sequence[int] | None" = ..., cut: str | None = ...,
         entry_start: int | None = ..., entry_stop: int | None = ...,
         threads: int = ..., workers: int = ...,
@@ -653,7 +685,7 @@ class Chain:
         banks: str | Sequence[str] | None = None,
         columns: Sequence[str] | None = None,
         *,
-        filter_name: str | None = None,
+        filter_name: "str | Sequence[str] | None" = None,
         library: _Library = "ak",
         entry_start: int | None = None,
         entry_stop: int | None = None,
@@ -765,7 +797,7 @@ class Chain:
         columns: "Sequence[str] | None" = None,
         *,
         step_size: "int | str" = 100_000,
-        filter_name: str | None = None,
+        filter_name: "str | Sequence[str] | None" = None,
         cut: str | None = None,
         entry_start: int | None = None,
         entry_stop: int | None = None,
@@ -832,7 +864,7 @@ class Chain:
         banks: "str | Sequence[str] | None" = None,
         columns: "Sequence[str] | None" = None,
         *,
-        filter_name: str | None = None,
+        filter_name: "str | Sequence[str] | None" = None,
         cut: str | None = None,
         step_size: "int | str | None" = None,
         compression: str = "zstd",
@@ -1064,10 +1096,21 @@ class Chain:
     def _assemble_pd(self, res, single=False):
         import awkward as ak
 
-        frames = {
-            bname: ak.to_dataframe(ak.Array(_bank_record(ak, offsets, cols)))
-            for bname, offsets, cols in res
-        }
+        frames = {}
+        for bname, offsets, cols in res:
+            df = ak.to_dataframe(ak.Array(_bank_record(ak, offsets, cols)))
+            # An event with no rows contributes no rows, so it is absent from the
+            # (entry, subentry) MultiIndex entirely: 8 events can yield 6 entry
+            # levels. Positional joins against `event_tags()` or a `library="np"`
+            # read are then silently misaligned.
+            #
+            # Deliberately NOT reindexed to the full range: that would insert a
+            # NaN row per empty event, i.e. invent a particle that was not
+            # measured, and make `pd` disagree with `ak`/`np` on row counts. The
+            # sparse index is the truthful shape. Instead the true event count
+            # travels with the frame so the mismatch is detectable.
+            df.attrs["num_entries"] = len(offsets) - 1
+            frames[bname] = df
         # A bare single-bank request gets the frame itself; a list or a glob gets
         # a dict keyed by bank, even when only one bank matched — so the shape
         # follows the request rather than the file's contents.
@@ -1081,7 +1124,7 @@ class Chain:
         banks: str | Sequence[str] | None = None,
         columns: Sequence[str] | None = None,
         *,
-        filter_name: str | None = None,
+        filter_name: "str | Sequence[str] | None" = None,
         entry_start: int | None = None,
         entry_stop: int | None = None,
         threads: int = 0,
@@ -1121,7 +1164,7 @@ class Chain:
         columns: Sequence[str] | None = None,
         *,
         step_size: int | str = 100_000,
-        filter_name: str | None = None,
+        filter_name: "str | Sequence[str] | None" = None,
         report: bool = False,
         entry_start: int | None = None,
         entry_stop: int | None = None,
@@ -1172,14 +1215,14 @@ class Chain:
     @overload
     def iterate(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-        *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
+        *, step_size: int | str = ..., filter_name: "str | Sequence[str] | None" = ..., library: _Library = ...,
         report: Literal[False] = ..., cut: str | None = ..., entry_start: int | None = ...,
         entry_stop: int | None = ..., threads: int = ..., workers: int = ...,
     ) -> "Iterator[Any]": ...
     @overload
     def iterate(
         self, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-        *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
+        *, step_size: int | str = ..., filter_name: "str | Sequence[str] | None" = ..., library: _Library = ...,
         report: Literal[True], cut: str | None = ..., entry_start: int | None = ...,
         entry_stop: int | None = ..., threads: int = ..., workers: int = ...,
     ) -> "Iterator[tuple[Any, Report]]": ...
@@ -1189,7 +1232,7 @@ class Chain:
         columns: Sequence[str] | None = None,
         *,
         step_size: int | str = 100_000,
-        filter_name: str | None = None,
+        filter_name: "str | Sequence[str] | None" = None,
         library: _Library = "ak",
         report: bool = False,
         cut: str | None = None,
@@ -1573,14 +1616,14 @@ def open(source: Source) -> Chain:  # noqa: A001  (uproot-style: oxihipo.open(..
 @overload
 def iterate(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-    *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
+    *, step_size: int | str = ..., filter_name: "str | Sequence[str] | None" = ..., library: _Library = ...,
     report: Literal[False] = ..., cut: str | None = ..., entry_start: int | None = ...,
     entry_stop: int | None = ..., threads: int = ..., workers: int = ...,
 ) -> "Iterator[Any]": ...
 @overload
 def iterate(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-    *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
+    *, step_size: int | str = ..., filter_name: "str | Sequence[str] | None" = ..., library: _Library = ...,
     report: Literal[True], cut: str | None = ..., entry_start: int | None = ...,
     entry_stop: int | None = ..., threads: int = ..., workers: int = ...,
 ) -> "Iterator[tuple[Any, Report]]": ...
@@ -1590,7 +1633,7 @@ def iterate(
     columns: Sequence[str] | None = None,
     *,
     step_size: int | str = 100_000,
-    filter_name: str | None = None,
+    filter_name: "str | Sequence[str] | None" = None,
     library: _Library = "ak",
     report: bool = False,
     cut: str | None = None,
@@ -1620,7 +1663,7 @@ def iterate(
 @overload
 def arrays(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-    *, filter_name: str | None = ..., library: Literal["ak"] = ...,
+    *, filter_name: "str | Sequence[str] | None" = ..., library: Literal["ak"] = ...,
     entries: "Sequence[int] | None" = ..., cut: str | None = ...,
     entry_start: int | None = ..., entry_stop: int | None = ...,
     threads: int = ..., workers: int = ...,
@@ -1628,7 +1671,7 @@ def arrays(
 @overload
 def arrays(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-    *, filter_name: str | None = ..., library: Literal["np"],
+    *, filter_name: "str | Sequence[str] | None" = ..., library: Literal["np"],
     entries: "Sequence[int] | None" = ..., cut: str | None = ...,
     entry_start: int | None = ..., entry_stop: int | None = ...,
     threads: int = ..., workers: int = ...,
@@ -1636,7 +1679,7 @@ def arrays(
 @overload
 def arrays(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-    *, filter_name: str | None = ..., library: Literal["pd"],
+    *, filter_name: "str | Sequence[str] | None" = ..., library: Literal["pd"],
     entries: "Sequence[int] | None" = ..., cut: str | None = ...,
     entry_start: int | None = ..., entry_stop: int | None = ...,
     threads: int = ..., workers: int = ...,
@@ -1644,7 +1687,7 @@ def arrays(
 @overload
 def arrays(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
-    *, filter_name: str | None = ..., library: Literal["arrow"],
+    *, filter_name: "str | Sequence[str] | None" = ..., library: Literal["arrow"],
     entries: "Sequence[int] | None" = ..., cut: str | None = ...,
     entry_start: int | None = ..., entry_stop: int | None = ...,
     threads: int = ..., workers: int = ...,
@@ -1654,7 +1697,7 @@ def arrays(
     banks: str | Sequence[str] | None = None,
     columns: Sequence[str] | None = None,
     *,
-    filter_name: str | None = None,
+    filter_name: "str | Sequence[str] | None" = None,
     library: _Library = "ak",
     entries: "Sequence[int] | None" = None,
     cut: str | None = None,
@@ -1683,7 +1726,7 @@ def rdataframe(
     banks: str | Sequence[str] | None = None,
     columns: Sequence[str] | None = None,
     *,
-    filter_name: str | None = None,
+    filter_name: "str | Sequence[str] | None" = None,
     entry_start: int | None = None,
     entry_stop: int | None = None,
     threads: int = 0,
@@ -1704,7 +1747,7 @@ def iterate_rdataframe(
     columns: Sequence[str] | None = None,
     *,
     step_size: int | str = 100_000,
-    filter_name: str | None = None,
+    filter_name: "str | Sequence[str] | None" = None,
     report: bool = False,
     entry_start: int | None = None,
     entry_stop: int | None = None,
@@ -1833,6 +1876,7 @@ class Writer:
         self._schemas: dict[str, dict[str, str]] = {}
         self._inplace = _inplace  # (final_path, temp_path) for recreate(dst=None)
         self._summary: SkimSummary | None = None
+        self._path = str(path)  # what to remove if the block aborts
 
     def _writer(self) -> "_RustWriter":
         if self._w is None:
@@ -1893,8 +1937,34 @@ class Writer:
     def __enter__(self) -> "Writer":
         return self
 
-    def __exit__(self, *exc) -> None:
-        self.close()
+    def __exit__(self, exc_type, exc, tb) -> None:
+        # Only finalise if the block succeeded. Closing on the way out of a
+        # failed block produced a complete-looking file from a failed run — and
+        # for the in-place `recreate(dst=None)` it ran `os.replace(temp, final)`,
+        # overwriting the user's source with a partial result. `close()` can also
+        # raise (e.g. "decorate covered 0 of 8 events"), which then replaced the
+        # user's real exception with a confusing one.
+        if exc_type is None:
+            self.close()
+        else:
+            self._abort()
+
+    def _abort(self) -> None:
+        """Discard the partial output without finalising it.
+
+        Never raises: it runs while another exception is propagating, and
+        masking that is exactly the bug this avoids.
+        """
+        if self._summary is not None:
+            return  # already finished successfully
+        self._w = None  # drop the writer (and the source handles) unfinalised
+        # A HIPO file with no trailer is unreadable, so leaving it behind is
+        # litter that looks like output.
+        victim = self._inplace[1] if self._inplace is not None else self._path
+        try:
+            os.remove(victim)
+        except OSError:
+            pass
 
     def __repr__(self) -> str:
         return f"<oxihipo.Writer: {'closed' if self._summary else 'open'}>"
