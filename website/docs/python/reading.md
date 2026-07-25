@@ -208,11 +208,15 @@ f.to_parquet("electrons.parquet", "REC::Particle", ["px", "py", "pz"],
 so inputs far bigger than RAM work in about one chunk of memory. `compression=`
 is the Parquet codec (`"zstd"` by default).
 
-:::note Arrow adds nullability
-Reading back with `ak.from_arrow(pq.read_table(...))` gives
-`{px: option[var * ?float32]}` rather than `var * {px: float32}` — the values are
-identical, Arrow just marks everything nullable. That is Arrow/Parquet
-behaviour, not something lost in the write.
+:::note The schema is non-nullable
+A HIPO bank has no null concept — a row either exists, or the event simply has
+fewer rows, which the list offsets already express. The Arrow schema says so:
+fields are declared `not null`, so `ak.from_arrow(pq.read_table(...))` gives back
+`var * {px: float32}`, the same type you started with.
+
+Before 0.3.1 the schema was inferred rather than declared, which left every field
+nullable and made the round-trip come back as `option[var * ?float32]`. The
+values were always identical; only the declared type was wrong.
 :::
 
 ### Dask

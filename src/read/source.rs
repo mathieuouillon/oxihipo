@@ -30,6 +30,16 @@ pub trait IntoSources: sealed::Sealed {
     fn into_sources(self) -> Result<Vec<PathBuf>>;
 }
 
+/// True for anything carrying a URL scheme we might one day support, plus the
+/// ones we never will — the point is to recognise "this is a URL" so the error
+/// can say the useful thing.
+fn is_url(s: &str) -> bool {
+    const SCHEMES: [&str; 6] = [
+        "root://", "http://", "https://", "s3://", "gs://", "file://",
+    ];
+    SCHEMES.iter().any(|p| s.starts_with(p))
+}
+
 /// Auto-detect a single path: existing file → that file; existing
 /// directory → its `*.hipo` children; otherwise treat it as a glob.
 fn resolve_one(path: &Path) -> Result<Vec<PathBuf>> {
@@ -44,6 +54,18 @@ fn resolve_one(path: &Path) -> Result<Vec<PathBuf>> {
     // mistake (typo, wrong cwd) — error rather than silently returning an
     // empty chain (0 events), which is a sharp footgun for a reader.
     match path.to_str() {
+        // A URL is not a typo and not a glob: say so, rather than reporting
+        // "no such file or directory" for something that was never meant to be
+        // one. Remote sources are not supported yet; this keeps the diagnosis
+        // honest until they are.
+        Some(url) if is_url(url) => Err(HipoError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "remote sources are not supported: {url}\n\
+                 oxihipo reads local files only. Stage the file first, e.g.\n\
+                 \txrdcp {url} /scratch/$USER/  (or your site's copy tool)"
+            ),
+        ))),
         Some(pattern) if pattern.contains(['*', '?', '[']) => resolve_glob(pattern),
         _ => Err(HipoError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,

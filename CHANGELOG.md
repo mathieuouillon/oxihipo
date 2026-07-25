@@ -9,6 +9,46 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Fixed
 
+- **The key namespace no longer depends on how many banks matched.** `single` —
+  did the caller name one bank as a bare string? — reached only the Awkward
+  assembler, so `arrays(["REC::Particle"], library="np")` returned bare
+  `pid`/`px` keys while the same call with `library="ak"` returned a record
+  namespaced by bank. A loop keyed on `"BANK/col"` worked until it met a file
+  where the glob matched a single bank. All four backends now key off the
+  request.
+- **`banks=` together with `filter_name=` is refused.** `filter_name` replaces
+  the bank selection outright, so `arrays("REC::Particle",
+  filter_name="REC::Event*")` silently returned `REC::Event`. Now a `TypeError`.
+- **`skim(tags=…)` no longer leaves a mis-tagged file behind.** The length check
+  ran after the skim had finished, and the short `tags` was padded with zero per
+  event — so the caller got an exception *and* a complete, silently mis-tagged
+  file that opened cleanly. The partial output is removed.
+- **The Arrow schema is declared non-nullable.** It was inferred, leaving every
+  field nullable, so a Parquet round-trip returned `option[var * ?float32]`
+  instead of `var * float32`. The docs blamed Arrow for this; the schema was
+  ours. Values were never affected.
+- **`composite(library="np")` keeps a consistent shape.** `np.array(…,
+  dtype=object)` over equal-length slices collapses to a rank-2 array of boxed
+  scalars, so the result's shape depended on whether the file happened to have a
+  constant number of rows per event.
+- A URL passed to `open()` now reports that remote sources are unsupported,
+  instead of falling through to the glob branch and reporting "no such file or
+  directory".
+
+### Added
+
+- Module-level `iterate()` gained `cut=`, which `Chain.iterate` already had.
+- `CITATION.cff`, and the wheel now ships the licence text (PEP 639
+  `license` + `license-files`) rather than only naming MIT in metadata.
+- `scripts/release.py check` also verifies `CITATION.cff`'s version and that
+  `py/LICENSE` has not drifted from `LICENSE`.
+
+### Changed
+
+- `record_decompressed_sizes()` reads its record headers in parallel. It runs
+  before `iterate(step_size="200 MB")` can plan a single batch, so on a
+  many-record chain the serial version was a visible stall before any data moved.
+
 - **The version badges on the GitHub README**, which showed `v0.1.1` and
   `python 3.10 | … | 3.14` while 0.3.0 was current — stale across four releases.
 

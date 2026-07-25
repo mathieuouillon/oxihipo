@@ -495,9 +495,17 @@ impl PyChain {
                     })
                     .map_err(to_pyerr)?;
                 if summary.events as usize != tags_len {
+                    // The skim has already finished and closed `dst`, and the
+                    // short `tags` was padded with 0 per event — so without this
+                    // the caller gets an error *and* a complete, silently
+                    // mis-tagged file that opens cleanly and passes
+                    // `filtered(event_tag=...)`. That is worse than no check:
+                    // the message says nothing happened. Remove it.
+                    let _ = std::fs::remove_file(&dst);
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "tags has {tags_len} entries but the (filtered) chain yields {} events; \
-                         compute tags from the same chain/filter (e.g. f.event_tags() or f.arrays())",
+                         compute tags from the same chain/filter (e.g. f.event_tags() or \
+                         f.arrays()). The partial output was removed.",
                         summary.events
                     )));
                 }

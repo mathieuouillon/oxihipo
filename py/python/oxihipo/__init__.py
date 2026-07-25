@@ -505,6 +505,14 @@ class Chain:
                 "`columns=` is only valid with a single bank name; select "
                 "columns across banks via filter_name='BANK/col*'"
             )
+        # `filter_name` replaces the bank selection outright, so passing both
+        # silently discarded `banks` — `arrays("REC::Particle",
+        # filter_name="REC::Event*")` returned REC::Event. Refuse instead.
+        if filter_name is not None and banks is not None:
+            raise TypeError(
+                "pass either `banks=` or `filter_name=`, not both — `filter_name` "
+                "selects across every bank and would ignore `banks`"
+            )
         if filter_name is not None:
             grouped: dict[str, list[str]] = {}
             for key in self._reader().keys(True):
@@ -913,19 +921,26 @@ class Chain:
         return [(bname, new_offsets, out_cols)]
 
     def _assemble(self, res, single, library):
+        # `single` — did the caller name ONE bank as a bare string? — decides the
+        # key namespace, and it must reach every backend. It used to reach only
+        # `ak`, so the other three keyed off `len(res) > 1` and a list-of-one or a
+        # glob matching one bank produced bare column keys under np/pd/arrow while
+        # ak produced bank-namespaced ones. That made the namespace depend on the
+        # *data* (how many banks happened to match) rather than the request, so a
+        # loop keyed on "BANK/col" worked until it met a file with one match.
         if library == "ak":
             return self._assemble_ak(res, single)
         if library == "np":
-            return self._assemble_np(res)
+            return self._assemble_np(res, single)
         if library == "pd":
-            return self._assemble_pd(res)
+            return self._assemble_pd(res, single)
         if library == "arrow":
-            return self._assemble_arrow(res)
+            return self._assemble_arrow(res, single)
         raise ValueError(
             f"unknown library {library!r} (expected 'ak', 'np', 'pd', or 'arrow')"
         )
 
-    def _assemble_arrow(self, res) -> "pa.Table":
+    def _assemble_arrow(self, res, single=False) -> "pa.Table":
         import pyarrow as pa
 
         # Build the pyarrow.Table straight from the returned NumPy buffers — one
@@ -933,7 +948,9 @@ class Chain:
         # Awkward. `pa.array(offsets)`/`pa.array(values)` wrap the int64/numeric
         # buffers zero-copy, so the whole path stays copy-free and needs no
         # awkward import (only pyarrow).
-        multi = len(res) > 1
+        # Namespace by bank unless the caller named exactly one bank as a
+        # bare string; mirrors `_assemble_ak`.
+        multi = not (single and len(res) == 1)
         cols: dict[str, pa.Array] = {}
         for bname, offsets, bcols in res:
             off = pa.array(offsets)  # int64 → LargeList offsets, zero-copy
@@ -943,7 +960,25 @@ class Chain:
                     child = pa.FixedSizeListArray.from_arrays(child, int(inner))
                 key = f"{bname}/{name}" if multi else name
                 cols[key] = pa.LargeListArray.from_arrays(off, child)
-        return pa.table(cols)  # empty selection → a valid empty table (no crash)
+        # Declare the schema non-nullable rather than letting `pa.table` infer.
+        # A HIPO bank has no null concept: a row either exists or the event has
+        # fewer rows, which the list offsets already express. Inferring left
+        # every field `nullable=True`, so a Parquet round-trip came back as
+        # `option[var * ?float32]` and downstream tools planned for nulls that
+        # cannot occur. The buffers are unchanged — only the schema is stated.
+        if not cols:
+            return pa.table(cols)  # empty selection → a valid empty table
+        schema = pa.schema(
+            [
+                pa.field(
+                    name,
+                    pa.large_list(pa.field("item", arr.type.value_type, nullable=False)),
+                    nullable=False,
+                )
+                for name, arr in cols.items()
+            ]
+        )
+        return pa.table(cols, schema=schema)
 
     def _assemble_ak(self, res, single):
         import awkward as ak
@@ -959,10 +994,12 @@ class Chain:
         names = list(built.keys())
         return ak.Array(ak.contents.RecordArray([built[n] for n in names], names))
 
-    def _assemble_np(self, res):
+    def _assemble_np(self, res, single=False):
         import numpy as np
 
-        multi = len(res) > 1
+        # Namespace by bank unless the caller named exactly one bank as a
+        # bare string; mirrors `_assemble_ak`.
+        multi = not (single and len(res) == 1)
         out: dict[str, np.ndarray] = {}
         for bname, offsets, cols in res:
             # One bulk int64→pyint conversion, shared by every column of the
@@ -979,14 +1016,19 @@ class Chain:
                 out[f"{bname}/{name}" if multi else name] = arr
         return out
 
-    def _assemble_pd(self, res):
+    def _assemble_pd(self, res, single=False):
         import awkward as ak
 
         frames = {
             bname: ak.to_dataframe(ak.Array(_bank_record(ak, offsets, cols)))
             for bname, offsets, cols in res
         }
-        return next(iter(frames.values())) if len(frames) == 1 else frames
+        # A bare single-bank request gets the frame itself; a list or a glob gets
+        # a dict keyed by bank, even when only one bank matched — so the shape
+        # follows the request rather than the file's contents.
+        if single and len(frames) == 1:
+            return next(iter(frames.values()))
+        return frames
 
     # --- the ROOT RDataFrame path ------------------------------------------
     def rdataframe(
@@ -1243,13 +1285,20 @@ class Chain:
         if library == "np":
             import numpy as _np
 
-            return {
-                f"f{i}": _np.array(
-                    [values[offsets[e] : offsets[e + 1]] for e in range(len(offsets) - 1)],
-                    dtype=object,
-                )
-                for i, (_dtype, values) in enumerate(fields)
-            }
+            # Fill a pre-sized object array rather than letting `np.array`
+            # infer: with a constant number of rows per event every slice has
+            # the same length, and NumPy collapses the list into a rank-2
+            # (n_events, rows) array of boxed scalars instead of the rank-1
+            # array-of-arrays every ragged file produces. Same call, different
+            # shape depending on the data — so downstream `len(x[e])` breaks on
+            # exactly the files that look tidiest.
+            def _object_column(values):
+                out = _np.empty(len(offsets) - 1, dtype=object)
+                for e in range(len(offsets) - 1):
+                    out[e] = values[offsets[e] : offsets[e + 1]]
+                return out
+
+            return {f"f{i}": _object_column(v) for i, (_dtype, v) in enumerate(fields)}
         if library != "ak":
             raise ValueError(f"unknown library {library!r} (expected 'ak' or 'np')")
         import awkward as ak
@@ -1458,15 +1507,15 @@ def open(source: Source) -> Chain:  # noqa: A001  (uproot-style: oxihipo.open(..
 def iterate(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
     *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
-    report: Literal[False] = ..., entry_start: int | None = ..., entry_stop: int | None = ...,
-    threads: int = ..., workers: int = ...,
+    report: Literal[False] = ..., cut: str | None = ..., entry_start: int | None = ...,
+    entry_stop: int | None = ..., threads: int = ..., workers: int = ...,
 ) -> "Iterator[Any]": ...
 @overload
 def iterate(
     source: Source, banks: str | Sequence[str] | None = ..., columns: Sequence[str] | None = ...,
     *, step_size: int | str = ..., filter_name: str | None = ..., library: _Library = ...,
-    report: Literal[True], entry_start: int | None = ..., entry_stop: int | None = ...,
-    threads: int = ..., workers: int = ...,
+    report: Literal[True], cut: str | None = ..., entry_start: int | None = ...,
+    entry_stop: int | None = ..., threads: int = ..., workers: int = ...,
 ) -> "Iterator[tuple[Any, Report]]": ...
 def iterate(
     source: Source,
@@ -1477,6 +1526,7 @@ def iterate(
     filter_name: str | None = None,
     library: _Library = "ak",
     report: bool = False,
+    cut: str | None = None,
     entry_start: int | None = None,
     entry_stop: int | None = None,
     threads: int = 0,
@@ -1495,7 +1545,7 @@ def iterate(
     chain: Any = open(source)
     return chain.iterate(
         banks, columns, step_size=step_size, filter_name=filter_name,
-        library=library, report=report, entry_start=entry_start,
+        library=library, report=report, cut=cut, entry_start=entry_start,
         entry_stop=entry_stop, threads=threads, workers=workers,
     )
 

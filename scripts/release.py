@@ -53,6 +53,9 @@ VERSION_SITES: list[tuple[str, str, str]] = [
     ("py/README.md", r"badge/pypi-v(?P<v>[0-9][^-]*)-", "badge/pypi-v{v}-"),
     ("README.md", r"badge/pypi-v(?P<v>[0-9][^-]*)-", "badge/pypi-v{v}-"),
     ("website/docs/intro.md", r"badge/pypi-v(?P<v>[0-9][^-]*)-", "badge/pypi-v{v}-"),
+    # CITATION.cff carries the released version so a citation names what the
+    # user actually ran.
+    ("CITATION.cff", r"^version: (?P<v>[0-9][^\s]*)$", "version: {v}"),
     # website/docs/release-notes.md is generated and reads the version straight
     # out of py/pyproject.toml, so it needs no entry here.
 ]
@@ -190,6 +193,19 @@ def cmd_check(_args: argparse.Namespace) -> int:
             + ", ".join(mismatched)
             + "\nThis is the mismatch that shipped in 0.2.0 (build said 3.10, docs said 3.13)."
         )
+
+    step("Licence")
+    # py/LICENSE is a copy: `license-files` paths cannot escape the project dir,
+    # so maturin can only see one under py/. A copy can drift from the original,
+    # and a wheel shipping the wrong licence text is worse than shipping none.
+    root_lic, py_lic = read("LICENSE"), read("py/LICENSE")
+    if root_lic != py_lic:
+        raise Fail(
+            "py/LICENSE has drifted from LICENSE — they must be identical "
+            "(py/ needs its own copy because PEP 639 license-files cannot "
+            "reference a parent directory). Run: cp LICENSE py/LICENSE"
+        )
+    ok("LICENSE and py/LICENSE identical")
 
     step("Changelog")
     if changelog_section(version) is None:

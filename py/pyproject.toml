@@ -8,7 +8,12 @@ version = "0.3.0"
 description = "Fast columnar reading of HIPO (CLAS12) files, powered by Rust"
 readme = "README.md"
 requires-python = ">=3.13"
-license = { text = "MIT" }
+# PEP 639: an SPDX expression plus the file itself, so the wheel actually
+# *contains* the licence text. The old `{ text = "MIT" }` form put the string in
+# the metadata and shipped no LICENSE file — which is what a redistributor
+# (conda-forge, a lab's internal mirror, Debian) has to have.
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Mathieu Ouillon" }]
 keywords = ["hipo", "clas12", "jefferson-lab", "awkward", "columnar", "physics"]
 classifiers = [
@@ -18,7 +23,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Physics",
     "Intended Audience :: Science/Research",

@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use oxihipo in work that leads to a publication, please cite it."
+title: "oxihipo: a Rust reader and writer for the HIPO v6 container, with a columnar Python binding"
+abstract: >-
+  oxihipo reads and writes the HIPO v6 binary container used at Jefferson Lab
+  CLAS12. The Rust core streams records with bounded memory; the Python binding
+  presents banks as columnar, uproot-shaped Awkward arrays built zero-copy from
+  buffers filled with the GIL released.
+type: software
+authors:
+  - family-names: Ouillon
+    given-names: Mathieu
+repository-code: "https://github.com/mathieuouillon/oxihipo"
+url: "https://mathieuouillon.github.io/oxihipo/"
+license: MIT
+version: 0.3.0
+keywords:
+  - HIPO
+  - CLAS12
+  - Jefferson Lab
+  - nuclear physics
+  - columnar I/O
+  - Awkward Array
+  - Rust

@@ -1129,3 +1129,64 @@ def test_to_dask_preserves_a_chain_filter(chain):
         g.to_dask("REC::Particle", ["pid"], step_size=2).compute(),
         g.arrays("REC::Particle", ["pid"]),
     )
+
+
+# --- wave 0: argument handling that disagreed with itself -----------------
+
+
+def test_key_namespace_follows_the_request_not_the_data(chain):
+    """A list-of-one must namespace by bank on every backend.
+
+    The namespace used to be decided by `len(res) > 1` on np/pd/arrow and by the
+    caller's intent on ak, so a glob that happened to match one bank returned
+    bare column keys under np and bank-qualified ones under ak — a loop keyed on
+    "BANK/col" worked until it met such a file.
+    """
+    pytest.importorskip("awkward")
+
+    def keys(obj, lib):
+        if lib == "ak":
+            return list(obj.fields)
+        if lib == "np":
+            return list(obj)
+        if lib == "pd":
+            return list(obj) if isinstance(obj, dict) else list(obj.columns)
+        return list(obj.column_names)
+
+    for lib in ("ak", "np", "pd", "arrow"):
+        listed = keys(chain.arrays(["REC::Particle"], library=lib), lib)
+        assert all(k.startswith("REC::Particle") for k in listed), (lib, listed)
+        bare = keys(chain.arrays("REC::Particle", library=lib), lib)
+        assert not any("/" in k for k in bare), (lib, bare)
+
+
+def test_banks_and_filter_name_together_is_refused(chain):
+    # `filter_name` selects across every bank, so it silently discarded `banks`:
+    # arrays("REC::Particle", filter_name="REC::Event*") returned REC::Event.
+    with pytest.raises(TypeError, match="not both"):
+        chain.arrays("REC::Particle", filter_name="REC::Event*")
+
+
+def test_arrow_schema_is_not_nullable(chain):
+    pa = pytest.importorskip("pyarrow")
+    t = chain.arrays("REC::Particle", ["px"], library="arrow")
+    field = t.schema.field(0)
+    assert not field.nullable
+    assert not field.type.value_field.nullable
+
+
+def test_module_iterate_forwards_cut():
+    # oxihipo.iterate lacked `cut=` entirely while Chain.iterate had it, so a
+    # typed caller failed mypy and an untyped one got TypeError.
+    ak = pytest.importorskip("awkward")
+    path = os.path.join(DATA, "sample.hipo")
+    chunks = list(oxihipo.iterate(path, "REC::Particle", ["pid"], cut="pid == 100"))
+    assert chunks
+    for c in chunks:
+        assert ak.all(c.pid == 100)
+
+
+# NOTE: the `composite(library="np")` rank-1 fix has no test. Exercising it
+# needs a file containing a composite bank, and none of the fixtures has one —
+# nor does any real CLAS12 file checked so far. Writing one requires composite
+# support in the writer, which does not exist. Flagged rather than faked.

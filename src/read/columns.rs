@@ -814,14 +814,30 @@ impl Chain {
     /// — used to size byte-based streaming batches (`iterate("200 MB")`).
     /// Errors on a corrupt/truncated header.
     pub fn record_decompressed_sizes(&self) -> Result<Vec<u64>> {
-        let mut out = Vec::new();
-        for inner in self.files_inner() {
-            for span in inner.index.records() {
-                let header = inner.read_record_header(span.file_offset)?;
-                out.push(header.decompressed_payload_size() as u64);
-            }
-        }
-        Ok(out)
+        // One header read per record, and `iterate(step_size="200 MB")` calls
+        // this before it can plan a single batch — so on a many-record chain the
+        // sequential version is a visible stall before any data moves. The reads
+        // are independent; collecting from an *indexed* parallel iterator keeps
+        // record order, which the batching relies on.
+        let spans: Vec<(usize, u64)> = self
+            .files_inner()
+            .iter()
+            .enumerate()
+            .flat_map(|(fi, inner)| {
+                inner
+                    .index
+                    .records()
+                    .iter()
+                    .map(move |span| (fi, span.file_offset))
+            })
+            .collect();
+        spans
+            .into_par_iter()
+            .map(|(fi, off)| {
+                let header = self.files_inner()[fi].read_record_header(off)?;
+                Ok(header.decompressed_payload_size() as u64)
+            })
+            .collect::<Result<Vec<u64>>>()
     }
 }
 
