@@ -1,7 +1,7 @@
 name: wheels
 
 # Build (and, on a tag, publish) the `oxihipo` Python wheels. The extension is
-# abi3 (one cp310-abi3 wheel per OS/arch works on CPython >= 3.10). It links the
+# abi3 (one cp313-abi3 wheel per OS/arch works on CPython >= 3.13). It links the
 # C LZ4 backend (`lz4-sys`), so builds need a C compiler; every native runner
 # here has one, and the aarch64 Linux wheel builds on a native ARM64 runner
 # rather than cross-compiling (see the `linux` job).

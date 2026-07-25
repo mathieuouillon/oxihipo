@@ -7,7 +7,18 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **The Python floor is 3.13**, as the documentation has always said. The build
+  disagreed: `pyo3` was on `abi3-py310` and `pyproject.toml` on
+  `requires-python = ">=3.10"`, so 0.2.0 shipped `cp310-abi3` wheels advertising
+  3.10 support the project did not claim. Now `abi3-py313` /
+  `requires-python = ">=3.13"`, matching the mypy `python_version` and the docs,
+  and the stale 3.10–3.12 classifiers are gone.
+
+  This narrows support, so pip on 3.10–3.12 will resolve to 0.2.0 instead —
+  which does work there. The floor is a support decision, not a syntax one: the
+  code itself still only needs 3.10.
 
 ## [0.2.0] - 2026-07-24
 

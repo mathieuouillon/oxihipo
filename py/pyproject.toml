@@ -7,7 +7,7 @@ name = "oxihipo"
 version = "0.2.0"
 description = "Fast columnar reading of HIPO (CLAS12) files, powered by Rust"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "Mathieu Ouillon" }]
 keywords = ["hipo", "clas12", "jefferson-lab", "awkward", "columnar", "physics"]
@@ -15,9 +15,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
