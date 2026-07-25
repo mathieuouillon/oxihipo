@@ -43,9 +43,18 @@ VERSION_SITES: list[tuple[str, str, str]] = [
     ("Cargo.toml", r'^version = "(?P<v>[^"]+)"', 'version = "{v}"'),
     ("py/Cargo.toml", r'^version = "(?P<v>[^"]+)"', 'version = "{v}"'),
     ("py/pyproject.toml", r'^version = "(?P<v>[^"]+)"', 'version = "{v}"'),
-    # Static on purpose: the PyPI long description is frozen at upload and also
-    # served on older versions' pages, so a dynamic badge is wrong there.
+    # Every version badge is static, and the version is in the URL on purpose.
+    # A shields.io badge sits behind its own Cloudflare edge (max-age=10800) and,
+    # on GitHub, behind camo as well. A dynamic `pypi/v` URL never changes, so
+    # neither cache refetches — ours showed v0.1.1 across four releases. Putting
+    # the version in the URL means each release mints a URL no cache has seen.
+    # (The PyPI long description has a second reason: PyPI freezes it at upload
+    # and serves it on older versions' pages, where "latest" is simply wrong.)
     ("py/README.md", r"badge/pypi-v(?P<v>[0-9][^-]*)-", "badge/pypi-v{v}-"),
+    ("README.md", r"badge/pypi-v(?P<v>[0-9][^-]*)-", "badge/pypi-v{v}-"),
+    ("website/docs/intro.md", r"badge/pypi-v(?P<v>[0-9][^-]*)-", "badge/pypi-v{v}-"),
+    # website/docs/release-notes.md is generated and reads the version straight
+    # out of py/pyproject.toml, so it needs no entry here.
 ]
 
 LOCKFILES = [("Cargo.lock", "oxihipo"), ("py/Cargo.lock", "oxihipo-py")]
@@ -159,6 +168,27 @@ def cmd_check(_args: argparse.Namespace) -> int:
             f"these disagree with py/pyproject.toml ({version}): "
             + ", ".join(f"{k}={v}" for k, v in bad.items())
             + "\nRun: scripts/release.py prepare " + version
+        )
+
+    step("Python floor")
+    req = re.search(r'^requires-python = ">=([0-9.]+)"', read("py/pyproject.toml"), re.M)
+    if not req:
+        raise Fail("py/pyproject.toml has no requires-python")
+    floor = req.group(1)
+    ok(f"requires-python >={floor}")
+    mismatched = []
+    for rel in ("py/README.md", "README.md", "website/docs/intro.md",
+                "website/scripts/sync-changelog.mjs"):
+        for badged in re.findall(r"badge/python-([0-9.]+)%2B", read(rel)):
+            if badged != floor:
+                mismatched.append(f"{rel}={badged}")
+            else:
+                ok(f"{rel:<34} python-{badged}+")
+    if mismatched:
+        raise Fail(
+            f"python badge disagrees with requires-python (>={floor}): "
+            + ", ".join(mismatched)
+            + "\nThis is the mismatch that shipped in 0.2.0 (build said 3.10, docs said 3.13)."
         )
 
     step("Changelog")

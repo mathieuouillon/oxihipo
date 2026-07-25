@@ -67,18 +67,35 @@ re-checks PyPI, and then asks you to type the version before pushing.
 `scripts/release.py check` also runs as the `version-consistency` job on every
 PR, so drift is caught long before a release.
 
-### Why the PyPI badge is static
+### Why every version badge is static
 
-`py/README.md` is the PyPI long description. PyPI **freezes it at upload** and
-serves it on every older version's page too, so a dynamic `pypi/v` badge there
-can only be right by luck: it reports whatever is newest — wrong on
-`/project/oxihipo/<older>/` — and on the project page it lags up to three hours,
-because shields.io caches with `max-age=10800` no matter what `cacheSeconds` you
-pass. A static badge is exactly right for a frozen page, and `prepare` bumps it
-so it cannot be forgotten.
+A shields.io badge sits behind **two** caches: its own Cloudflare edge
+(`cache-control: max-age=10800`, and `cacheSeconds` does not shorten it), and on
+GitHub a second one, because GitHub proxies every external image through
+`camo.githubusercontent.com`.
 
-`README.md` and the docs site keep **dynamic** badges: those pages are live, so
-"latest" is the correct meaning there.
+A *dynamic* `pypi/v` badge has a URL that never changes, so neither cache has any
+reason to refetch — ours displayed `v0.1.1` on the GitHub README across four
+releases. A *static* `pypi-vX.Y.Z` badge puts the version in the URL, so every
+release mints a URL no cache has ever seen and the right image appears at once.
+Caching stops being a correctness problem.
+
+`py/README.md` has a second, independent reason: it is the PyPI long description,
+which PyPI **freezes at upload** and also serves on every older version's page.
+A "latest" badge there is simply wrong on `/project/oxihipo/<older>/`.
+
+So all four badge sites are static, and `prepare` rewrites them:
+
+| file | why it matters |
+|---|---|
+| `README.md` | the GitHub landing page |
+| `py/README.md` | the PyPI long description (frozen per release) |
+| `website/docs/intro.md` | the docs landing page |
+| `website/docs/release-notes.md` | **generated** — reads the version from `py/pyproject.toml`, so nothing to bump |
+
+`check` also asserts the `python-3.13+` badges match `requires-python`, which is
+the mismatch that shipped in 0.2.0 (the build said 3.10 while every doc said
+3.13).
 
 ## After publishing
 

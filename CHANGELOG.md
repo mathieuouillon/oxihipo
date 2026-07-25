@@ -9,6 +9,22 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Fixed
 
+- **The version badges on the GitHub README**, which showed `v0.1.1` and
+  `python 3.10 | … | 3.14` while 0.3.0 was current — stale across four releases.
+
+  They were dynamic, on the reasoning that a live page wants "latest". That
+  reasoning was wrong: a shields.io badge sits behind its own Cloudflare edge
+  (`max-age=10800`) *and*, on GitHub, behind `camo.githubusercontent.com`, and a
+  dynamic URL never changes, so neither cache ever refetches. A static
+  `pypi-vX.Y.Z` badge puts the version in the URL, so each release mints a URL no
+  cache has seen and the correct image appears immediately.
+
+  All four badge sites are now static. `scripts/release.py prepare` rewrites
+  three of them and the generated docs page reads the version from
+  `py/pyproject.toml`, so none can be forgotten. `check` also now asserts the
+  `python-3.13+` badges match `requires-python` — the mismatch that shipped in
+  0.2.0.
+
 - **A release no longer publishes without reaching the docs site.** The
   release-notes page is generated from `CHANGELOG.md` at build time, but the docs
   workflow was path-filtered to `website/**` — and a release commit touches the
