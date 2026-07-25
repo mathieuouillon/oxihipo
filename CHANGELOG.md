@@ -9,6 +9,26 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 Nothing yet.
 
+## [0.2.2] - 2026-07-24
+
+A packaging fix. No library code changed, so behaviour is identical to 0.2.1.
+
+### Fixed
+
+- **The version badge on the PyPI page.** It read `v0.1.1` on the 0.2.1 page.
+  `py/README.md` is the PyPI long description, which PyPI **freezes at upload**
+  and also serves on every older version's page — so a dynamic `pypi/v` badge
+  there can only be right by luck: it reports whatever is newest (wrong on an
+  older version's page), and on the project page it lags up to three hours,
+  because shields.io caches with `max-age=10800` no matter what `cacheSeconds`
+  you pass.
+
+  The PyPI description now carries **static** `pypi-vX.Y.Z` / `python-3.13+`
+  badges, which are exactly right for a frozen page and depend on no cache.
+  `README.md` and the docs site keep dynamic badges — those pages are live, so
+  "latest" is the correct meaning. Bumping the static badge is now a step in
+  `RELEASING.md`.
+
 ## [0.2.1] - 2026-07-24
 
 A packaging fix. No library code changed, so behaviour is identical to
@@ -234,7 +254,8 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.1.0...v0.1.1

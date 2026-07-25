@@ -1,8 +1,8 @@
 # oxihipo
 
 [![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/)
-[![PyPI](https://img.shields.io/pypi/v/oxihipo?cacheSeconds=3600)](https://pypi.org/project/oxihipo/)
-[![Python](https://img.shields.io/pypi/pyversions/oxihipo?cacheSeconds=3600)](https://pypi.org/project/oxihipo/)
+[![PyPI](https://img.shields.io/pypi/v/oxihipo)](https://pypi.org/project/oxihipo/)
+[![Python](https://img.shields.io/pypi/pyversions/oxihipo)](https://pypi.org/project/oxihipo/)
 [![CI](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml)
 [![docs](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

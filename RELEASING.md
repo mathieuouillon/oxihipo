@@ -39,6 +39,17 @@ Because `oxihipo` does not exist on PyPI yet, register a **pending publisher**:
    - `Cargo.toml` — `[package] version`
    - `py/Cargo.toml` — `[package] version`
    - `py/pyproject.toml` — `[project] version`
+   - `py/README.md` — the **static** `pypi-vX.Y.Z` badge at the top
+
+   That last one is easy to miss and there is no check for it. It is static on
+   purpose: `py/README.md` is the PyPI long description, which PyPI **freezes at
+   upload** and also serves on every older version's page. A dynamic
+   `pypi/v` badge there reports whatever is newest, so it is wrong on
+   `/project/oxihipo/<older>/` — and on the project page it lags up to three
+   hours behind, because shields.io caches with `max-age=10800` regardless of any
+   `cacheSeconds` you pass. A static badge is exactly right for a frozen page.
+   The root `README.md` and the docs site keep dynamic badges: those pages are
+   live, so "latest" is the correct meaning there.
 2. **Update [`CHANGELOG.md`](CHANGELOG.md)**: move items out of `[Unreleased]` into
    a new `[X.Y.Z]` section with the date, and refresh the compare links at the
    bottom.
