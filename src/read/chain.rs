@@ -298,11 +298,17 @@ impl Chain {
         let mut f = filter;
         f.validate(&self.dict)?;
         f.bind(&self.dict);
-        if !f.record_tags().is_empty() {
-            let mut tags = self.record_tags.unwrap_or_default();
-            tags.extend(f.record_tags().iter().copied());
-            self.record_tags = Some(tags);
-        }
+        // Replace, do not accumulate. `self.filter` is assigned wholesale just
+        // below, so extending the record tags made the two halves of one filter
+        // disagree: a second `with_filter` narrowed every other clause while
+        // *widening* the record-tag pushdown, because the tags are consumed as a
+        // union in `build_tasks`. Composition belongs to the caller, which now
+        // hands over an already-merged filter.
+        self.record_tags = if f.record_tags().is_empty() {
+            None
+        } else {
+            Some(f.record_tags().to_vec())
+        };
         self.filter = Some(f);
         Ok(self)
     }

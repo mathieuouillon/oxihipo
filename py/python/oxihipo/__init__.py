@@ -183,6 +183,33 @@ def _wrap_column(ak, offsets, values, inner_len):
 
 
 
+
+def _merge_require(parent, child):
+    """Union: chaining `require` means every named bank must be present."""
+    if parent is None:
+        return child
+    if child is None:
+        return parent
+    merged = list(parent) + [b for b in child if b not in parent]
+    return merged
+
+
+def _intersect_tags(parent, child, what):
+    """Intersection: chaining narrows. An empty result can never match, which is
+    a real (if useless) filter — but far more often a mistake, so say so."""
+    if parent is None:
+        return child
+    if child is None:
+        return parent
+    keep = [t for t in child if t in set(parent)]
+    if not keep:
+        raise ValueError(
+            f"chaining these `{what}` filters selects nothing: {list(parent)} "
+            f"then {list(child)} have no value in common"
+        )
+    return keep
+
+
 def _cut_identifiers(cut: str) -> set[str]:
     """Bare names a cut expression reads. Used to widen the read so a cut can
     reference a column the caller did not ask to get back."""
@@ -693,6 +720,24 @@ class Chain:
             idx = [int(i) for i in entries]
             if any(i < 0 for i in idx):
                 raise ValueError("`entries` indices must be non-negative")
+            # `entries=` resolves each index through the random-access path,
+            # which addresses the *file's* event stream and does not consult the
+            # chain filter — so on a filtered chain it silently returned events
+            # the filter excludes, and the indices did not even mean the same
+            # thing (a range read compacts to surviving events; `entries=` is 1:1
+            # with the request). Refuse rather than answer wrongly. Making these
+            # agree needs a decision about which index space `entries=` speaks,
+            # which is a bigger change than a guard.
+            if any(
+                x is not None
+                for x in (self._require, self._record_tag, self._event_tag, self._event_tag_any)
+            ):
+                raise ValueError(
+                    "`entries=` is not supported on a filtered chain: the indices "
+                    "would address the unfiltered event stream, so the filter "
+                    "would be ignored. Read with entry_start/entry_stop instead, "
+                    "or take the entries from the unfiltered chain."
+                )
             return finish(c.read_columns_at(selection, idx))
         if workers and workers > 1:
             from . import _parallel
@@ -1374,6 +1419,28 @@ class Chain:
         ``event_tag_any`` is always an OR'd bitmask. An unknown name raises
         ``KeyError``."""
         numeric, any_mask = self._resolve_tag_filters(event_tag, event_tag_any)
+
+        # Compose with whatever this chain already filters on. Each call used to
+        # build a filter from its own arguments alone, so
+        # `f.filtered(require=…).filtered(event_tag=…)` silently dropped the
+        # `require` — and the record-tag clause was *widened* rather than
+        # dropped, because the core unioned them. Chaining narrows, which is what
+        # every other library in this space does.
+        require = _merge_require(self._require, require)
+        record_tag = _intersect_tags(self._record_tag, record_tag, "record_tag")
+        numeric = _intersect_tags(self._event_tag, numeric, "event_tag")
+        if self._event_tag_any is not None and any_mask is not None:
+            # "any of A" AND "any of B" is not a single mask: an event carrying
+            # only a∈A and only c∈B satisfies both clauses but shares no bit with
+            # A&B. Rather than pick a wrong mask, say so.
+            raise ValueError(
+                "cannot chain two `event_tag_any` filters — 'any of A' and 'any "
+                "of B' is not expressible as one bitmask. Combine them into a "
+                "single filtered(event_tag_any=[...]) call, or apply the second "
+                "as a cut on the result."
+            )
+        any_mask = self._event_tag_any if any_mask is None else any_mask
+
         new = Chain(self._reader().filtered(require, record_tag, numeric, any_mask))
         new._require = require
         new._record_tag = record_tag

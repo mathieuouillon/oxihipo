@@ -1190,3 +1190,116 @@ def test_module_iterate_forwards_cut():
 # needs a file containing a composite bank, and none of the fixtures has one —
 # nor does any real CLAS12 file checked so far. Writing one requires composite
 # support in the writer, which does not exist. Flagged rather than faked.
+
+
+# --- wave 1: composition, and the matrix that would have caught it --------
+
+
+def test_filtered_composes(chain):
+    """Chaining narrows; it used to discard the earlier clauses."""
+    ak = pytest.importorskip("awkward")
+    both = chain.filtered(require=["REC::Particle"], event_tag=[1])
+    chained = chain.filtered(require=["REC::Particle"]).filtered(event_tag=[1])
+    assert ak.almost_equal(
+        both.arrays("REC::Event", ["evno"]), chained.arrays("REC::Event", ["evno"])
+    )
+
+
+def test_chained_record_tag_does_not_widen(chain):
+    # record_tags were unioned in the core while every other clause was
+    # replaced, so chaining widened the record-level pushdown.
+    once = chain.filtered(record_tag=[0])
+    twice = once.filtered(record_tag=[0])
+    assert len(once.arrays("REC::Event", ["evno"])) == len(
+        twice.arrays("REC::Event", ["evno"])
+    )
+
+
+def test_chaining_disjoint_tags_is_an_error(chain):
+    with pytest.raises(ValueError, match="no value in common"):
+        chain.filtered(event_tag=[1]).filtered(event_tag=[2])
+
+
+def test_chaining_two_event_tag_any_is_refused(chain):
+    # "any of A" and "any of B" is not one bitmask; refusing beats guessing.
+    with pytest.raises(ValueError, match="not expressible as one bitmask"):
+        chain.filtered(event_tag_any=1).filtered(event_tag_any=2)
+
+
+def test_entries_on_a_filtered_chain_is_refused(chain):
+    # `entries=` addresses the unfiltered stream, so it silently ignored the
+    # filter AND the indices meant something different from a range read.
+    with pytest.raises(ValueError, match="filtered chain"):
+        chain.filtered(event_tag=[1]).arrays("REC::Event", ["evno"], entries=[0, 1])
+
+
+def test_keyword_combinations_agree_or_raise(chain):
+    """The matrix. Every wave-0/1 defect was a *pair* of keywords disagreeing,
+    each of which was correct alone — so the suite that tested them one at a
+    time passed throughout. This asserts a consistent answer or a loud error for
+    each combination, never a silently different one.
+    """
+    ak = pytest.importorskip("awkward")
+    bank = "REC::Particle"
+    ref = chain.arrays(bank, ["pid"])
+    n = len(ref)
+
+    def rows(obj, lib):
+        if lib == "ak":
+            return [len(x) for x in obj.pid]
+        if lib == "np":
+            key = "pid" if "pid" in obj else f"{bank}/pid"
+            return [len(x) for x in obj[key]]
+        if lib == "arrow":
+            name = "pid" if "pid" in obj.column_names else f"{bank}/pid"
+            return [len(x) for x in obj.column(name).to_pylist()]
+        raise AssertionError(lib)
+
+    # 1. every backend must agree on the event count and per-event row counts
+    for lib in ("ak", "np", "arrow"):
+        got = chain.arrays(bank, ["pid"], library=lib)
+        assert rows(got, lib) == rows(ref, "ak"), lib
+
+    # 2. a range and the equivalent `entries=` must agree (unfiltered chain)
+    lo, hi = 1, min(5, n)
+    assert ak.almost_equal(
+        chain.arrays(bank, ["pid"], entry_start=lo, entry_stop=hi),
+        chain.arrays(bank, ["pid"], entries=list(range(lo, hi))),
+    )
+
+    # 3. cut composes with a range, with entries=, and with every backend
+    cut = "pid == 100"
+    assert ak.almost_equal(
+        chain.arrays(bank, ["pid"], cut=cut, entry_start=lo, entry_stop=hi),
+        chain.arrays(bank, ["pid"], cut=cut, entries=list(range(lo, hi))),
+    )
+    for lib in ("ak", "np", "arrow"):
+        chain.arrays(bank, ["pid"], cut=cut, library=lib)  # must not raise
+
+    # 4. a filtered chain agrees between a whole read and iterate()
+    g = chain.filtered(require=[bank])
+    whole = g.arrays(bank, ["pid"])
+    streamed = ak.concatenate(list(g.iterate(bank, ["pid"], step_size=2))) if n else whole
+    assert len(streamed) == len(whole)
+
+    # 5. mutually exclusive keywords must raise, not silently prefer one
+    for kwargs in (
+        dict(entries=[0], entry_start=0),
+        dict(filter_name="REC::*"),          # with banks= positional -> refused
+    ):
+        with pytest.raises((ValueError, TypeError)):
+            chain.arrays(bank, ["pid"], **kwargs)
+
+
+def test_module_and_method_signatures_agree():
+    """`ox.iterate` lost `cut=` while `Chain.iterate` had it. Assert the wrapper
+    pairs stay in step mechanically rather than by review."""
+    import inspect
+
+    for mod_fn, meth in (
+        (oxihipo.iterate, oxihipo.Chain.iterate),
+        (oxihipo.arrays, oxihipo.Chain.arrays),
+    ):
+        mod = set(inspect.signature(mod_fn).parameters) - {"source"}
+        met = set(inspect.signature(meth).parameters) - {"self"}
+        assert mod == met, f"{mod_fn.__name__}: {mod ^ met}"

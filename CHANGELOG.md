@@ -20,6 +20,18 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Fixed
 
+- **`filtered()` composes.** Each call built its filter from its own arguments
+  alone, so `f.filtered(require=…).filtered(event_tag=…)` silently dropped the
+  `require` — and the record-tag clause was *widened* rather than dropped,
+  because the core unioned record tags while replacing every other clause.
+  Chaining now narrows: `require` unions, `record_tag` and `event_tag`
+  intersect, and two `event_tag_any` clauses raise, because "any of A" and "any
+  of B" is not expressible as one bitmask.
+- **`entries=` no longer answers wrongly on a filtered chain.** It resolves each
+  index through the random-access path, which addresses the file's event stream
+  and never consulted the filter — so it returned events the filter excludes,
+  and the indices did not mean what a range read means. It now raises; making
+  the two agree needs a decision about which index space `entries=` speaks.
 - **The key namespace no longer depends on how many banks matched.** `single` —
   did the caller name one bank as a bare string? — reached only the Awkward
   assembler, so `arrays(["REC::Particle"], library="np")` returned bare
