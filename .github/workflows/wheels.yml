@@ -55,10 +55,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip maturin
           maturin build --release --out dist -i python
+      # `dask-awkward` is an optional extra, but it is not optional *here*: the
+      # to_dask tests are `importorskip`-guarded, so without it they report as
+      # skipped and the whole lazy-graph / divisions / column-projection surface
+      # goes untested while the suite still reads green. Remove it from this
+      # list only together with those tests.
       - name: Install wheel + test dependencies
         run: |
-          python -m pip install numpy awkward pandas pyarrow pytest "mypy~=2.3"
+          python -m pip install numpy awkward pandas pyarrow pytest "mypy~=2.3" dask-awkward
           python -m pip install --no-index --find-links py/dist oxihipo --no-deps
+      # ...and prove the suite is not quietly skipping half of itself.
+      # `importorskip` degrades to a skip on *any* import failure, so a backend
+      # that installs but does not import reads exactly like a clean run.
+      - name: Assert every optional backend the suite guards on is importable
+        run: python -c "import awkward, pandas, pyarrow, dask_awkward"
       - name: Run the binding's test suite
         run: python -m pytest py/tests -q
       # Floor only. `python_version = "3.10"` in pyproject.toml is the point of
