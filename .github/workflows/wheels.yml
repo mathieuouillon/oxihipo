@@ -61,7 +61,15 @@ jobs:
           python -m pip install --no-index --find-links py/dist oxihipo --no-deps
       - name: Run the binding's test suite
         run: python -m pytest py/tests -q
+      # Floor only. `python_version = "3.10"` in pyproject.toml is the point of
+      # the check — it is what stops a 3.11+ construct reaching a user on the
+      # oldest interpreter we claim. But that setting also applies to
+      # *dependency* stubs, and on a newer interpreter pip resolves a numpy
+      # whose stubs use PEP 695 `type` statements, which mypy then refuses to
+      # parse as 3.10. Type-checking once against the declared floor is the
+      # whole intent; repeating it per interpreter adds nothing.
       - name: Type-check the pure-Python package (mypy)
+        if: matrix.python == '3.10'
         working-directory: py
         run: python -m mypy
       - name: Check the compiled stub matches the extension (stubtest)
