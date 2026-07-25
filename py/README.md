@@ -1,6 +1,7 @@
 # oxihipo (Python)
 
 [![PyPI](https://img.shields.io/pypi/v/oxihipo)](https://pypi.org/project/oxihipo/)
+[![Python](https://img.shields.io/pypi/pyversions/oxihipo)](https://pypi.org/project/oxihipo/)
 [![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/docs/python/reading)
 [![Tutorial](https://img.shields.io/badge/🎓_tutorial-CLAS12_analysis_in_Python-0d7a6f)](https://mathieuouillon.github.io/oxihipo/docs/tutorial)
 

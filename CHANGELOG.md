@@ -7,6 +7,13 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.1] - 2026-07-24
+
+A packaging fix. No library code changed, so behaviour is identical to
+0.2.0.
+
 ### Changed
 
 - **The Python floor is 3.13**, as the documentation has always said. The build
@@ -19,6 +26,12 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   This narrows support, so pip on 3.10–3.12 will resolve to 0.2.0 instead —
   which does work there. The floor is a support decision, not a syntax one: the
   code itself still only needs 3.10.
+
+### Added
+
+- A **supported-Python badge** (`pypi/pyversions`) on both READMEs, so the floor
+  is visible where people look rather than only in the metadata. It reads from
+  the published classifiers, which is how the 3.10 mismatch stayed invisible.
 
 ## [0.2.0] - 2026-07-24
 
@@ -221,7 +234,8 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mathieuouillon/oxihipo/releases/tag/v0.1.0
