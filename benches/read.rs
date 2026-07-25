@@ -17,6 +17,8 @@
 //! - `columns/<format>` — the columnar materializer (`read_columns`), the path
 //!   behind the Python binding.
 //! - `random_access/<format>` — `Chain::event(i)` over scattered indices.
+//! - `read_at/<format>` — `read_columns_at`, the path behind Python `entries=`.
+//! - `open/<format>` — `Chain::open`: header + dictionary + trailer index.
 //! - `schema_parse` — the hand-written dictionary parser.
 
 use std::hint::black_box;
@@ -203,6 +205,48 @@ fn bench_random_access(c: &mut Criterion) {
     g.finish();
 }
 
+/// `read_columns_at` over the same two patterns as `random_access`.
+///
+/// Separate from `random_access` because it is a different code path — the one
+/// the Python `entries=` argument runs on — and because it is the path that
+/// replays entries through `Chain::event`'s single-slot record cache. The
+/// scattered case is the one to watch: every index landing in a new record
+/// costs a full record decode.
+fn bench_read_columns_at(c: &mut Criterion) {
+    let mut g = c.benchmark_group("read_at");
+    for (name, path) in fixtures() {
+        let chain = Chain::open(path).unwrap();
+        let n = chain.event_count();
+        let scattered: Vec<u64> = (0..256u64).map(|i| (i * 7919) % n).collect();
+        let sorted: Vec<u64> = (0..256u64).map(|i| i * 3).filter(|&i| i < n).collect();
+        for (pattern, idx) in [("scattered", &scattered), ("sorted", &sorted)] {
+            g.throughput(criterion::Throughput::Elements(idx.len() as u64));
+            g.bench_function(format!("{name}/{pattern}"), |b| {
+                b.iter(|| {
+                    let cols = chain
+                        .read_columns_at(&[("REC::Particle", &["pid", "px"][..])], idx)
+                        .unwrap();
+                    black_box(cols.len())
+                })
+            });
+        }
+    }
+    g.finish();
+}
+
+/// `Chain::open` — the per-file open cost: file header, dictionary record, and
+/// the trailer index, each a separate positioned read. Nothing else measures
+/// it, so a change to the open sequence has no baseline to be judged against.
+fn bench_open(c: &mut Criterion) {
+    let mut g = c.benchmark_group("open");
+    for (name, path) in fixtures() {
+        g.bench_function(*name, |b| {
+            b.iter(|| black_box(Chain::open(black_box(path)).unwrap().event_count()))
+        });
+    }
+    g.finish();
+}
+
 /// Schema-text parsing: cheap per call, but it runs once per dictionary entry at
 /// every file open, and it is hand-written.
 fn bench_schema_parse(c: &mut Criterion) {
@@ -218,6 +262,8 @@ criterion_group!(
     bench_scan,
     bench_columns,
     bench_random_access,
+    bench_read_columns_at,
+    bench_open,
     bench_schema_parse
 );
 criterion_main!(benches);
