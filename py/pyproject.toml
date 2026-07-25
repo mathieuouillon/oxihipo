@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "oxihipo"
 version = "0.3.0"
 description = "Fast columnar reading of HIPO (CLAS12) files, powered by Rust"
-readme = "README.md"
+readme = "README-pypi.md"
 requires-python = ">=3.10"
 # PEP 639: an SPDX expression plus the file itself, so the wheel actually
 # *contains* the licence text. The old `{ text = "MIT" }` form put the string in

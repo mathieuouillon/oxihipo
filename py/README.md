@@ -170,7 +170,7 @@ with ox.create("out.hipo", compression="lz4percolumn") as w:
 f = ox.open("dst.hipo")
 scores = model.predict(f.arrays("REC::Particle")).astype("float32")   # one per event
 
-w = ox.recreate("dst.hipo", "decorated.hipo")   # or dst=None to replace in place
+w = ox.update("dst.hipo", "decorated.hipo")     # or dst=None to replace in place
 w.new_bank("ML::pred", {"score": "F"})
 w.extend({"ML::pred": {"score": scores}})        # aligned 1:1 with the source events
 w.close()

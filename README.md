@@ -200,7 +200,7 @@ to **decorate** an existing one with a derived bank (an ML score, a computed
 kinematic) without rewriting the physics banks:
 
 ```python
-w = ox.recreate("dst.hipo", "decorated.hipo")   # copies every event verbatim
+w = ox.update("dst.hipo", "decorated.hipo")     # copies every event verbatim
 w.new_bank("ML::pred", {"score": "F"})            # declare a new bank
 w.extend({"ML::pred": {"score": scores}})        # one float32 per event
 w.close()

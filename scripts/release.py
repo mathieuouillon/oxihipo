@@ -211,6 +211,21 @@ def cmd_check(_args: argparse.Namespace) -> int:
         raise Fail(f"py/LICENSE.txt points at {link.resolve()}, expected {ROOT / 'LICENSE'}")
     ok("py/LICENSE.txt -> LICENSE (symlink, cannot drift)")
 
+    step("PyPI long description")
+    # `readme` resolves relative to the manifest directory, and maturin's sdist
+    # re-roots py/pyproject.toml to the tarball root — where the *Rust* README
+    # sits. A direct build then advertised the Python README and an sdist build
+    # the Rust one. Two symlinks under a name neither root already uses make the
+    # same file reachable from both.
+    for rel, target in (("py/README-pypi.md", ROOT / "py/README.md"),
+                        ("README-pypi.md", ROOT / "py/README.md")):
+        link = ROOT / rel
+        if not link.is_symlink():
+            raise Fail(f"{rel} must be a symlink to py/README.md (see py/pyproject.toml `readme`)")
+        if link.resolve() != target.resolve():
+            raise Fail(f"{rel} points at {link.resolve()}, expected {target}")
+        ok(f"{rel} -> py/README.md")
+
     step("Changelog")
     if changelog_section(version) is None:
         warn(f"no `## [{version}]` section yet — expected before tagging")

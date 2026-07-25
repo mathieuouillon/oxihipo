@@ -6,7 +6,25 @@ sidebar_position: 5
 
 # Writing
 
-`oxihipo.create` opens a new file; `oxihipo.recreate` *decorates* an existing
+:::warning `create` / `recreate` / `update` follow uproot
+These names mean what they mean in
+[uproot](https://uproot.readthedocs.io/en/latest/basic.html), which is **not**
+what `recreate` meant here before 0.4:
+
+| you want | call |
+|---|---|
+| a new file, error if it exists | `create(path)` |
+| a new file, replacing any existing one | `recreate(path)` |
+| add banks to an existing file | `update(source, dst=None)` |
+
+`recreate(source, dst)` still works with a `DeprecationWarning` and behaves as
+`update`. `recreate(path)` on a file that already exists **raises** for one
+release — the old meaning decorated that file and the new one destroys it, so
+guessing is not safe. Pass `overwrite=True` once you mean the new behaviour.
+:::
+
+
+`oxihipo.create` opens a new file; `oxihipo.update` *decorates* an existing
 one (copies its events, attaching new banks). Both return a `Writer` with a
 `new_bank` / `extend` / `close` API that writes columns **zero-copy from NumPy
 or Awkward**.
@@ -61,7 +79,7 @@ new banks you declare:
 f = ox.open("dst.hipo")
 scores = my_model.predict(f.arrays("REC::Particle"))   # one float32 per event
 
-w = ox.recreate("dst.hipo", "decorated.hipo")   # or dst=None to replace in place
+w = ox.update("dst.hipo", "decorated.hipo")   # or dst=None to replace in place
 w.new_bank("ML::pred", {"score": "F"})
 w.extend({"ML::pred": {"score": scores.astype("float32")}})
 w.close()

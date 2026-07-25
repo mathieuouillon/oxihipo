@@ -103,7 +103,7 @@ verbatim and attaches the banks you add:
 f = ox.open("dis_skim.hipo")
 kin = dis_kinematics(select_electron(f.arrays("REC::Particle")))   # your functions
 
-w = ox.recreate("dis_skim.hipo", "dis_skim_kin.hipo")
+w = ox.update("dis_skim.hipo", "dis_skim_kin.hipo")
 w.new_bank("ANA::dis", {"Q2": "F", "W": "F", "xB": "F"})
 w.extend({"ANA::dis": {"Q2": kin.Q2, "W": kin.W, "xB": kin.xB}})    # one row / event
 w.close()

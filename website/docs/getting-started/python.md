@@ -89,7 +89,7 @@ with ox.create("out.hipo") as w:
     w.extend({"NEW::bank": {"px": p.px, "pid": p.pid}})   # columnar, zero-copy
 
 # add an ML score to a cooked file without rewriting the physics banks:
-w = ox.recreate("dst.hipo", "decorated.hipo")
+w = ox.update("dst.hipo", "decorated.hipo")
 w.new_bank("ML::pred", {"score": "F"})
 w.extend({"ML::pred": {"score": scores}})                 # one per source event
 w.close()
@@ -106,7 +106,7 @@ benchmarks.
 ## Where to go next
 
 - [Reading](../python/reading.md) — `arrays`, `array`, `numpy`, bank proxies, `library=`
-- [Writing](../python/writing.md) — `create` / `recreate`, `new_bank` / `extend`, decorate
+- [Writing](../python/writing.md) — `create` / `recreate` / `update`, `new_bank` / `extend`
 - [RDataFrame](../python/rdataframe.md) — `rdataframe` / `iterate_rdataframe`, ROOT's declarative dataframe over HIPO
 - [Streaming](../python/streaming.md) — `iterate` and `step_size`
 - [Parallel reading](../python/parallel.md) — `workers=N` for I/O-bound filesystems

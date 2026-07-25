@@ -801,7 +801,7 @@ def test_decorate_adds_bank(tmp_path):
     n = oxihipo.open(src).num_entries
     scores = (np.arange(n, dtype=np.float32) * 0.5)
 
-    w = oxihipo.recreate(src, dst)
+    w = oxihipo.update(src, dst)
     w.new_bank("ML::pred", {"score": "F"})
     w.extend({"ML::pred": {"score": scores}})
     assert w.close().events == n
@@ -819,7 +819,7 @@ def test_decorate_requires_all_events(tmp_path):
     # Providing fewer new-bank events than the source has is an error on close.
     src = str(tmp_path / "s.hipo")
     shutil.copy(os.path.join(DATA, "sample.hipo"), src)
-    w = oxihipo.recreate(src, str(tmp_path / "d.hipo"))
+    w = oxihipo.update(src, str(tmp_path / "d.hipo"))
     w.new_bank("ML::pred", {"score": "F"})
     w.extend({"ML::pred": {"score": np.array([1.0, 2.0], dtype=np.float32)}})  # 2 of 8
     with pytest.raises(ValueError):
@@ -1325,7 +1325,7 @@ def test_writer_inplace_abort_keeps_the_source(tmp_path):
     src.write_bytes((pathlib.Path(DATA) / "sample.hipo").read_bytes())
     before = src.read_bytes()
     with pytest.raises(RuntimeError, match="boom"):
-        with oxihipo.recreate(str(src)) as w:   # dst=None -> in-place
+        with oxihipo.update(str(src)) as w:   # dst=None -> in-place
             w.new_bank("X::y", {"v": "F"})
             raise RuntimeError("boom")
     assert src.read_bytes() == before, "in-place recreate clobbered the source"
@@ -1348,3 +1348,42 @@ def test_filter_name_accepts_several_globs(chain):
     one = chain.arrays(filter_name="REC::Particle*", library="np")
     many = chain.arrays(filter_name=["REC::Particle*", "REC::Event*"], library="np")
     assert set(one) < set(many)
+
+
+def test_create_refuses_to_clobber(tmp_path):
+    # uproot's `create` raises here; ours used to truncate silently.
+    p = tmp_path / "x.hipo"
+    p.write_bytes(b"")
+    with pytest.raises(FileExistsError):
+        oxihipo.create(str(p))
+
+
+def test_recreate_guards_the_renamed_meaning(tmp_path):
+    """`recreate(path)` used to decorate that file; it now destroys it. For one
+    release an existing path raises instead of acting on either meaning."""
+    ak = pytest.importorskip("awkward")
+    p = tmp_path / "y.hipo"
+    p.write_bytes((pathlib.Path(DATA) / "sample.hipo").read_bytes())
+    before = p.read_bytes()
+    with pytest.raises(FileExistsError, match="changed meaning"):
+        oxihipo.recreate(str(p))
+    assert p.read_bytes() == before
+
+    with oxihipo.recreate(str(p), overwrite=True) as w:
+        w.new_bank("X::y", {"v": "F"})
+        w.extend({"X::y": {"v": ak.Array([[1.0]])}})
+    assert oxihipo.open(str(p)).keys() == ["X::y"]
+
+
+def test_recreate_two_arg_shim_warns_and_updates(tmp_path):
+    ak = pytest.importorskip("awkward")
+    src = tmp_path / "s.hipo"
+    src.write_bytes((pathlib.Path(DATA) / "sample.hipo").read_bytes())
+    dst = tmp_path / "d.hipo"
+    with pytest.warns(DeprecationWarning, match="renamed update"):
+        w = oxihipo.recreate(str(src), str(dst))
+    w.new_bank("N::n", {"s": "F"})
+    w.extend({"N::n": {"s": ak.Array([[float(i)] for i in range(8)])}})
+    w.close()
+    # the shim must behave exactly as update(): source events copied through
+    assert "REC::Particle" in oxihipo.open(str(dst)).keys()

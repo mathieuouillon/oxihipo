@@ -14,9 +14,10 @@ import ast
 import fnmatch
 import os
 import re
+import warnings
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, overload
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
 
 from ._oxihipo import (
     Chain as _RustChain,
@@ -45,6 +46,7 @@ __all__ = [
     "open",
     "create",
     "recreate",
+    "update",
     "iterate",
     "numpy",
     "event_tags",
@@ -1976,7 +1978,8 @@ def create(
     config: "Mapping[str, str] | None" = None,
     max_record_bytes: int | None = None,
 ) -> Writer:
-    """Open a new HIPO file for writing (overwrites). Declare banks with
+    """Open a **new** HIPO file for writing, refusing to overwrite an existing
+    one — use :func:`recreate` for that. Declare banks with
     :meth:`Writer.new_bank`, feed batches with :meth:`Writer.extend`, then
     :meth:`Writer.close`. Compression is one of ``none`` / ``lz4`` / ``lz4best``
     / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``.
@@ -2001,6 +2004,74 @@ def create(
     per core: on a 134 MB file, 4 MB records took a full parallel scan from
     73 ms to 59 ms for 1% more size. Smaller records cost ratio because each
     one restarts LZ4's match window."""
+    # uproot's `create` raises here rather than truncating, and muscle memory
+    # from it is the common case. Truncating silently is how an afternoon of
+    # farm output disappears.
+    if os.path.exists(path):
+        raise FileExistsError(
+            f"{os.fspath(path)!r} already exists. Use recreate(...) to replace it, "
+            f"or update(...) to add banks to it."
+        )
+    return Writer(
+        path, compression=compression, config=config, max_record_bytes=max_record_bytes
+    )
+
+
+_UNSET = object()
+
+
+def recreate(
+    path: StrPath,
+    dst: "StrPath | None | object" = _UNSET,
+    compression: str = "lz4percolumn",
+    config: "Mapping[str, str] | None" = None,
+    max_record_bytes: int | None = None,
+    *,
+    overwrite: bool = False,
+) -> Writer:
+    """Create a fresh file, **replacing** one that already exists.
+
+    This is uproot's meaning of ``recreate`` — "creates a new file, deleting any
+    existing file with that name". Use :func:`create` when overwriting should be
+    an error, and :func:`update` to add banks to an existing file.
+
+    .. warning::
+       **This name changed meaning.** It used to mean "decorate an existing
+       file", which is now :func:`update`. During one release a call that could
+       plausibly have meant the old thing raises rather than acting:
+
+       * ``recreate(src, dst)`` — two paths — warns and behaves as
+         :func:`update`, as it always did.
+       * ``recreate(path)`` where ``path`` **exists** raises, because the old
+         meaning decorated that file and the new one destroys it. Pass
+         ``overwrite=True`` to say you mean the new behaviour.
+    """
+    if dst is not _UNSET:
+        warnings.warn(
+            "recreate(source, dst) has been renamed update(source, dst); "
+            "`recreate(path)` now creates a fresh file, matching uproot. "
+            "This compatibility shim will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return update(
+            path,
+            None if dst is None else cast("StrPath", dst),
+            compression=compression,
+            max_record_bytes=max_record_bytes,
+        )
+
+    if os.path.exists(path) and not overwrite:
+        raise FileExistsError(
+            f"{os.fspath(path)!r} exists, and `recreate` changed meaning: it now "
+            f"creates a fresh file (destroying that one), where it used to "
+            f"decorate it in place. Say which you mean:\n"
+            f"  update({os.fspath(path)!r})                    "
+            f"# add banks to it — the old behaviour\n"
+            f"  recreate({os.fspath(path)!r}, overwrite=True)  "
+            f"# replace it — the new behaviour\n"
+            f"This guard is temporary and goes away once the rename has settled."
+        )
     return Writer(
         path, compression=compression, config=config, max_record_bytes=max_record_bytes
     )
@@ -2026,7 +2097,7 @@ def skim(path: StrPath, dst: StrPath, **kwargs: "Any") -> "SkimSummary":
     return open(path).skim(dst, **kwargs)
 
 
-def recreate(
+def update(
     source: StrPath,
     dst: StrPath | None = None,
     compression: str = "lz4percolumn",

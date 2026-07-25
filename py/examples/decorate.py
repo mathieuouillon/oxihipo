@@ -37,7 +37,7 @@ print(f"  multiplicity : {mult.tolist()}")
 print(f"  sum(px)      : {[round(float(x), 2) for x in sum_px]}")
 
 # --- 2. copy the file through, attaching the new bank ---------------------
-w = ox.recreate(src, dst)          # or ox.recreate(src) to replace in place
+w = ox.update(src, dst)            # or ox.update(src) to replace in place
 w.new_bank("KIN::event", {"mult": "I", "sum_px": "F", "score": "F"})
 w.extend({"KIN::event": {"mult": mult, "sum_px": sum_px, "score": score}})
 summary = w.close()

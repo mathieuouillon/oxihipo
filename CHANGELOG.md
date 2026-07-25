@@ -9,6 +9,21 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Changed
 
+- **`create` / `recreate` / `update` follow uproot.** They were inverted: nothing
+  refused to overwrite, `create` clobbered, and `recreate(source, dst)` meant
+  "decorate". Now `create(path)` raises `FileExistsError`, `recreate(path)`
+  replaces, and `update(source, dst=None)` decorates.
+
+  Migration is guarded rather than silent. `recreate(source, dst)` still works
+  with a `DeprecationWarning` and behaves as `update`. `recreate(path)` on a file
+  that **already exists raises for one release** — the old meaning decorated that
+  file and the new one destroys it, so acting on either guess could lose data.
+  Pass `overwrite=True` when you mean the new behaviour.
+- **The sdist no longer advertises the wrong README.** `readme` resolves relative
+  to the manifest directory, and maturin's sdist re-roots `py/pyproject.toml` to
+  the tarball root — next to the *Rust* README. A wheel built directly carried
+  the Python description while one built from the sdist carried the Rust one.
+  Both now resolve through `README-pypi.md`, a symlink present at each root.
 - **The Python floor is back to 3.10**, reversing the 0.2.1 raise to 3.13. The
   floor is a support decision, not a syntax one: the package needs only
   `from __future__ import annotations` plus PEP 604 unions in annotations, so
@@ -67,6 +82,11 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Added
 
+- CI actually exercises what it builds: the test job matrixes over interpreters
+  (the 3.10 floor on all three OSes, plus 3.14 on Linux) instead of pinning one;
+  every wheel job installs the wheel it just built and reads a file with it; the
+  sdist job rebuilds the tarball into a wheel and asserts its metadata; and the
+  13 `py/examples/*.py` are smoke-run, as the Rust examples already were.
 - `filter_name=` accepts a **sequence of globs** as a union, on `arrays`,
   `iterate` and `keys` — asking for `REC::*` plus `RUN::config` needed two calls.
 - `library="pd"` frames carry `attrs["num_entries"]`. An event with no rows is

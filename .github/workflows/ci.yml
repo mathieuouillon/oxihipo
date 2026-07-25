@@ -129,6 +129,39 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # The 13 py/examples/*.py are the first thing a new user runs, and nothing
+  # executed them — the Rust examples have had a smoke-run for ages. Each is
+  # written to work against the bundled sample with no arguments.
+  python-examples:
+    name: smoke-run python examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: py-examples
+      - name: Build and install the binding
+        run: |
+          python -m pip install --upgrade pip maturin -q
+          (cd py && maturin build --release --out dist)
+          python -m pip install -q py/dist/*.whl
+      - name: Run every example
+        run: |
+          fail=0
+          for f in py/examples/*.py; do
+            case "$(basename "$f")" in
+              # needs ROOT (not on PyPI); benchmarks are slow and not assertions
+              rdataframe.py|bench_*.py) echo "skip $f"; continue;;
+            esac
+            echo "== $f"
+            python "$f" >/dev/null || { echo "FAILED: $f"; fail=1; }
+          done
+          exit $fail
+
   # High-level smoke test: `cargo test` compiles the examples but never runs
   # them, so a runtime break (panic, bad logic) ships silently. Drive the core
   # examples end-to-end — write → read → recook to Lz4PerBank → read back,
