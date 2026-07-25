@@ -810,14 +810,21 @@ class Chain:
 
         One partition per ``step_size`` batch, aligned to record and file
         boundaries exactly as :meth:`iterate` is, so nothing is read until you
-        ``.compute()``::
+        ``.compute()`` — not even to discover the layout::
 
             import dask_awkward as dak
-            p = f.to_dask("REC::Particle", ["px", "py"])
-            dak.sum(p.px).compute()
+            p = f.to_dask("REC::Particle")
+            dak.sum(p.px).compute()      # reads px, not the whole bank
+
+        Columns are projected: dask-awkward works out which ones the graph
+        actually touches and each partition reads only those, across banks as
+        well (``dak.report_necessary_columns`` reports what it settled on).
+        Entry boundaries are known too, so ``len()``, ``.partitions[i]`` and
+        entry slices work without reading anything — except under ``cut=``,
+        which may drop events and so forfeits them.
 
         Needs ``dask-awkward``, which is **not** a dependency of this package
-        (``pip install dask-awkward``).
+        (``pip install 'oxihipo[dask]'``).
 
         ``threads`` defaults to ``1``, not all cores: dask is already running
         partitions concurrently, so letting each one also fan out over rayon
@@ -831,9 +838,9 @@ class Chain:
             import dask_awkward as dak
         except ImportError as e:  # pragma: no cover - depends on environment
             raise ImportError(
-                "to_dask() needs dask-awkward: pip install dask-awkward"
+                "to_dask() needs dask-awkward: pip install 'oxihipo[dask]'"
             ) from e
-        from . import _parallel
+        from . import _dask
 
         c = self._reader()
         mode, size = _parse_step_size(step_size)
@@ -851,12 +858,44 @@ class Chain:
 
         spec = (
             self._source, self._require, self._record_tag,
-            self._event_tag, self._event_tag_any, banks, columns,
-            {"filter_name": filter_name, "cut": cut, "library": "ak",
-             "threads": threads},
+            self._event_tag, self._event_tag_any,
         )
+        # One bag, splatted into both the meta read below and every partition
+        # read — which is what keeps the advertised layout and the delivered one
+        # from drifting. `Any` because it is a passthrough: mypy cannot pick an
+        # `arrays` overload from a heterogeneous dict, and narrowing it here
+        # would only mean spelling the same kwargs out twice.
+        kw: dict[str, Any] = {"filter_name": filter_name, "cut": cut,
+                              "library": "ak", "threads": threads}
+
+        # The form, with no I/O beyond the already-open chain: a zero-event read
+        # touches no record but returns the exact layout. Supplying it is what
+        # stops dask-awkward reading partition 0 during graph construction just
+        # to discover the type — the graph was advertised as lazy and was not.
+        import awkward as ak
+
+        meta = self.arrays(banks, columns, entry_start=0, entry_stop=0, **kw)
+        form = meta.layout.form
+
+        # Divisions are the entry boundaries we already computed. Without them
+        # `len()` raises, `.partitions[i]` cannot be pruned, and an entry slice
+        # scans everything; the documented workaround re-reads the whole chain
+        # to recover numbers `num_entries` already knows.
+        #
+        # Only sound when nothing drops events: a per-EVENT cut does, and we
+        # cannot tell which kind a cut is without running it, so any cut forfeits
+        # them rather than reporting boundaries that later prove wrong.
+        divisions = (
+            None
+            if cut is not None
+            else tuple(s for s, _ in batches) + (batches[-1][1],)
+        )
+
         return dak.from_map(
-            _parallel.dask_partition, [spec] * len(batches), batches,
+            _dask.HipoRead(spec, form, banks, columns, kw),
+            batches,
+            meta=ak.Array(form.length_zero_array(highlevel=False).to_typetracer(forget_length=True)),
+            divisions=divisions,
             label="from-hipo",
         )
 

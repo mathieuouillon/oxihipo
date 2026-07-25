@@ -82,6 +82,19 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Added
 
+- **`to_dask()` is a real dask-awkward source.** It was `from_map` over a plain
+  function, which dask-awkward cannot introspect, so the array was lazy in name
+  only: constructing it **read partition 0** just to learn the type, `len()` and
+  entry slices raised on unknown divisions, and every partition read every column
+  of every selected bank however little of it the graph touched.
+
+  It now carries the form (from a zero-event read, which decompresses no record),
+  reports the batch boundaries it had already computed as `divisions`, and
+  implements dask-awkward's `ColumnProjectionMixin` — so `dak.sum(p.px)` reads
+  `px` alone, across banks as well as within one, and
+  `dak.report_necessary_columns` answers instead of returning `{}`. Under `cut=`
+  divisions are deliberately withheld: a per-event cut drops events, and
+  boundaries that later prove wrong are worse than absent ones.
 - CI actually exercises what it builds: the test job matrixes over interpreters
   (the 3.10 floor on all three OSes, plus 3.14 on Linux) instead of pinning one;
   every wheel job installs the wheel it just built and reads a file with it; the

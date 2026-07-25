@@ -223,13 +223,29 @@ values were always identical; only the declared type was wrong.
 
 `to_dask()` returns a lazy [dask-awkward](https://dask-awkward.readthedocs.io)
 array — the counterpart to `uproot.dask`. One partition per `step_size` batch,
-aligned to records exactly as `iterate` is; nothing is read until `.compute()`:
+aligned to records exactly as `iterate` is; nothing is read until `.compute()`,
+not even to discover the layout:
 
 ```python
 import dask_awkward as dak
-p = f.to_dask("REC::Particle", ["px", "py"])
-dak.sum(p.px).compute()
+p = f.to_dask("REC::Particle")
+dak.sum(p.px).compute()          # reads px, not the whole bank
 ```
+
+**Columns are projected.** dask-awkward works out which columns the graph
+actually touches, and each partition reads only those — within one bank and
+across several, so a two-bank array reduced over one column of one bank reads
+exactly that. `dak.report_necessary_columns()` shows what it settled on:
+
+```python
+dak.report_necessary_columns(dak.sum(p.px))
+# {'from-hipo-…': frozenset({'px'})}
+```
+
+**Entry boundaries are known**, so `len(p)`, `p.partitions[i]` and entry slices
+work without reading anything. The exception is `cut=`: a per-event cut drops
+events, so the batch boundaries stop being entry boundaries and `to_dask` leaves
+divisions unknown rather than report ones that later prove wrong.
 
 Needs `pip install oxihipo[dask]` — dask-awkward is deliberately **not** a
 default dependency.

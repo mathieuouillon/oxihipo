@@ -9,6 +9,7 @@ model: 8 events; event ``i`` has ``i % 4`` particles (so 0, 4 are empty) with
 registry ``{dvcs: 0, sidis: 1, elastic: 2}``.
 """
 
+import fnmatch
 import os
 import pathlib
 import shutil
@@ -1130,6 +1131,160 @@ def test_to_dask_preserves_a_chain_filter(chain):
         g.to_dask("REC::Particle", ["pid"], step_size=2).compute(),
         g.arrays("REC::Particle", ["pid"]),
     )
+
+
+# --- wave 2: to_dask as a real dask-awkward source -------------------------
+#
+# `from_map` over a bare callable produced a graph that was lazy in name only:
+# it read partition 0 while *building* the graph, could not answer `len()`, and
+# never pruned a column. Each of those is pinned below, because each looks fine
+# from the outside — the array computes to the right answer either way.
+
+
+@pytest.fixture
+def dask_reads(monkeypatch):
+    """Record the (banks, columns, filter_name) of every partition read."""
+    pytest.importorskip("dask_awkward")
+    from oxihipo import _dask
+
+    seen = []
+    original = _dask.HipoRead.__call__
+
+    def spy(self, batch):
+        seen.append((self.banks, self.columns, self.kw.get("filter_name")))
+        return original(self, batch)
+
+    monkeypatch.setattr(_dask.HipoRead, "__call__", spy)
+    return seen
+
+
+def test_to_dask_reads_nothing_while_building_the_graph(chain, dask_reads):
+    chain.to_dask("REC::Particle", ["px"], step_size=2)
+    assert dask_reads == []
+
+
+def test_to_dask_has_known_divisions(chain):
+    dak = pytest.importorskip("dask_awkward")
+    lazy = chain.to_dask("REC::Particle", ["px"], step_size=3)
+    assert lazy.known_divisions
+    # Boundaries the chain already knew; without them `len()` raises.
+    assert lazy.divisions[0] == 0
+    assert lazy.divisions[-1] == chain.num_entries
+    assert len(lazy) == chain.num_entries
+    assert list(lazy.divisions) == sorted(lazy.divisions)
+
+
+def test_to_dask_forfeits_divisions_under_a_cut(chain):
+    dak = pytest.importorskip("dask_awkward")
+    # A per-event cut drops events, so the batch boundaries stop being entry
+    # boundaries. Reporting them anyway would misplace every later slice.
+    lazy = chain.to_dask("REC::Particle", ["px"], cut="pid == 11", step_size=2)
+    assert not lazy.known_divisions
+
+
+def test_to_dask_projects_a_single_bank_to_the_columns_used(chain, dask_reads):
+    dak = pytest.importorskip("dask_awkward")
+    lazy = chain.to_dask("REC::Particle", step_size=2)
+    assert set(lazy.fields) == {"pid", "px", "cov"}
+    dak.sum(lazy.px).compute()
+    assert dask_reads, "no partition was read"
+    assert {tuple(c) for _b, c, _f in dask_reads} == {("px",)}
+
+
+def test_to_dask_projection_keeps_the_bank_record_of_a_multi_bank_read(
+    chain, dask_reads
+):
+    dak = pytest.importorskip("dask_awkward")
+    ak = pytest.importorskip("awkward")
+    # Narrowing a two-bank read down to one bank must not collapse it to a
+    # single-bank read: that layout has no outer bank record, so every
+    # `arr["REC::Event"]` downstream would fail on data the meta said was there.
+    lazy = chain.to_dask(["REC::Particle", "REC::Event"], step_size=2)
+    got = dak.sum(lazy["REC::Event"].evno).compute()
+    want = ak.sum(chain.arrays(["REC::Event"])["REC::Event"].evno)
+    assert got == want
+    # ...and the read really was narrowed to that one column of that one bank.
+    assert {tuple(f) for _b, _c, f in dask_reads} == {("REC::Event/evno",)}
+
+
+def test_to_dask_projects_each_bank_of_a_multi_bank_read(chain, dask_reads):
+    dak = pytest.importorskip("dask_awkward")
+    ak = pytest.importorskip("awkward")
+    lazy = chain.to_dask(["REC::Particle", "REC::Event"], step_size=2)
+    got = dak.sum(lazy["REC::Particle"].px).compute()
+    assert got == pytest.approx(ak.sum(chain.arrays("REC::Particle", ["px"]).px))
+    assert {tuple(f) for _b, _c, f in dask_reads} == {("REC::Particle/px",)}
+
+
+def test_to_dask_narrows_a_user_filter_name_rather_than_replacing_it(
+    chain, dask_reads
+):
+    dak = pytest.importorskip("dask_awkward")
+    ak = pytest.importorskip("awkward")
+    lazy = chain.to_dask(filter_name="REC::Particle*", step_size=2)
+    got = dak.sum(lazy["REC::Particle"].px).compute()
+    assert got == pytest.approx(ak.sum(chain.arrays("REC::Particle", ["px"]).px))
+    assert {tuple(f) for _b, _c, f in dask_reads} == {("REC::Particle/px",)}
+
+
+def test_to_dask_unprojected_read_is_unchanged(chain):
+    dak = pytest.importorskip("dask_awkward")
+    ak = pytest.importorskip("awkward")
+    # Computing the whole array touches every column, so projection must be a
+    # no-op here — the guard against a projection that silently drops fields.
+    lazy = chain.to_dask(step_size=2)
+    assert ak.to_list(lazy.compute()) == ak.to_list(chain.arrays())
+
+
+def test_to_dask_reports_necessary_columns(chain):
+    dak = pytest.importorskip("dask_awkward")
+    lazy = chain.to_dask("REC::Particle", step_size=2)
+    report = dak.report_necessary_columns(dak.sum(lazy.px))
+    assert [sorted(v) for v in report.values()] == [["px"]]
+
+
+# `project_columns` is handed dotted form paths, and the two edge cases below —
+# a path that descends past the column, and a name carrying a glob character —
+# no HIPO file in the wild produces. Exercise the contract directly rather than
+# leave the branches to a fixture that cannot reach them.
+
+
+def _hipo_read(banks, columns=None, **kw):
+    pytest.importorskip("dask_awkward")
+    from oxihipo import _dask
+
+    kw.setdefault("filter_name", None)
+    return _dask.HipoRead(spec=None, form=None, banks=banks, columns=columns, kw=kw)
+
+
+def test_project_columns_takes_the_column_not_the_leaf():
+    # A nested record would give `px.sub`; the readable unit is still `px`.
+    r = _hipo_read("REC::Particle").project_columns(frozenset({"px.sub", "pid"}))
+    assert r.banks == "REC::Particle"
+    assert r.columns == ["pid", "px"]
+
+    r = _hipo_read(["A", "B"]).project_columns(frozenset({"A.px.sub"}))
+    assert r.kw["filter_name"] == ["A/px"]
+
+
+def test_project_columns_escapes_glob_characters_in_names():
+    # A bank literally named `RE*` must not widen its own projection.
+    r = _hipo_read(["RE*", "REC::Event"]).project_columns(frozenset({"RE*.px"}))
+    assert r.kw["filter_name"] == ["RE[*]/px"]
+    assert fnmatch.fnmatch("RE*/px", r.kw["filter_name"][0])
+    assert not fnmatch.fnmatch("REC::Event/px", r.kw["filter_name"][0])
+
+
+def test_project_columns_keeps_a_whole_bank_whole():
+    # `_resolve` reads a non-empty column list as the complete selection for a
+    # bank, so a bank wanted whole must not also pick up column globs.
+    r = _hipo_read(["A", "B"]).project_columns(frozenset({"A", "A.px", "B.y"}))
+    assert r.kw["filter_name"] == ["A", "B/y"]
+
+
+def test_project_columns_without_a_selection_reads_everything():
+    r = _hipo_read("REC::Particle")
+    assert r.project_columns(frozenset()) is r
 
 
 # --- wave 0: argument handling that disagreed with itself -----------------

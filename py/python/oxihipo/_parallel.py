@@ -159,17 +159,3 @@ def parallel_iterate(source, require, record_tag, event_tag, event_tag_any, sele
             if nb is not None:
                 submit(nb)
             yield assemble(res), b[0], b[1], b[2]
-
-
-def dask_partition(spec, batch):
-    """Read one dask partition: `(start, stop)` of a chain described by `spec`.
-
-    A module-level function taking only picklable arguments, because dask
-    serialises the graph. `spec` is the same identity tuple the process-pool
-    path uses, so a **filtered** chain keeps its filter here — reconstructing
-    the chain without it would silently widen every partition.
-    """
-    source, require, record_tag, event_tag, event_tag_any, banks, columns, kw = spec
-    start, stop = batch
-    chain = _worker_chain(source, require, record_tag, event_tag, event_tag_any)
-    return chain.arrays(banks, columns, entry_start=start, entry_stop=stop, **kw)
