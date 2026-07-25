@@ -7,6 +7,17 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Python floor is back to 3.10**, reversing the 0.2.1 raise to 3.13. The
+  floor is a support decision, not a syntax one: the package needs only
+  `from __future__ import annotations` plus PEP 604 unions in annotations, so
+  3.13 excluded interpreters that run it fine — most of the installed base, for
+  no benefit. `abi3-py310` (wheels are `cp310-abi3`), `requires-python >=3.10`,
+  the 3.10–3.12 classifiers are back, and every `python-X.Y+` badge follows.
+  The mypy `python_version` is now `3.10` and CI's test job runs on 3.10, so a
+  3.11+ construct fails in review rather than at a user's import.
+
 ### Fixed
 
 - **The key namespace no longer depends on how many banks matched.** `single` —

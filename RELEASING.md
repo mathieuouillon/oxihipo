@@ -93,7 +93,7 @@ So all four badge sites are static, and `prepare` rewrites them:
 | `website/docs/intro.md` | the docs landing page |
 | `website/docs/release-notes.md` | **generated** — reads the version from `py/pyproject.toml`, so nothing to bump |
 
-`check` also asserts the `python-3.13+` badges match `requires-python`, which is
+`check` also asserts the `python-3.10+` badges match `requires-python`, which is
 the mismatch that shipped in 0.2.0 (the build said 3.10 while every doc said
 3.13).
 
@@ -114,4 +114,4 @@ the mismatch that shipped in 0.2.0 (the build said 3.10 while every doc said
   give the root crate the `description` / `license` / `repository` metadata
   crates.io requires.
 - Wheels are `abi3` (`abi3-py313`), so one wheel per OS/arch serves every CPython
-  ≥ 3.13 — the matrix builds *platforms*, not interpreter versions.
+  ≥ 3.10 — the matrix builds *platforms*, not interpreter versions.

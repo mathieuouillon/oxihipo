@@ -2,7 +2,7 @@
 
 [![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/)
 [![PyPI](https://img.shields.io/badge/pypi-v0.3.0-006dad)](https://pypi.org/project/oxihipo/)
-[![Python](https://img.shields.io/badge/python-3.13%2B-3776ab)](https://pypi.org/project/oxihipo/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab)](https://pypi.org/project/oxihipo/)
 [![CI](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml)
 [![docs](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -219,7 +219,7 @@ df.Define("pt", "sqrt(REC_Particle_px*REC_Particle_px + REC_Particle_py*REC_Part
 ```
 
 Install with `pip install oxihipo` (wheels for Linux / macOS / Windows,
-CPython ≥ 3.13) — every backend ships by default, so `library="ak"` / `"pd"` /
+CPython ≥ 3.10) — every backend ships by default, so `library="ak"` / `"pd"` /
 `"np"` / `"arrow"` all work with no extra to hunt for. Or build from source with
 [maturin](https://www.maturin.rs) (`cd py && maturin develop --release`); see the
 [Python guide](https://mathieuouillon.github.io/oxihipo/docs/python/reading),

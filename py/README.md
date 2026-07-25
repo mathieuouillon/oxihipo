@@ -1,7 +1,7 @@
 # oxihipo (Python)
 
 [![PyPI](https://img.shields.io/badge/pypi-v0.3.0-006dad)](https://pypi.org/project/oxihipo/)
-[![Python](https://img.shields.io/badge/python-3.13%2B-3776ab)](https://pypi.org/project/oxihipo/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab)](https://pypi.org/project/oxihipo/)
 [![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/docs/python/reading)
 [![Tutorial](https://img.shields.io/badge/🎓_tutorial-CLAS12_analysis_in_Python-0d7a6f)](https://mathieuouillon.github.io/oxihipo/docs/tutorial)
 
@@ -250,7 +250,7 @@ and [`examples/bench_columns.py`](https://github.com/mathieuouillon/oxihipo/blob
 ## Install
 
 ```sh
-pip install oxihipo          # wheels for Linux / macOS / Windows, CPython >= 3.13
+pip install oxihipo          # wheels for Linux / macOS / Windows, CPython >= 3.10
 ```
 
 That is the whole install: **every backend ships by default**, so `library="ak"`,
@@ -271,7 +271,7 @@ maturin develop --release        # build + install into the active venv
 ```
 
 The extension is built with **pyo3 0.29** and **rust-numpy 0.29**, with an
-`abi3-py313` floor — so one `abi3` wheel per OS/arch works across CPython ≥ 3.13.
+`abi3-py310` floor — so one `abi3` wheel per OS/arch works across CPython ≥ 3.10.
 pyo3 0.29 supports current CPython natively; only for an interpreter *newer* than
 it knows do you need `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
 

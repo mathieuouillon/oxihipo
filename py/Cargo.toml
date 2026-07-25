@@ -19,15 +19,16 @@ crate-type = ["cdylib", "rlib"]
 # builds the C source (no system liblz4 dependency), so the wheel build only
 # needs a C compiler, which every cibuildwheel image provides.
 oxihipo = { path = "..", features = ["lz4-c"] }
-# abi3-py313: one cp313-abi3 wheel per (OS, arch) covers CPython 3.13+ (matching
-# `requires-python = ">=3.13"` in pyproject.toml). The floor is a support
-# decision, not a syntax one -- the code itself needs only 3.10 -- so it must be
-# kept in step with pyproject.toml and the mypy `python_version`, or the wheel
-# installs somewhere the project does not claim to support.
+# abi3-py310: one cp310-abi3 wheel per (OS, arch) covers CPython 3.10+ (matching
+# `requires-python = ">=3.10"` in pyproject.toml). 3.10 is what the code
+# actually needs -- `from __future__ import annotations` plus PEP 604 unions in
+# annotations -- so a higher floor would exclude interpreters that run this fine.
+# Keep this in step with pyproject.toml, the mypy `python_version` and the
+# python-X.Y badges; `scripts/release.py check` enforces the badges.
 # `generate-import-lib` lets the **Windows** wheel build *without* a Python
 # interpreter (abi3 supports this via python3-dll-a). No-op on Linux/macOS.
 pyo3 = { version = "0.29", features = [
-    "abi3-py313",
+    "abi3-py310",
     "extension-module",
     "generate-import-lib",
 ] }

@@ -8,7 +8,7 @@ slug: /intro
 # Introduction
 
 [![PyPI](https://img.shields.io/badge/pypi-v0.3.0-006dad)](https://pypi.org/project/oxihipo/)
-[![Python](https://img.shields.io/badge/python-3.13%2B-3776ab)](https://pypi.org/project/oxihipo/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab)](https://pypi.org/project/oxihipo/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/mathieuouillon/oxihipo/blob/main/LICENSE)
 
 That is the current release — see the [release notes](./release-notes.md) for

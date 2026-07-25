@@ -55,7 +55,7 @@ description: Version history for oxihipo, generated from CHANGELOG.md.
 # Release notes
 
 [![PyPI](https://img.shields.io/badge/pypi-v${version}-006dad)](https://pypi.org/project/oxihipo/)
-[![Python](https://img.shields.io/badge/python-3.13%2B-3776ab)](https://pypi.org/project/oxihipo/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776ab)](https://pypi.org/project/oxihipo/)
 
 \`pip install oxihipo\` gets **${version}**, the newest release below. Every
 version is also a

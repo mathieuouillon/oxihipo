@@ -16,7 +16,7 @@ zero-copy from buffers the Rust side fills with the GIL released.
 pip install oxihipo
 ```
 
-Wheels ship for Linux, macOS, and Windows (CPython ≥ 3.13). That one command is
+Wheels ship for Linux, macOS, and Windows (CPython ≥ 3.10). That one command is
 the whole install — **every backend comes with it**, so each `library=` value
 works out of the box and there is no extra to hunt for.
 
@@ -30,7 +30,7 @@ maturin develop --release        # build + install into the active venv
 # or: maturin build --release    # produce an abi3 wheel under target/wheels
 ```
 
-The extension is `abi3` — one wheel per OS/arch works across CPython ≥ 3.13. If
+The extension is `abi3` — one wheel per OS/arch works across CPython ≥ 3.10. If
 your interpreter is newer than the pinned pyo3 knows about, build with
 `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
 
