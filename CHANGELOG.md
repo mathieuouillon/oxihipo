@@ -7,7 +7,13 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A release no longer publishes without reaching the docs site.** The
+  release-notes page is generated from `CHANGELOG.md` at build time, but the docs
+  workflow was path-filtered to `website/**` — and a release commit touches the
+  changelog and manifests, not `website/`. So 0.3.0 shipped to PyPI while the
+  site still showed 0.2.2. `CHANGELOG.md` is now in the filter.
 
 ## [0.3.0] - 2026-07-24
 

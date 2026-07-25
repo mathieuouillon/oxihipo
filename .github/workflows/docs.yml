@@ -13,10 +13,20 @@ on:
     branches: [main]
     paths:
       - 'website/**'
+      # The release-notes page is generated from CHANGELOG.md at build time
+      # (website/scripts/sync-changelog.mjs, npm prebuild), so a changelog-only
+      # commit — which is what a release commit is — must rebuild the site too.
+      # Without this a release publishes to PyPI but never reaches the docs.
+      - 'CHANGELOG.md'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'website/**'
+      # The release-notes page is generated from CHANGELOG.md at build time
+      # (website/scripts/sync-changelog.mjs, npm prebuild), so a changelog-only
+      # commit — which is what a release commit is — must rebuild the site too.
+      # Without this a release publishes to PyPI but never reaches the docs.
+      - 'CHANGELOG.md'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
