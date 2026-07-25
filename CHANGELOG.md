@@ -7,6 +7,10 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-07-24
+
 ### Added
 
 - **`scripts/release.py`** — one command per phase of a release, because a
@@ -266,7 +270,8 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.1.1...v0.2.0
