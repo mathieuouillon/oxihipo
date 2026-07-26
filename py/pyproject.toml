@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "oxihipo"
-version = "0.3.0"
+version = "0.4.0"
 description = "Fast columnar reading of HIPO (CLAS12) files, powered by Rust"
 readme = "README-pypi.md"
 requires-python = ">=3.10"
