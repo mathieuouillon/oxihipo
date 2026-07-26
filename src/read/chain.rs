@@ -169,20 +169,7 @@ impl Chain {
         if files.is_empty() {
             return Ok(Self::default());
         }
-        // Validate dict equality across files. Equality is structural
-        // (every Schema's name / group / item / entries / row_size match).
-        let first: &Dict = &files[0].dict;
-        for (i, f) in files.iter().enumerate().skip(1) {
-            let this: &Dict = &f.dict;
-            if this != first {
-                return Err(HipoError::SchemaParse(format!(
-                    "chain file {i} ({}) has a different dictionary from file 0 ({})",
-                    f.path().display(),
-                    files[0].path().display(),
-                )));
-            }
-        }
-        let dict = Arc::clone(&files[0].dict);
+        let dict = Arc::new(union_dict(&files)?);
         // The tag registry travels with the dict. Prefer the first non-empty
         // one so chaining an untagged file alongside a tagged one (same dict)
         // still exposes the names, rather than letting file 0 blank them.
@@ -1115,6 +1102,69 @@ fn read_record_layout(fd: &File, record_offset: u64) -> Result<RecordLayout> {
         data_start_in_record,
         event_offsets,
     })
+}
+
+/// The chain's dictionary: every bank any file declares, checked for conflicts.
+///
+/// A chain used to require every file's dictionary to be *equal* to file 0's.
+/// That comparison was also order-sensitive — `Dict` derives `PartialEq` over a
+/// positional `Vec<Schema>` plus index tables whose values are insertion
+/// indices — so a glob over a real run period could fail on files describing the
+/// same banks in a different order, which nothing about the format makes
+/// meaningful. Worse, a genuinely heterogeneous set — a pass-2 cook that
+/// added a bank, an MC file carrying `MC::Lund` — was refused outright with no
+/// way to opt out, though a bank simply being absent from a file is something
+/// the read path already handles (it yields an empty entry).
+///
+/// So take the union instead, and reject only what a reader cannot survive:
+///
+/// - the **same name** describing different layouts. Column offsets would be
+///   read against the wrong schema.
+/// - the same **`(group, item)`** used for different banks. This is the sharp
+///   one: the columnar path resolves banks by id from *this* dictionary
+///   ([`super::columns`]), so a collision would decode one file's bytes using
+///   another file's schema and silently return wrong numbers rather than fail.
+///
+/// File 0's banks come first and later files append, so for a chain that opens
+/// today the union is element-for-element what file 0's dictionary already was.
+fn union_dict(files: &[Arc<FileInner>]) -> Result<Dict> {
+    let mut union = Dict::new();
+    // (group, item) -> the name that claimed it, for the collision check.
+    let mut ids: HashMap<(u16, u8), &str> = HashMap::new();
+
+    for f in files {
+        for schema in f.dict.iter() {
+            if let Some(seen) = union.get(schema.name()) {
+                if seen != schema {
+                    return Err(HipoError::SchemaParse(format!(
+                        "chain file {} declares bank {} with a different layout \
+                         than an earlier file; reading them together would \
+                         decode columns against the wrong schema",
+                        f.path().display(),
+                        schema.name(),
+                    )));
+                }
+                continue;
+            }
+            if let Some(&owner) = ids.get(&(schema.group(), schema.item()))
+                && owner != schema.name()
+            {
+                return Err(HipoError::SchemaParse(format!(
+                    "chain file {} declares bank {} with id ({}, {}), which an \
+                     earlier file already uses for {}; banks are located by id, \
+                     so one would be decoded as the other",
+                    f.path().display(),
+                    schema.name(),
+                    schema.group(),
+                    schema.item(),
+                    owner,
+                )));
+            }
+            let stored = union.add(schema.clone());
+            ids.insert((stored.group(), stored.item()), schema.name());
+        }
+    }
+    Ok(union)
 }
 
 /// Lower-case wire name of a record compression, for error messages.

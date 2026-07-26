@@ -66,40 +66,120 @@ fn chain_open_single_file_matches_open_list() {
     assert_eq!(b.file_count(), 1);
 }
 
+/// Write a file carrying one single-column bank, so a test can build a
+/// dictionary that disagrees with `dict()` in a chosen way.
+fn write_other(path: &std::path::Path, name: &str, group: u16, item: u8, col: &str) {
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        name,
+        group,
+        item,
+        [(col.into(), DataType::Int, 1)],
+    ));
+    let mut w = Writer::create(path).schemas(&d).build().unwrap();
+    for i in 0..5_i32 {
+        w.event(|ev| {
+            ev.bank(name, |b| {
+                b.row(|r| r.set(col, i).map(|_| ()))?;
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+}
+
 #[test]
-fn chain_open_validates_dict_match() {
+fn chain_open_unions_dictionaries_that_do_not_conflict() {
+    // A real run period is not dictionary-uniform: a pass-2 cook adds a bank,
+    // an MC file carries MC::Lund. A bank simply being absent from a file is
+    // something the read path already handles, so opening these together is
+    // allowed and `schemas()` reports the union.
     let dir = tempfile::tempdir().unwrap();
     let p1 = dir.path().join("a.hipo");
     let p2 = dir.path().join("b.hipo");
-    // File 1: standard dict.
     write_file(&p1, &dict(), 0, 5);
-    // File 2: completely different dict (different schemas).
-    {
-        let mut d2 = Dict::new();
-        d2.add(Schema::from_columns(
-            "OTHER::Thing",
-            1,
-            1,
-            [("v".into(), DataType::Int, 1)],
-        ));
-        let mut w = Writer::create(&p2).schemas(&d2).build().unwrap();
-        for i in 0..5_i32 {
-            w.event(|ev| {
-                ev.bank("OTHER::Thing", |b| {
-                    b.row(|r| r.set("v", i).map(|_| ()))?;
-                    Ok(())
-                })?;
-                Ok(())
-            })
-            .unwrap();
-        }
-        w.finish().unwrap();
+    write_other(&p2, "OTHER::Thing", 400, 1, "v");
+
+    let chain = Chain::open([&p1, &p2]).unwrap();
+    assert_eq!(chain.event_count(), 10);
+    let names: Vec<&str> = chain.schemas().iter().map(|s| s.name()).collect();
+    for want in ["REC::Event", "REC::Particle", "OTHER::Thing"] {
+        assert!(names.contains(&want), "union missing {want}: {names:?}");
     }
-    let err = Chain::open([&p1, &p2]).unwrap_err();
-    let msg = err.to_string();
+
+    // A bank absent from a file yields empty entries for that file's events,
+    // not an error and not a short result.
+    let cols = chain
+        .read_columns(&[("OTHER::Thing", &["v"][..])], None, 1)
+        .unwrap();
+    assert_eq!(
+        cols[0].offsets.len(),
+        11,
+        "one offset per event across both files"
+    );
+    assert_eq!(
+        cols[0].total_rows(),
+        5,
+        "only the file declaring the bank contributes rows"
+    );
+}
+
+#[test]
+fn chain_open_accepts_dictionaries_that_differ_only_in_order() {
+    // Nothing makes a dictionary's write order meaningful, but the old
+    // equality compared a positional Vec plus index tables keyed on insertion
+    // position, so this pair used to be rejected.
+    let dir = tempfile::tempdir().unwrap();
+    let p1 = dir.path().join("a.hipo");
+    let p2 = dir.path().join("b.hipo");
+    let forward = dict();
+    let mut reversed = Dict::new();
+    for s in forward.iter().collect::<Vec<_>>().into_iter().rev() {
+        reversed.add(s.clone());
+    }
+    assert_ne!(forward, reversed, "the two orders really do differ");
+    write_file(&p1, &forward, 0, 5);
+    write_file(&p2, &reversed, 5, 5);
+
+    let chain = Chain::open([&p1, &p2]).unwrap();
+    assert_eq!(chain.event_count(), 10);
+    assert_eq!(chain.schemas().len(), 2);
+}
+
+#[test]
+fn chain_open_rejects_a_bank_redefined_with_another_layout() {
+    // Same name, different columns: reading them together would decode one
+    // file's bytes against the other's column offsets.
+    let dir = tempfile::tempdir().unwrap();
+    let p1 = dir.path().join("a.hipo");
+    let p2 = dir.path().join("b.hipo");
+    write_file(&p1, &dict(), 0, 5);
+    write_other(&p2, "REC::Particle", 300, 1, "totally_different");
+
+    let msg = Chain::open([&p1, &p2]).unwrap_err().to_string();
     assert!(
-        msg.contains("different dictionary"),
+        msg.contains("REC::Particle") && msg.contains("different layout"),
         "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn chain_open_rejects_a_reused_bank_id() {
+    // Different names sharing one (group, item). Banks are located by id on the
+    // columnar path, so this would silently decode one bank as the other —
+    // wrong numbers rather than an error, which is the worst outcome available.
+    let dir = tempfile::tempdir().unwrap();
+    let p1 = dir.path().join("a.hipo");
+    let p2 = dir.path().join("b.hipo");
+    write_file(&p1, &dict(), 0, 5);
+    write_other(&p2, "IMPOSTOR::Bank", 300, 1, "v");
+
+    let msg = Chain::open([&p1, &p2]).unwrap_err().to_string();
+    assert!(
+        msg.contains("IMPOSTOR::Bank") && msg.contains("REC::Particle"),
+        "error should name both claimants: {msg}"
     );
 }
 

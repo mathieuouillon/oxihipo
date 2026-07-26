@@ -35,6 +35,25 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Changed
 
+- **A chain no longer requires every file to carry the same dictionary.** Opening
+  one refused unless each file's `Dict` compared *equal* to file 0's, and that
+  comparison was order-sensitive — `Dict` derives `PartialEq` over a positional
+  `Vec<Schema>` plus index tables whose values are insertion indices — so files
+  describing exactly the same banks in a different order were rejected, though
+  nothing about the format makes that order meaningful.
+
+  Real run periods are not dictionary-uniform either: a pass-2 cook adds a bank,
+  an MC file carries `MC::Lund`. `ox.open("…/pass2/*/dst/*.hipo")` died on that,
+  with no escape hatch. The chain now takes the **union**: `keys()` reports every
+  bank any file declares, and a bank absent from a file yields empty entries for
+  that file's events — which the read path already did for an absent bank.
+
+  Two conflicts are still hard errors, because a reader cannot survive them: one
+  name describing two layouts (columns would be decoded against the wrong
+  schema), and one `(group, item)` used for two banks. The second is the
+  dangerous one — the columnar path locates banks by id, so a collision would
+  decode one file's bytes with another file's schema and return wrong numbers
+  rather than fail. Both errors name the files and banks involved.
 - **The read path goes through a `ReadAt` seam** instead of holding an
   `Arc<File>` directly, so a source that is not a local file — an in-memory
   image, eventually HTTP range requests — only has to supply bytes at an offset.
