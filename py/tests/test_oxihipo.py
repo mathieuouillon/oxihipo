@@ -1770,3 +1770,148 @@ def test_to_vector_composes_with_a_real_read(chain):
     full = ak.zip({"pid": p.pid, "px": p.px, "py": p.px * 0, "pz": p.px * 0})
     v = oxihipo.to_vector(full, mass="pdg")
     assert ak.to_list(ak.num(v)) == ak.to_list(ak.num(p.px))
+
+
+# --- wave 4: pindex joins --------------------------------------------------
+
+
+@pytest.fixture
+def particles_and_calorimeter():
+    ak = pytest.importorskip("awkward")
+    # ev0: 2 particles; cal rows for p1, p0, p0 (deliberately out of order).
+    # ev1: 1 particle, no detector rows at all.
+    # ev2: 3 particles; one row points at a particle that does not exist.
+    part = ak.Array(
+        [[{"px": 1.0}, {"px": 2.0}], [{"px": 3.0}], [{"px": 4.0}, {"px": 5.0}, {"px": 6.0}]]
+    )
+    cal = ak.Array(
+        [
+            [
+                {"pindex": 1, "layer": 1, "energy": 0.5},
+                {"pindex": 0, "layer": 1, "energy": 0.3},
+                {"pindex": 0, "layer": 4, "energy": 0.7},
+            ],
+            [],
+            [
+                {"pindex": 2, "layer": 1, "energy": 0.9},
+                {"pindex": 9, "layer": 1, "energy": 99.0},
+            ],
+        ]
+    )
+    return part, cal
+
+
+def test_group_by_index_aligns_with_the_particles(particles_and_calorimeter):
+    ak = pytest.importorskip("awkward")
+    part, cal = particles_and_calorimeter
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    # One sublist per particle, in particle order — this is what makes the
+    # result attachable as a column beside px.
+    assert ak.to_list(ak.num(g)) == ak.to_list(ak.num(part))
+    assert ak.to_list(g.energy) == [[[0.3, 0.7], [0.5]], [[]], [[], [], [0.9]]]
+
+
+def test_group_by_index_reproduces_the_hand_written_mask(particles_and_calorimeter):
+    ak = pytest.importorskip("awkward")
+    part, cal = particles_and_calorimeter
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    # The form every tutorial writes, for particle 0 — the general result must
+    # agree with it where it applies.
+    by_hand = ak.sum(cal.energy[cal.pindex == 0], axis=1)
+    assert ak.to_list(ak.sum(g.energy, axis=-1)[:, 0]) == ak.to_list(by_hand)
+
+
+def test_group_by_index_keeps_file_order_within_a_particle(particles_and_calorimeter):
+    ak = pytest.importorskip("awkward")
+    part, cal = particles_and_calorimeter
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    # Particle 0 of event 0 owns rows written as layer 1 then layer 4; the
+    # regrouping sorts by particle, and must be stable within one.
+    assert ak.to_list(g.layer)[0][0] == [1, 4]
+
+
+def test_group_by_index_drops_an_out_of_range_pindex(particles_and_calorimeter):
+    ak = pytest.importorskip("awkward")
+    part, cal = particles_and_calorimeter
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    flat = [e for ev in ak.to_list(g.energy) for p in ev for e in p]
+    # pindex 9 in a 3-particle event names a particle that is not there.
+    # Clamping it onto particle 0 or the last particle would put 99 GeV of
+    # calorimeter energy on a real track.
+    assert 99.0 not in flat
+    assert ak.to_list(ak.sum(g.energy, axis=-1))[2] == [0.0, 0.0, 0.9]
+
+
+def test_group_by_index_composes_with_a_selection(particles_and_calorimeter):
+    ak = pytest.importorskip("awkward")
+    part, cal = particles_and_calorimeter
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    pcal = ak.sum(g[g.layer == 1].energy, axis=-1)
+    assert ak.to_list(pcal) == [[0.3, 0.5], [0.0], [0.0, 0.0, 0.9]]
+
+
+def test_group_by_index_handles_events_with_nothing_to_join(
+    particles_and_calorimeter,
+):
+    ak = pytest.importorskip("awkward")
+    part, cal = particles_and_calorimeter
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    # An event with no detector rows still contributes one empty sublist per
+    # particle, or the result stops lining up with the particle array.
+    assert ak.to_list(g.energy)[1] == [[]]
+
+
+def test_group_by_index_rejects_mismatched_inputs(particles_and_calorimeter):
+    ak = pytest.importorskip("awkward")
+    part, cal = particles_and_calorimeter
+    with pytest.raises(ValueError, match="pindex"):
+        oxihipo.group_by_index(cal[["layer", "energy"]], ak.num(part))
+    with pytest.raises(ValueError, match="same read"):
+        oxihipo.group_by_index(cal, ak.num(part)[:2])
+
+
+def test_group_by_index_on_a_written_file(tmp_path):
+    ak = pytest.importorskip("awkward")
+    # End to end through the writer and reader, so the join works on columns
+    # that actually came off disk.
+    path = tmp_path / "pindex.hipo"
+    with oxihipo.create(str(path)) as w:
+        w.new_bank("REC::Particle", {"px": "F"})
+        w.new_bank("REC::Calorimeter", {"pindex": "I", "energy": "F"})
+        w.extend(
+            {
+                "REC::Particle": {"px": ak.Array([[1.0, 2.0], [3.0]])},
+                "REC::Calorimeter": {
+                    "pindex": ak.Array([[1, 0], [0]]),
+                    "energy": ak.Array([[0.5, 0.25], [0.75]]),
+                },
+            }
+        )
+    f = oxihipo.open(str(path))
+    part = f.arrays("REC::Particle", ["px"])
+    cal = f.arrays("REC::Calorimeter", ["pindex", "energy"])
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    assert ak.to_list(ak.sum(g.energy, axis=-1)) == [[0.25, 0.5], [0.75]]
+
+
+def test_group_by_index_pads_trailing_particles_with_no_rows():
+    ak = pytest.importorskip("awkward")
+    # The join counts rows per particle, and a count array naturally stops at
+    # the last particle that *has* a row. If the final particles have none —
+    # ordinary, since not everything reaches a detector — the result would come
+    # back short and stop lining up with the particle array.
+    part = ak.Array([[{"px": 1.0}, {"px": 2.0}, {"px": 3.0}]])
+    cal = ak.Array([[{"pindex": 0, "energy": 0.5}]])
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    assert ak.to_list(ak.num(g)) == [3], "one sublist per particle, rows or not"
+    assert ak.to_list(ak.sum(g.energy, axis=-1)) == [[0.5, 0.0, 0.0]]
+
+
+def test_group_by_index_with_no_detector_rows_at_all():
+    ak = pytest.importorskip("awkward")
+    part = ak.Array([[{"px": 1.0}, {"px": 2.0}]])
+    cal = ak.Array([[]], with_name=None)
+    cal = ak.zip({"pindex": ak.Array([[]]), "energy": ak.Array([[]])})
+    g = oxihipo.group_by_index(cal, ak.num(part))
+    assert ak.to_list(ak.num(g)) == [2]
+    assert ak.to_list(ak.sum(g.energy, axis=-1)) == [[0.0, 0.0]]

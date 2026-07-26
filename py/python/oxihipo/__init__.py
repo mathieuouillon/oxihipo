@@ -66,6 +66,7 @@ __all__ = [
     "pdg_mass",
     "pdg_name",
     "to_vector",
+    "group_by_index",
     "__version__",
 ]
 
@@ -74,6 +75,7 @@ __all__ = [
 # is used.
 from ._pdg import PDG_MASS_GEV, PDG_NAME, pdg_mass, pdg_name  # noqa: E402
 from ._vector import to_vector  # noqa: E402
+from ._link import group_by_index  # noqa: E402
 
 # Library name → return type, for the `library=` annotations below.
 _Library = Literal["ak", "np", "pd", "arrow"]

@@ -169,6 +169,40 @@ nothing caches a derived copy:
 ox.PDG_MASS_GEV[9999] = 1.234    # some exotic your cook writes
 ```
 
+## Joining detector banks by `pindex`
+
+Detector banks don't repeat a particle's momentum — each row carries a `pindex`,
+the row number of the particle it belongs to within the same event. Joining on it
+is the CLAS12-specific skill, and by hand it answers for one particle at a time:
+
+```python
+ak.sum(cal.energy[cal.pindex == 0], axis=1)     # particle 0, and only particle 0
+```
+
+`group_by_index` does it for all of them at once, regrouping the bank so there is
+one sublist **per particle**, in particle order:
+
+```python
+part = f.arrays("REC::Particle", ["pid", "px", "py", "pz"])
+cal  = f.arrays("REC::Calorimeter", ["pindex", "layer", "energy"])
+
+by_particle = ox.group_by_index(cal, ak.num(part))   # events * particles * var * {...}
+part["cal_energy"] = ak.sum(by_particle.energy, axis=-1)
+```
+
+That last line is the payoff: `cal_energy` is now a per-particle column sitting
+beside `px`, so cuts and plots treat it like any other. Selections compose
+before the reduction:
+
+```python
+pcal = ak.sum(by_particle[by_particle.layer == 1].energy, axis=-1)
+```
+
+A row whose `pindex` points outside its event's particle range is **dropped**,
+not clamped — it names a particle that isn't there, and folding it onto particle
+0 would put its energy on a real track. Particles with no detector rows get an
+empty sublist, so the result always lines up with the particle array.
+
 ## Lorentz vectors
 
 Three momentum columns plus a mass is a four-vector, and

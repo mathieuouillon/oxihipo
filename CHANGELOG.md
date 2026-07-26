@@ -155,6 +155,20 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Added
 
+- **`ox.group_by_index(detector, counts)` — the `pindex` join.** Detector banks
+  point at their particle by row number, and the project's own tutorial calls
+  learning that join "the single most useful CLAS12-specific skill" — then does
+  it by hand, `ak.sum(cal.energy[cal.pindex == 0], axis=1)`, which answers for
+  one hardcoded particle.
+
+  This regroups a detector bank into one sublist per particle, in particle
+  order, so `ak.sum(by_particle.energy, axis=-1)` is a per-particle column that
+  can be attached beside `px`. Selections compose before the reduction.
+
+  A `pindex` outside its event's particle range is dropped rather than clamped:
+  it names a particle that is not there, and folding it onto particle 0 would
+  put that energy on a real track. Particles with no rows get an empty sublist,
+  so the result always aligns with the particle array.
 - **`ox.to_vector(array, mass=...)` — Lorentz-vector behaviours** over a
   momentum bank, via [vector](https://vector.readthedocs.io). `v.E`, `v.pt`,
   `v.eta`, `(v[:, 0] + v[:, 1]).mass` and `deltaR` on columns that were three
