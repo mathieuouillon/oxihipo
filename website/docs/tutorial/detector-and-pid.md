@@ -59,6 +59,29 @@ ECOUT `7` — which powers more refined cuts (e.g. a minimum PCAL energy):
 pcal = ak.sum(cal.energy[(cal.pindex == 0) & (cal.layer == 1)], axis=1)
 ```
 
+:::tip Beyond particle 0
+Every mask above is written for `pindex == 0` — the trigger electron. That is the
+right way to *learn* the join, and the wrong way to scale it: a hadron analysis
+needs the same quantity for every particle, and there is no `pindex == i` to
+loop over cheaply.
+
+`ox.group_by_index` does the join for all of them at once, regrouping the bank so
+each particle owns its rows:
+
+```python
+part = f.arrays("REC::Particle", ["pid", "px", "py", "pz"])
+by   = ox.group_by_index(cal, ak.num(part))          # events * particles * var * {...}
+
+part["cal_energy"] = ak.sum(by.energy, axis=-1)      # per particle, not per event
+part["pcal"]       = ak.sum(by[by.layer == 1].energy, axis=-1)
+```
+
+`cal_energy` is now a column beside `px`, so cuts and plots treat it like any
+other. `ox.link` goes further and wires both directions across a whole
+multi-bank read — see
+[joining detector banks by pindex](../python/reading.md#joining-detector-banks-by-pindex).
+:::
+
 ### Cherenkov — the other half
 
 The HTCC fires for electrons (and fast pions above ~4.9 GeV). Its photoelectron

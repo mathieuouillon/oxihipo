@@ -20,7 +20,7 @@ big the input:
 ```python
 import numpy as np, awkward as ak, oxihipo as ox
 
-BEAM, M_P = 10.604, 0.938272
+BEAM, M_P = 10.604, ox.pdg_mass(2212)
 q2_hist = np.zeros(100)
 edges = np.linspace(0, 10, 101)
 
@@ -127,13 +127,29 @@ def analyze(chunk):
     return histograms
 
 if __name__ == "__main__":
-    hists = accumulate(analyze(c) for c in
-                       ox.iterate("/data/rga/*.hipo", step_size="1 GB", workers=8))
+    hists = ox.open("/data/rga/*.hipo").map_reduce(
+        analyze, "REC::Particle", step_size="1 GB", workers=8
+    )
     save(hists)
 ```
 
 Same expressions you developed interactively, now folded over the whole dataset in
 bounded memory across many cores.
+
+:::tip Why `map_reduce` and not `iterate(workers=8)`
+Both read with eight processes, but `iterate` hands the *chunks* back and runs
+`analyze` in this one — so eight processes read while a single core does the
+physics, which is where a CLAS12 selection actually spends its time.
+`map_reduce` runs `analyze` in the worker and returns only what it produces. A
+filled histogram pickles to a few hundred bytes; the chunk behind it is a
+gigabyte.
+
+That is also why `analyze` is written as a pure function taking a chunk: it has
+to be picklable, so a module-level function, not a lambda or a closure. Results
+are combined with `reduce=` (default `operator.add`, which `hist.Hist` already
+implements) in event order. `workers=1` runs it all here, which is how to debug
+one.
+:::
 
 ## Going further
 

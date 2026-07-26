@@ -30,7 +30,7 @@ Both front ends read the same files through the same Rust core.
 | | Use it when | Start here |
 |---|---|---|
 | **Rust** | You want the fastest possible event loop, are writing files, or are building an analysis binary. | [Getting started → Rust](./getting-started/rust.md) |
-| **Python** | You want banks as [Awkward](https://awkward-array.org) arrays for interactive analysis, histogramming, or a notebook. | [Getting started → Python](./getting-started/python.md) |
+| **Python** | You want banks as [Awkward](https://awkward-array.org) arrays for interactive analysis, histogramming, or a notebook — plus PDG masses, Lorentz vectors, `pindex` joins and parallel `map_reduce` on top. | [Getting started → Python](./getting-started/python.md) |
 
 ## What makes it fast
 
@@ -57,6 +57,25 @@ That third point is why the headline number on this site is a 25× throughput
 improvement rather than a few percent. See
 [Benchmarks](./performance/benchmarks.md) for the full tables and the hardware
 they were measured on.
+
+## Past reading: the analysis layer
+
+Reading columns quickly is only useful if the physics on top is not the new
+bottleneck. On the Python side that means:
+
+- **`pdg_mass`** — masses from `pid`, vectorized, including the two CLAS12 codes
+  that break general PDG helpers (`0`, and the Geant3 nuclei `45`–`49`).
+- **`to_vector`** — Lorentz-vector behaviours, so `E`, `pt`, `eta` and invariant
+  mass come from [vector](https://vector.readthedocs.io) rather than by hand.
+- **`group_by_index` / `link`** — the `pindex` join between detector banks and
+  particles, for every particle at once instead of one hardcoded row.
+- **`map_reduce`** — runs *your* function in the worker processes, so the
+  analysis is parallel too, not just the read.
+- **`to_dask`** — a real `dask-awkward` source: lazy, with known entry
+  boundaries and column projection.
+
+See [Reading](./python/reading.md) and
+[Parallel reading](./python/parallel.md).
 
 ## Scope and status
 

@@ -104,7 +104,7 @@ M_X^2 = \big(k + p_{\text{target}} - k' - p_{\pi}\big)^2 \;\xrightarrow{\ ep\to 
 $$
 
 ```python
-M_P = 0.938272
+M_P = ox.pdg_mass(2212)
 beam_E, target_E = 10.604, M_P                    # target proton at rest
 
 miss_E  = beam_E + target_E - Ee_scattered - Eh   # Ee_scattered = |p| of e'

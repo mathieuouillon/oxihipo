@@ -15,7 +15,8 @@ Rust `oxihipo` core. A HIPO bank reads like a
 [uproot](https://uproot.readthedocs.io) jagged branch, and columns come back as
 [Awkward](https://awkward-array.org) arrays — built *zero-copy* from buffers the
 Rust side fills with the GIL released. Writing is columnar too: `create` a new
-file, or `recreate` to decorate an existing one with a derived bank.
+file, `recreate` to replace one, or `update` to decorate an existing file with a
+derived bank.
 
 ```python
 import oxihipo as ox
@@ -123,6 +124,81 @@ for chunk in ox.iterate("/volatile/run5042/*.hipo", "REC::Particle", step_size="
 > `if __name__ == "__main__":`. Workers are spawned (not forked — forking after
 > Rust's thread pool exists is unsafe), so each re-imports your script; without
 > the guard it would re-run at import. See [`examples/parallel.py`](https://github.com/mathieuouillon/oxihipo/blob/main/py/examples/parallel.py).
+
+## Analysis helpers
+
+Reading columns is half of an analysis. These turn them into physics without
+hand-written constants or joins.
+
+**PDG masses.** `pid` is a code; kinematics need a mass.
+
+```python
+p = f.arrays("REC::Particle", ["pid", "px", "py", "pz"])
+m = ox.pdg_mass(p.pid)                 # jagged, same shape as p.pid — GeV
+ox.pdg_name(11)                        # 'e-', for labels
+```
+
+Two CLAS12 cases that general PDG helpers get wrong are handled: `pid == 0` (a
+track the reconstruction couldn't identify — you get `nan`, not an exception) and
+`pid == 45`, which is a **Geant3** code, not a PDG one (45/46/47/49 =
+deuteron/triton/He4/He3). `ox.PDG_MASS_GEV` is the table and is user-extensible.
+
+**Lorentz vectors** via [vector](https://vector.readthedocs.io):
+
+```python
+v = ox.to_vector(p, mass="pdg")
+v.E, v.pt, v.eta, v.phi, v.mass
+(v[:, 0] + v[:, 1]).mass               # invariant mass
+v[:, 0].deltaR(v[:, 1])
+```
+
+Omitting `mass` gives a **3-vector**, not a massless 4-vector — an assumed-zero
+mass wearing a four-vector's interface is how a wrong invariant mass happens.
+
+**`pindex` joins.** Detector banks point at their particle by row number.
+`ox.link` wires both directions so the join is something you follow:
+
+```python
+ev = ox.link(f.arrays(["REC::Particle", "REC::Calorimeter"]))
+
+ev["REC::Calorimeter"].particle.px         # the particle each row belongs to
+ev["REC::Particle"]["REC::Calorimeter"]    # that particle's rows, grouped
+```
+
+`ox.group_by_index(cal, ak.num(part))` is the one-directional form, and turns a
+per-particle detector quantity into a column:
+
+```python
+part["cal_energy"] = ak.sum(ox.group_by_index(cal, ak.num(part)).energy, axis=-1)
+```
+
+An out-of-range `pindex` is never attached to whichever particle happens to be
+there: `None` going forward, dropped going back.
+
+**`map_reduce` — analysis in the workers.** `workers=` parallelises only the
+read; the physics still runs serially in the parent, which is where a CLAS12
+selection spends its time. `map_reduce` runs your function where the chunk
+already is and sends back only what it returns:
+
+```python
+import hist
+
+def analyze(chunk):                        # module level — it is pickled to workers
+    h = hist.Hist(hist.axis.Regular(100, 0, 10, name="Q2"))
+    h.fill(q2_of(chunk))
+    return h
+
+h = ox.open("/volatile/rga/*.hipo").map_reduce(analyze, "REC::Particle", workers=8)
+```
+
+A filled histogram pickles to a few hundred bytes against the hundreds of
+megabytes it was filled from. `reduce=` defaults to `operator.add`, which
+`hist.Hist`, `boost_histogram`, `np.ndarray` and numbers all implement; results
+are folded in **event order**, so a non-commutative `reduce` is safe.
+
+**Dask.** `f.to_dask(...)` is a real `dask-awkward` source: nothing is read to
+build the graph, entry boundaries are known (so `len()` and slices work), and
+columns are projected — `dak.sum(p.px)` reads `px`, not the whole bank.
 
 ## Filtering and skimming
 
@@ -291,8 +367,16 @@ ROOT/PyROOT, which is not on PyPI — install it via conda-forge
 (`conda install -c conda-forge root`) or your system. The `oxihipo[root]` extra
 covers only the awkward side, which you already have.
 
-The `[awkward]`, `[pandas]`, `[arrow]` and `[all]` extras still resolve, so old
-install commands keep working, but they are no-ops now.
+**Two extras are real**, being genuinely optional and not small:
+
+| extra | powers |
+|---|---|
+| `oxihipo[dask]` | `to_dask()` — a lazy `dask-awkward` array over the chain |
+| `oxihipo[vector]` | `to_vector()` — Lorentz-vector behaviours |
+
+`oxihipo[all]` pulls both. The `[awkward]`, `[pandas]` and `[arrow]` extras still
+resolve so old install commands keep working, but they are no-ops now — those
+ship by default.
 
 Nothing above is imported at `import oxihipo` time — each backend is imported on
 first use, so an unused one costs only disk. If you need the minimal footprint,

@@ -112,7 +112,7 @@ selection and beam energy are right.
 You'll want these variables on every event, so package them:
 
 ```python
-def dis_kinematics(ele, beam=10.604, target_mass=0.938272):
+def dis_kinematics(ele, beam=10.604, target_mass=M_P):
     Ee    = np.sqrt(ele.px**2 + ele.py**2 + ele.pz**2)
     theta = np.arccos(ele.pz / Ee)
     Q2 = 4 * beam * Ee * np.sin(theta / 2)**2

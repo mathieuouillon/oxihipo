@@ -53,11 +53,23 @@ PyROOT, which pip cannot install. Get it from conda-forge
 `oxihipo[root]` extra only covers the awkward side, which you already have.
 :::
 
+### Two extras that are not no-ops
+
+Everything in the table above ships by default. These two do not, being
+genuinely optional and not small:
+
+| extra | powers |
+|---|---|
+| `pip install oxihipo[dask]` | [`to_dask()`](../python/reading.md#dask) — a lazy `dask-awkward` array over the chain |
+| `pip install oxihipo[vector]` | [`to_vector()`](../python/reading.md#lorentz-vectors) — Lorentz-vector behaviours |
+
+`oxihipo[all]` pulls both.
+
 :::note
-The `[awkward]`, `[pandas]`, `[arrow]` and `[all]` extras still resolve so older
-install commands keep working — they are no-ops now. For a minimal footprint,
-`pip install --no-deps oxihipo numpy` still gives the `numpy()` /
-`read_columns()` paths.
+The `[awkward]`, `[pandas]` and `[arrow]` extras still resolve so older install
+commands keep working — those *are* no-ops now, since they ship by default. For a
+minimal footprint, `pip install --no-deps oxihipo numpy` still gives the
+`numpy()` / `read_columns()` paths.
 :::
 
 ## Read your first file
@@ -95,6 +107,21 @@ w.extend({"ML::pred": {"score": scores}})                 # one per source event
 w.close()
 ```
 
+Turn columns into physics without hardcoding constants or writing joins:
+
+```python
+p  = f.arrays("REC::Particle", ["pid", "px", "py", "pz"])
+v  = ox.to_vector(p, mass="pdg")     # masses from pid; E, pt, eta, invariant mass
+ev = ox.link(f.arrays(["REC::Particle", "REC::Calorimeter"]))
+ev["REC::Calorimeter"].particle.px   # follow pindex instead of masking by hand
+```
+
+And run the analysis itself across processes, not just the read:
+
+```python
+h = f.map_reduce(analyze, "REC::Particle", workers=8)   # analyze runs IN the worker
+```
+
 Runnable scripts live in
 [`py/examples/`](https://github.com/mathieuouillon/oxihipo/tree/main/py/examples)
 — each runs against the bundled sample with no arguments:
@@ -106,6 +133,9 @@ benchmarks.
 ## Where to go next
 
 - [Reading](../python/reading.md) — `arrays`, `array`, `numpy`, bank proxies, `library=`
+- [PDG masses](../python/reading.md#pdg-masses) — `pdg_mass` / `pdg_name`, and the two CLAS12 codes that break other helpers
+- [Lorentz vectors](../python/reading.md#lorentz-vectors) — `to_vector`: `E`, `pt`, `eta`, invariant mass
+- [`pindex` joins](../python/reading.md#joining-detector-banks-by-pindex) — `group_by_index` / `link`, detector banks ↔ particles
 - [Writing](../python/writing.md) — `create` / `recreate` / `update`, `new_bank` / `extend`
 - [RDataFrame](../python/rdataframe.md) — `rdataframe` / `iterate_rdataframe`, ROOT's declarative dataframe over HIPO
 - [Streaming](../python/streaming.md) — `iterate` and `step_size`

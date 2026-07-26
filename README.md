@@ -28,10 +28,17 @@ layers are intentionally out of scope.
   not the file; parallel scans hold one record per worker. Safe under a
   memory-capped batch allocation.
 - **One reader: `Chain`.** `Chain::open` takes a single file, a directory,
-  a glob, or a list of paths; multi-file chains share a single parsed
-  dictionary and stream records on demand. `chain.events()` yields
-  `Result<OwnedEvent>`, so a corrupt or truncated record surfaces as an
+  a glob, or a list of paths, and streams records on demand. `chain.events()`
+  yields `Result<OwnedEvent>`, so a corrupt or truncated record surfaces as an
   `Err` (propagate with `?`) rather than panicking.
+
+  Files in a chain need not declare the same banks — a run period rarely does,
+  since a pass-2 cook adds one and an MC file carries `MC::Lund`. The chain's
+  dictionary is the **union**, and a bank absent from a file yields empty
+  entries for that file's events. Only genuine conflicts are refused: one name
+  with two layouts, or one `(group, item)` claimed by two banks — the latter
+  matters because banks are located by id, so a collision would decode one
+  file's bytes against another's schema.
 - **Data-parallel scans.** `Chain::for_each(threads, f)` fans the work
   across cores out of order (`threads = 0` ⇒ all cores, `1` ⇒ sequential,
   `n` ⇒ exactly `n`); shared state in `f` is atomic or locked.
@@ -40,6 +47,12 @@ layers are intentionally out of scope.
   what replaying a list of interesting event indices actually looks like —
   costs a slice rather than a fresh whole-record decompression. Sequential
   iteration never consults the cache, so scan throughput is unchanged.
+
+  For a *list* of indices, `chain.read_columns_at(sel, entries, threads)` groups
+  them by the record that holds them, so each record is read once however the
+  list is ordered and the groups run in parallel. A scattered list used to cost
+  one whole-record decompression per index — 256 of them, 7 ms against 13 µs for
+  the same count ascending; now ~270 µs either way.
 - **Compression beyond stock LZ4 / Gzip.** Two opt-in format extensions
   that decompress only what an analysis actually reads: `Lz4PerBank`
   (per-bank streams) and `Lz4PerColumn` (per-column streams) — see the
@@ -195,9 +208,9 @@ for chunk in f.iterate("REC::Particle", step_size="200 MB"):   # bounded memory
 p = ox.arrays("/volatile/run5042/*.hipo", "REC::Particle", ["px"], workers=8)
 ```
 
-Writing is uproot-shaped and columnar too — `create` a new file, or `recreate`
-to **decorate** an existing one with a derived bank (an ML score, a computed
-kinematic) without rewriting the physics banks:
+Writing is uproot-shaped and columnar too — `create` a new file, `recreate` to
+replace one, or `update` to **decorate** an existing file with a derived bank (an
+ML score, a computed kinematic) without rewriting the physics banks:
 
 ```python
 w = ox.update("dst.hipo", "decorated.hipo")     # copies every event verbatim
@@ -205,6 +218,28 @@ w.new_bank("ML::pred", {"score": "F"})            # declare a new bank
 w.extend({"ML::pred": {"score": scores}})        # one float32 per event
 w.close()
 ```
+
+Past reading, the Python side turns columns into physics without hardcoded
+constants or hand-written joins:
+
+```python
+p  = f.arrays("REC::Particle", ["pid", "px", "py", "pz"])
+v  = ox.to_vector(p, mass="pdg")            # masses from pid; E, pt, eta, mass
+(v[:, 0] + v[:, 1]).mass                    # invariant mass
+
+ev = ox.link(f.arrays(["REC::Particle", "REC::Calorimeter"]))
+ev["REC::Calorimeter"].particle.px          # follow pindex, both directions
+ev["REC::Particle"]["REC::Calorimeter"]     # that particle's detector rows
+
+h = f.map_reduce(analyze, "REC::Particle", workers=8)   # analyze runs IN the worker
+arr = f.to_dask("REC::Particle")            # lazy dask-awkward, columns projected
+```
+
+`pdg_mass` handles the two CLAS12 codes that break general PDG helpers — `pid == 0`
+(an unidentified track, so `nan` rather than an exception) and the **Geant3** nuclei
+`45`–`49`, which are not PDG codes at all. `map_reduce` is the one that matters for
+scale: `workers=` parallelises only the read, leaving the physics on one core,
+where a CLAS12 selection actually spends its time.
 
 And for ROOT users, `rdataframe` hands a selection to
 [RDataFrame](https://root.cern/manual/data_frame/) via Awkward's generated
