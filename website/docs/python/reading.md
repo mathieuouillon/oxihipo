@@ -203,6 +203,35 @@ not clamped — it names a particle that isn't there, and folding it onto partic
 0 would put its energy on a real track. Particles with no detector rows get an
 empty sublist, so the result always lines up with the particle array.
 
+### Following the links instead of building them
+
+`ox.link` wires both directions across a whole multi-bank read at once, so the
+join becomes something you follow rather than something you write:
+
+```python
+ev = ox.link(f.arrays(["REC::Particle", "REC::Calorimeter", "REC::Event"]))
+
+ev["REC::Calorimeter"].particle.px        # the particle each cal row belongs to
+ev["REC::Particle"]["REC::Calorimeter"]   # that particle's cal rows, grouped
+```
+
+Banks with no `pindex` — an event-level bank in the same read — pass through
+untouched. A row whose `pindex` is out of range gets `None` going forward and is
+dropped going back; it is never attached to whichever particle happens to be
+there.
+
+The two directions do not cost the same, so `directions=` picks:
+
+| `directions=` | builds | cost |
+|---|---|---|
+| `"to_particle"` | `cal.particle` | **copies** the particle record onto every detector row |
+| `"to_detector"` | `part["REC::Calorimeter"]` | regroups, copies nothing |
+| `"both"` (default) | both | |
+
+A bank with ten times the particle rows carries ten copies of each momentum
+under `"to_particle"`, so on a wide DST it is worth asking for only the side you
+use.
+
 ## Lorentz vectors
 
 Three momentum columns plus a mass is a four-vector, and

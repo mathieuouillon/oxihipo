@@ -89,3 +89,100 @@ def group_by_index(detector: Any, counts: Any, *, index: str = "pindex") -> Any:
 
     grouped = ak.unflatten(flat[order], per_particle)
     return ak.unflatten(grouped, n_part)
+
+
+def link(
+    banks: Any,
+    *,
+    particles: str = "REC::Particle",
+    index: str = "pindex",
+    directions: str = "both",
+) -> Any:
+    """Wire the ``pindex`` cross-references across a multi-bank read.
+
+    `banks` is what ``arrays([...])`` returns — a record with one field per
+    bank. Every bank carrying an `index` column is linked to `particles` in both
+    directions, so the join stops being something you write and becomes
+    something you follow::
+
+        ev = ox.link(f.arrays(["REC::Particle", "REC::Calorimeter"]))
+
+        ev["REC::Calorimeter"].particle.px      # the particle each row belongs to
+        ev["REC::Particle"]["REC::Calorimeter"] # that particle's rows, grouped
+
+    `directions` picks which links to build, because they do not cost the same:
+
+    - ``"to_particle"`` — only the detector→particle side. This one *duplicates*
+      the particle record onto every detector row, so a bank with ten times the
+      rows carries ten copies of each momentum.
+    - ``"to_detector"`` — only the particle→detector side, which regroups the
+      detector rows without copying anything (see :func:`group_by_index`).
+    - ``"both"`` (default) — both.
+
+    A row whose `index` is out of range gets ``None`` on the detector→particle
+    side, and is dropped on the other; either way it is never silently attached
+    to the wrong particle. Banks with no `index` column are passed through
+    untouched, so an event-level bank in the same read is not a problem.
+    """
+    import awkward as ak
+
+    if directions not in ("both", "to_particle", "to_detector"):
+        raise ValueError(
+            f"directions must be 'both', 'to_particle' or 'to_detector', "
+            f"not {directions!r}"
+        )
+
+    fields = ak.fields(banks)
+    if particles not in fields:
+        raise ValueError(
+            f"link() needs the {particles!r} bank in the read to link against; "
+            f"got {sorted(fields)}"
+        )
+
+    part = banks[particles]
+    n_part = np.asarray(ak.num(part), dtype=np.int64)
+    linkable = [
+        b for b in fields if b != particles and index in ak.fields(banks[b])
+    ]
+
+    out = {b: banks[b] for b in fields}
+    for b in linkable:
+        det = banks[b]
+        if directions in ("both", "to_particle"):
+            out[b] = ak.with_field(det, _gather_particle(det, part, n_part, index), "particle")
+        if directions in ("both", "to_detector"):
+            out[particles] = ak.with_field(
+                out[particles], group_by_index(det, n_part, index=index), b
+            )
+    return ak.zip(out, depth_limit=1)
+
+
+def _gather_particle(detector: Any, part: Any, n_part: np.ndarray, index: str) -> Any:
+    """For each detector row, the particle it points at (``None`` if invalid).
+
+    Done as a flat gather through the same global-slot index space
+    :func:`group_by_index` uses, rather than a jagged ``part[det.pindex]``:
+    that form raises on an out-of-range index and has no natural answer for an
+    event with no particles at all.
+    """
+    import awkward as ak
+
+    n_det = np.asarray(ak.num(detector), dtype=np.int64)
+    part_offsets = np.zeros(len(n_part) + 1, dtype=np.int64)
+    np.cumsum(n_part, out=part_offsets[1:])
+    event_of_row = np.repeat(np.arange(len(n_det), dtype=np.int64), n_det)
+    pidx = np.asarray(ak.flatten(detector[index]), dtype=np.int64)
+
+    valid = (pidx >= 0) & (pidx < n_part[event_of_row])
+    # Clamp before gathering so the invalid rows index *something*; the mask
+    # below is what actually removes them.
+    slot = np.where(valid, part_offsets[event_of_row] + pidx, 0)
+
+    flat_part = ak.flatten(part)
+    if len(flat_part) == 0:
+        # No particles anywhere: every row is unlinked, and a gather would have
+        # nothing to index.
+        return ak.unflatten(ak.Array([None] * len(pidx)), n_det)
+
+    gathered = ak.mask(flat_part[slot], valid)
+    return ak.unflatten(gathered, n_det)

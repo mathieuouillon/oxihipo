@@ -2029,3 +2029,132 @@ def test_map_reduce_on_an_empty_range_needs_an_initial(chain):
         )
         == 7
     )
+
+
+# --- wave 4: pindex cross-references ---------------------------------------
+
+
+@pytest.fixture
+def linked_banks():
+    ak = pytest.importorskip("awkward")
+    return ak.zip(
+        {
+            "REC::Particle": ak.Array(
+                [[{"pid": 11, "px": 0.5}, {"pid": 211, "px": 1.0}], [{"pid": 2212, "px": 0.2}]]
+            ),
+            "REC::Calorimeter": ak.Array(
+                [
+                    [
+                        {"pindex": 1, "layer": 1, "energy": 0.5},
+                        {"pindex": 0, "layer": 1, "energy": 0.31},
+                        {"pindex": 0, "layer": 4, "energy": 0.72},
+                    ],
+                    [{"pindex": 9, "layer": 1, "energy": 9.9}],
+                ]
+            ),
+            "REC::Event": ak.Array([[{"evno": 1}], [{"evno": 2}]]),
+        },
+        depth_limit=1,
+    )
+
+
+def test_link_resolves_a_detector_row_to_its_particle(linked_banks):
+    ak = pytest.importorskip("awkward")
+    ev = oxihipo.link(linked_banks)
+    cal = ev["REC::Calorimeter"]
+    assert ak.to_list(cal.particle.pid) == [[211, 11, 11], [None]]
+    assert ak.to_list(cal.particle.px) == [[1.0, 0.5, 0.5], [None]]
+
+
+def test_link_resolves_a_particle_to_its_detector_rows(linked_banks):
+    ak = pytest.importorskip("awkward")
+    ev = oxihipo.link(linked_banks)
+    part = ev["REC::Particle"]
+    assert "REC::Calorimeter" in ak.fields(part)
+    per_particle = ak.sum(part["REC::Calorimeter"].energy, axis=-1)
+    assert ak.to_list(per_particle) == [[1.03, 0.5], [0.0]]
+
+
+def test_link_marks_an_out_of_range_pindex_rather_than_guessing(linked_banks):
+    ak = pytest.importorskip("awkward")
+    ev = oxihipo.link(linked_banks)
+    # pindex 9 in a one-particle event names a particle that is not there.
+    # Forward it is None; backward it is dropped. Either way it never attaches
+    # 9.9 GeV to the proton that happens to be there.
+    assert ak.to_list(ev["REC::Calorimeter"].particle.pid)[1] == [None]
+    assert ak.to_list(ak.sum(ev["REC::Particle"]["REC::Calorimeter"].energy, axis=-1))[1] == [0.0]
+
+
+def test_link_leaves_banks_without_a_pindex_alone(linked_banks):
+    ak = pytest.importorskip("awkward")
+    ev = oxihipo.link(linked_banks)
+    # An event-level bank in the same read has no pindex and must survive as-is.
+    assert ak.fields(ev["REC::Event"]) == ["evno"]
+    assert ak.to_list(ev["REC::Event"].evno) == [[1], [2]]
+
+
+def test_link_directions_control_which_side_is_built(linked_banks):
+    ak = pytest.importorskip("awkward")
+    fwd = oxihipo.link(linked_banks, directions="to_particle")
+    assert "particle" in ak.fields(fwd["REC::Calorimeter"])
+    # The expensive direction copies a particle record onto every detector row,
+    # so it must be possible to ask for only the other one.
+    assert "REC::Calorimeter" not in ak.fields(fwd["REC::Particle"])
+
+    back = oxihipo.link(linked_banks, directions="to_detector")
+    assert "particle" not in ak.fields(back["REC::Calorimeter"])
+    assert "REC::Calorimeter" in ak.fields(back["REC::Particle"])
+
+    with pytest.raises(ValueError, match="directions must be"):
+        oxihipo.link(linked_banks, directions="sideways")
+
+
+def test_link_requires_the_particle_bank(linked_banks):
+    pytest.importorskip("awkward")
+    with pytest.raises(ValueError, match="REC::Particle"):
+        oxihipo.link(linked_banks[["REC::Calorimeter", "REC::Event"]])
+
+
+def test_link_handles_an_event_with_no_particles():
+    ak = pytest.importorskip("awkward")
+    banks = ak.zip(
+        {
+            # An empty particle bank still has its columns — `var * unknown`
+            # would be a fixture artefact, not something a read produces.
+            "REC::Particle": ak.zip(
+                {"pid": ak.Array([[], []]), "px": ak.Array([[], []])}
+            ),
+            "REC::Calorimeter": ak.Array([[{"pindex": 0, "energy": 1.0}], []]),
+        },
+        depth_limit=1,
+    )
+    # A flat gather has nothing to index when no event has a particle; every
+    # row is simply unlinked.
+    ev = oxihipo.link(banks)
+    assert ak.to_list(ev["REC::Calorimeter"].particle) == [[None], []]
+
+
+def test_link_round_trips_through_a_written_file(tmp_path):
+    ak = pytest.importorskip("awkward")
+    path = tmp_path / "linked.hipo"
+    with oxihipo.create(str(path)) as w:
+        w.new_bank("REC::Particle", {"pid": "I", "px": "F"})
+        w.new_bank("REC::Calorimeter", {"pindex": "I", "energy": "F"})
+        w.extend(
+            {
+                "REC::Particle": {
+                    "pid": ak.Array([[11, 211], [2212]]),
+                    "px": ak.Array([[0.5, 1.0], [0.2]]),
+                },
+                "REC::Calorimeter": {
+                    "pindex": ak.Array([[1, 0], [0]]),
+                    "energy": ak.Array([[0.5, 0.25], [0.75]]),
+                },
+            }
+        )
+    f = oxihipo.open(str(path))
+    ev = oxihipo.link(f.arrays(["REC::Particle", "REC::Calorimeter"]))
+    assert ak.to_list(ev["REC::Calorimeter"].particle.pid) == [[211, 11], [2212]]
+    assert ak.to_list(
+        ak.sum(ev["REC::Particle"]["REC::Calorimeter"].energy, axis=-1)
+    ) == [[0.25, 0.5], [0.75]]

@@ -174,6 +174,19 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   and the parent holds one accumulator rather than every chunk's result.
   `initial=` seeds it and defines the empty-selection answer; without one an
   empty range raises instead of returning `None`.
+- **`ox.link(banks)` — `pindex` cross-references across a whole read.** Wires
+  both directions at once, so `ev["REC::Calorimeter"].particle.px` and
+  `ev["REC::Particle"]["REC::Calorimeter"]` both work and the join becomes
+  something you follow rather than something you write. Banks with no `pindex`
+  pass through untouched.
+
+  `directions=` exists because the two sides do not cost the same: the
+  detector→particle side copies a particle record onto every detector row, which
+  on a bank with ten times the rows is ten copies of each momentum. The other
+  side regroups and copies nothing.
+
+  An out-of-range `pindex` is `None` going forward and dropped going back —
+  never attached to whichever particle happens to be there.
 - **`ox.group_by_index(detector, counts)` — the `pindex` join.** Detector banks
   point at their particle by row number, and the project's own tutorial calls
   learning that join "the single most useful CLAS12-specific skill" — then does
