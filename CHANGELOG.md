@@ -93,6 +93,12 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Fixed
 
+- **`to_dask` no longer builds a degenerate partition for an empty range.**
+  `entry_start == entry_stop` landing *inside* a record produced a zero-width
+  batch rather than none, so the array got a partition spanning no events and
+  two equal divisions — which dask requires to be increasing. The same range
+  past the end of the chain already raised; both now do. Found while giving
+  `map_reduce` the same batch logic.
 - **`read_columns_at` no longer re-reads a record per index.** Every lookup went
   through `Chain::event` and its single-slot record cache, so the cost depended
   entirely on the order of the list: 256 indices that happened to ascend cost
@@ -155,6 +161,19 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Added
 
+- **`Chain.map_reduce(fn, ...)` — run the analysis in the workers.** `workers=`
+  on `arrays`/`iterate` parallelises only the read: workers hand raw buffers
+  back and the parent does the physics serially, which for a CLAS12 selection is
+  where the time goes. `map_reduce` runs `fn` on each chunk *in* the worker and
+  sends back only its return value — a filled `hist.Hist` pickles to a few
+  hundred bytes against the hundreds of megabytes it was filled from.
+
+  `reduce=` defaults to `operator.add`, which `hist.Hist`, `boost_histogram`,
+  `np.ndarray` and numbers already implement. Results are folded in **event
+  order** rather than completion order, so a non-commutative `reduce` is safe,
+  and the parent holds one accumulator rather than every chunk's result.
+  `initial=` seeds it and defines the empty-selection answer; without one an
+  empty range raises instead of returning `None`.
 - **`ox.group_by_index(detector, counts)` — the `pindex` join.** Detector banks
   point at their particle by row number, and the project's own tutorial calls
   learning that join "the single most useful CLAS12-specific skill" — then does

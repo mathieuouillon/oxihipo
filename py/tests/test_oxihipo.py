@@ -15,6 +15,8 @@ import os
 import pathlib
 import shutil
 
+import operator
+
 import numpy as np
 import pytest
 
@@ -1237,6 +1239,18 @@ def test_to_dask_unprojected_read_is_unchanged(chain):
     assert ak.to_list(lazy.compute()) == ak.to_list(chain.arrays())
 
 
+def test_to_dask_refuses_a_range_that_collapses_inside_a_record(chain):
+    dak = pytest.importorskip("dask_awkward")
+    # `_iter_batches` emits a zero-width batch when start == stop lands inside a
+    # record, rather than emitting nothing. Left in, that is a partition
+    # spanning no events and two equal divisions — and dask requires divisions
+    # to increase. Same answer as a range past the end of the chain.
+    with pytest.raises(ValueError, match="nothing to read"):
+        chain.to_dask("REC::Particle", entry_start=5, entry_stop=5)
+    with pytest.raises(ValueError, match="nothing to read"):
+        chain.to_dask("REC::Particle", entry_start=99, entry_stop=99)
+
+
 def test_to_dask_reports_necessary_columns(chain):
     dak = pytest.importorskip("dask_awkward")
     lazy = chain.to_dask("REC::Particle", step_size=2)
@@ -1915,3 +1929,103 @@ def test_group_by_index_with_no_detector_rows_at_all():
     g = oxihipo.group_by_index(cal, ak.num(part))
     assert ak.to_list(ak.num(g)) == [2]
     assert ak.to_list(ak.sum(g.energy, axis=-1)) == [[0.0, 0.0]]
+
+
+# --- wave 4: map_reduce ----------------------------------------------------
+#
+# These run in spawned processes, so the callables must be importable by name —
+# module level, not closures. That is the same constraint users face.
+
+
+def _mr_count(chunk):
+    import awkward as ak
+
+    return int(ak.sum(ak.num(chunk.pid)))
+
+
+def _mr_sum_px(chunk):
+    import awkward as ak
+
+    return float(ak.sum(ak.flatten(chunk.px)))
+
+
+def _mr_pid(chunk):
+    import os
+
+    return {os.getpid()}
+
+
+def _mr_order(chunk):
+    import awkward as ak
+
+    # First pid of the chunk, as a one-element list — concatenation is order
+    # sensitive, so this shows whether results were folded in event order.
+    flat = ak.flatten(chunk.pid)
+    return [int(flat[0])] if len(flat) else []
+
+
+def test_map_reduce_matches_an_eager_read(chain):
+    ak = pytest.importorskip("awkward")
+    want = int(ak.sum(ak.num(chain.arrays("REC::Particle", ["pid"]).pid)))
+    assert chain.map_reduce(_mr_count, "REC::Particle", ["pid"], step_size=3, workers=1) == want
+
+
+def test_map_reduce_agrees_across_worker_counts(chain):
+    ak = pytest.importorskip("awkward")
+    serial = chain.map_reduce(_mr_sum_px, "REC::Particle", ["px"], step_size=3, workers=1)
+    for w in (2, 0):
+        got = chain.map_reduce(_mr_sum_px, "REC::Particle", ["px"], step_size=3, workers=w)
+        assert got == pytest.approx(serial), f"workers={w}"
+
+
+def test_map_reduce_runs_the_function_in_the_workers(chain):
+    pytest.importorskip("awkward")
+    # The whole point: `fn` executes where the chunk is, so only its return
+    # value crosses back. If it ran in the parent this would be {os.getpid()}.
+    pids = chain.map_reduce(
+        _mr_pid, "REC::Particle", ["pid"], step_size=2, workers=2,
+        reduce=set.union, initial=set(),
+    )
+    assert os.getpid() not in pids
+    assert len(pids) >= 1
+
+
+def test_map_reduce_folds_in_event_order(chain):
+    pytest.importorskip("awkward")
+    # `reduce` is not required to be commutative, so results must be combined in
+    # submission order rather than as they happen to complete.
+    parallel = chain.map_reduce(
+        _mr_order, "REC::Particle", ["pid"], step_size=1, workers=3,
+        reduce=operator.add, initial=[],
+    )
+    serial = chain.map_reduce(
+        _mr_order, "REC::Particle", ["pid"], step_size=1, workers=1,
+        reduce=operator.add, initial=[],
+    )
+    assert parallel == serial
+
+
+def test_map_reduce_uses_initial_as_the_accumulator(chain):
+    pytest.importorskip("awkward")
+    base = chain.map_reduce(_mr_count, "REC::Particle", ["pid"], step_size=3, workers=1)
+    with_initial = chain.map_reduce(
+        _mr_count, "REC::Particle", ["pid"], step_size=3, workers=1, initial=1000
+    )
+    assert with_initial == base + 1000
+
+
+def test_map_reduce_on_an_empty_range_needs_an_initial(chain):
+    pytest.importorskip("awkward")
+    # With nothing read there is no value to invent, so say so rather than
+    # return a silent None.
+    with pytest.raises(ValueError, match="no `initial="):
+        chain.map_reduce(
+            _mr_count, "REC::Particle", ["pid"], entry_start=5, entry_stop=5, workers=1
+        )
+    assert (
+        chain.map_reduce(
+            _mr_count, "REC::Particle", ["pid"],
+            entry_start=5, entry_stop=5, workers=1, initial=7,
+        )
+        == 7
+    )

@@ -159,3 +159,35 @@ def parallel_iterate(source, require, record_tag, event_tag, event_tag_any, sele
             if nb is not None:
                 submit(nb)
             yield assemble(res), b[0], b[1], b[2]
+
+
+def _map_range(spec, fn, banks, columns, kw, start, stop):
+    """Worker entry point for :meth:`oxihipo.Chain.map_reduce`.
+
+    Unlike :func:`_read_range`, this assembles the chunk *and* runs the user's
+    function here, in the worker. Only `fn`'s return value crosses the process
+    boundary — which is the whole point: a histogram pickles to a few hundred
+    bytes where the chunk it was filled from is hundreds of megabytes.
+    """
+    chain = _worker_chain(*spec)
+    chunk = chain.arrays(banks, columns, entry_start=start, entry_stop=stop, **kw)
+    return fn(chunk)
+
+
+def parallel_map_reduce(spec, fn, banks, columns, kw, batches, workers, reduce, initial):
+    """Run `fn` over every batch across `workers` processes and combine.
+
+    Results are consumed in **submission order**, not completion order, and
+    folded one at a time. Order matters because `reduce` is not required to be
+    commutative, and folding as they arrive keeps the parent holding one
+    accumulator rather than every chunk's result at once.
+    """
+    acc = initial
+    with _pool(workers) as ex:
+        futs = [
+            ex.submit(_map_range, spec, fn, banks, columns, kw, s, e) for s, e in batches
+        ]
+        for f in futs:
+            r = f.result()
+            acc = r if acc is None else reduce(acc, r)
+    return acc

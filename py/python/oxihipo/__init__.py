@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import operator
 import os
 import re
 import warnings
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, overload
 
@@ -866,9 +867,14 @@ class Chain:
         total = c.num_entries
         lo = 0 if entry_start is None else max(0, entry_start)
         hi = total if entry_stop is None else min(total, entry_stop)
+        # Drop zero-width batches: `_iter_batches` emits one when the requested
+        # range collapses inside a record (entry_start == entry_stop), and a
+        # partition spanning no events would give dask two equal divisions,
+        # which are required to increase.
         batches = [
             (start, stop)
             for start, stop, _fi in self._iter_batches(spans, sizes, mode, size, lo, hi)
+            if stop > start
         ]
         if not batches:
             raise ValueError("nothing to read: the requested range is empty")
@@ -914,6 +920,110 @@ class Chain:
             meta=ak.Array(form.length_zero_array(highlevel=False).to_typetracer(forget_length=True)),
             divisions=divisions,
             label="from-hipo",
+        )
+
+    def map_reduce(
+        self,
+        fn: "Callable[[Any], Any]",
+        banks: "str | Sequence[str] | None" = None,
+        columns: "Sequence[str] | None" = None,
+        *,
+        step_size: "int | str" = "1 GB",
+        workers: int = 0,
+        reduce: "Callable[[Any, Any], Any]" = operator.add,
+        initial: "Any | None" = None,
+        filter_name: "str | Sequence[str] | None" = None,
+        cut: str | None = None,
+        entry_start: int | None = None,
+        entry_stop: int | None = None,
+        threads: int = 1,
+    ) -> "Any":
+        """Run `fn` on each chunk **inside the worker**, and combine the results.
+
+        ``workers=`` on :meth:`arrays` and :meth:`iterate` parallelises the
+        *read* — the workers hand raw buffers back and the parent does the
+        physics, serially. For a CLAS12 selection the Awkward expressions
+        dominate, not the decode, so that is an I/O trick rather than
+        parallelism. Here `fn` runs where the chunk already is, and only what it
+        returns is sent back::
+
+            import hist
+
+            def analyze(chunk):
+                h = hist.Hist(hist.axis.Regular(100, 0, 10, name="Q2"))
+                h.fill(q2_of(chunk))
+                return h
+
+            h = ox.open("/volatile/rga/*.hipo").map_reduce(
+                analyze, "REC::Particle", workers=8
+            )
+
+        A filled histogram pickles to a few hundred bytes where the chunk behind
+        it is hundreds of megabytes, which is what makes this worth doing.
+
+        `reduce` defaults to ``operator.add`` — what ``hist.Hist``,
+        ``boost_histogram``, ``np.ndarray`` and a plain number all implement.
+        Give `initial` to start from a fixed accumulator (and to define the
+        answer when the selection is empty). Results are folded in **event
+        order**, so a non-commutative `reduce` still gets them the right way
+        round.
+
+        `fn` is sent to another process, so it has to be picklable: a
+        module-level function, not a lambda or a closure. ``workers=1`` runs
+        everything in this process instead, which is the way to debug one.
+
+        The read arguments mirror :meth:`iterate` — `banks`, `columns`,
+        `filter_name`, `cut`, `entry_start`/`entry_stop`, `step_size`. `threads`
+        defaults to ``1`` because the workers are already the parallelism.
+        """
+        c = self._reader()
+        mode, size = _parse_step_size(step_size)
+        spans = self._record_spans()
+        sizes = self._record_decompressed_sizes() if mode == "bytes" else None
+        total = c.num_entries
+        lo = 0 if entry_start is None else max(0, entry_start)
+        hi = total if entry_stop is None else min(total, entry_stop)
+        # Zero-width batches are dropped, so an empty range behaves the same
+        # whether it collapsed inside a record or fell past the end — otherwise
+        # `fn` would be handed an empty chunk in one case and not the other.
+        batches = [
+            (start, stop)
+            for start, stop, _fi in self._iter_batches(spans, sizes, mode, size, lo, hi)
+            if stop > start
+        ]
+        kw: dict[str, Any] = {
+            "filter_name": filter_name,
+            "cut": cut,
+            "library": "ak",
+            "threads": threads,
+        }
+
+        if not batches:
+            # Nothing to read. `initial` is the only defensible answer, and
+            # without one there is no value to invent.
+            if initial is None:
+                raise ValueError(
+                    "nothing to read: the requested range is empty, and no "
+                    "`initial=` was given to define the result"
+                )
+            return initial
+
+        if workers == 1:
+            acc = initial
+            for start, stop in batches:
+                r = fn(self.arrays(banks, columns, entry_start=start, entry_stop=stop, **kw))
+                acc = r if acc is None else reduce(acc, r)
+            return acc
+
+        from . import _parallel
+
+        spec = (
+            self._source, self._require, self._record_tag,
+            self._event_tag, self._event_tag_any,
+        )
+        n = len(batches) if workers == 0 else workers
+        return _parallel.parallel_map_reduce(
+            spec, fn, banks, columns, kw, batches, max(1, n), reduce, initial
         )
 
     def to_parquet(

@@ -80,3 +80,48 @@ one you asked for. Converting to
 [`Lz4PerBank`](../performance/compression.md) attacks that directly, and the two
 compose: on ifarm the format change is worth considerably more than the process
 count.
+
+## `map_reduce` — parallelise the physics too
+
+`workers=` on `arrays` / `iterate` parallelises the **read**: the workers hand
+raw buffers back and the parent does the analysis, serially. For a CLAS12
+selection the Awkward expressions dominate, not the decode — so on its own that
+is an I/O trick, not parallelism.
+
+`map_reduce` runs your function where the chunk already is, and sends back only
+what it returns:
+
+```python
+import hist
+
+def analyze(chunk):                      # module level — it is pickled to workers
+    h = hist.Hist(hist.axis.Regular(100, 0, 10, name="Q2"))
+    h.fill(q2_of(chunk))
+    return h
+
+h = ox.open("/volatile/rga/*.hipo").map_reduce(analyze, "REC::Particle", workers=8)
+hep.histplot(h)
+```
+
+That histogram pickles to a few hundred bytes; the chunk it was filled from is
+hundreds of megabytes. That asymmetry is the point.
+
+`reduce=` defaults to `operator.add`, which `hist.Hist`, `boost_histogram`,
+`np.ndarray`, numbers, lists and `collections.Counter` all implement. For
+anything else, pass your own:
+
+```python
+pids = f.map_reduce(collect_pids, "REC::Particle", reduce=set.union, initial=set())
+```
+
+Results are folded in **event order**, not completion order, so a
+non-commutative `reduce` still gets them the right way round. `initial=` seeds
+the accumulator and defines the answer when the selection is empty — without it,
+an empty range raises rather than returning a silent `None`.
+
+:::warning `fn` is pickled
+It runs in another process, so it must be importable by name: a module-level
+function, not a lambda or a closure. `workers=1` runs everything in-process,
+which is how to debug one.
+:::
+
