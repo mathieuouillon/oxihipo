@@ -224,7 +224,7 @@ fn bench_read_columns_at(c: &mut Criterion) {
             g.bench_function(format!("{name}/{pattern}"), |b| {
                 b.iter(|| {
                     let cols = chain
-                        .read_columns_at(&[("REC::Particle", &["pid", "px"][..])], idx)
+                        .read_columns_at(&[("REC::Particle", &["pid", "px"][..])], idx, 1)
                         .unwrap();
                     black_box(cols.len())
                 })

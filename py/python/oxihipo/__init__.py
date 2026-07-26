@@ -709,11 +709,11 @@ class Chain:
           contiguous range — the columnar way to replay a list of interesting
           events found by an earlier pass. Output is aligned 1:1 with the list,
           so your order and any duplicates are preserved, and an out-of-range
-          index yields an empty entry rather than an error. **Ascending is
-          faster**: each lookup goes through the record cache, so a run inside
-          one record costs a single decode. Mutually exclusive with
-          ``entry_start``/``entry_stop``, and ignores ``threads``/``workers``
-          (the lookups run sequentially).
+          index yields an empty entry rather than an error. The order of the
+          list does not affect cost — entries are grouped by the record holding
+          them, so each record is read once — and ``threads`` applies.
+          Mutually exclusive with ``entry_start``/``entry_stop``; ``workers``
+          does not apply.
         - ``cut``: a Python expression filtering the result, with the bank's
           columns bound to jagged ``ak.Array`` values. One keyword covers both
           granularities, chosen by what the expression evaluates to:
@@ -754,14 +754,18 @@ class Chain:
             idx = [int(i) for i in entries]
             if any(i < 0 for i in idx):
                 raise ValueError("`entries` indices must be non-negative")
-            # `entries=` resolves each index through the random-access path,
-            # which addresses the *file's* event stream and does not consult the
-            # chain filter — so on a filtered chain it silently returned events
-            # the filter excludes, and the indices did not even mean the same
-            # thing (a range read compacts to surviving events; `entries=` is 1:1
-            # with the request). Refuse rather than answer wrongly. Making these
-            # agree needs a decision about which index space `entries=` speaks,
-            # which is a bigger change than a guard.
+            # `entries=` addresses the *file's* event stream and does not consult
+            # the chain filter, so on a filtered chain it silently returned
+            # events the filter excludes. Refuse rather than answer wrongly.
+            #
+            # Note the index space itself is not the problem: `entry_start` /
+            # `entry_stop` are pre-filter global indices too (the range test in
+            # the core runs on the raw global index, before the filter, and
+            # `num_entries` likewise ignores the filter). What differs is the
+            # *output*: a range read compacts filtered-out events away, while
+            # `entries=` stays 1:1 with the request. Making them agree means
+            # deciding what a non-surviving index should yield here, which is a
+            # bigger change than a guard.
             if any(
                 x is not None
                 for x in (self._require, self._record_tag, self._event_tag, self._event_tag_any)
@@ -772,7 +776,7 @@ class Chain:
                     "would be ignored. Read with entry_start/entry_stop instead, "
                     "or take the entries from the unfiltered chain."
                 )
-            return finish(c.read_columns_at(selection, idx))
+            return finish(c.read_columns_at(selection, idx, threads))
         if workers and workers > 1:
             from . import _parallel
 

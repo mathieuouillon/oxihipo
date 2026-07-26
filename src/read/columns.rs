@@ -33,6 +33,7 @@
 //! the caller wraps them in a `RegularArray(N)` so the single row-count
 //! offsets index them unchanged.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -512,6 +513,146 @@ fn process_record_columns(
     Ok(RecordChunk { banks })
 }
 
+/// One requested entry, as `read_columns_at` resolves it: its slot in the
+/// caller's `entries` list, and the event's index local to its record.
+type EntrySlot = (usize, u32);
+
+/// The requested entries that live in one record, keyed by `(file, record)`.
+type EntryGroup = ((usize, usize), Vec<EntrySlot>);
+
+/// One event's worth of "the bank isn't here": a single 0-row sub-list in every
+/// requested bank.
+///
+/// Distinct from [`RecordChunk::empty`], which contributes *no* events at all —
+/// that is a skipped record, this is a present-but-empty entry. Confusing the
+/// two silently shortens the offsets array relative to `entries`.
+fn absent_event_chunk(plan: &[BankPlan<'_>]) -> RecordChunk {
+    let mut banks: Vec<BankChunk> = plan.iter().map(BankChunk::empty).collect();
+    for (bp, bc) in plan.iter().zip(&mut banks) {
+        bc.push_event(bp, None);
+    }
+    RecordChunk { banks }
+}
+
+/// Read one record once and materialise a scattered subset of its events.
+///
+/// The counterpart to [`process_record_columns`], which walks a record start to
+/// finish. `wanted` is `(slot, local event index)`, where `slot` is the event's
+/// position in the caller's `entries` list; it is carried through untouched so
+/// the caller can reassemble in its own order.
+///
+/// `per_entry` picks the granularity, and it is purely a cost question:
+///
+/// - `false` — one chunk for the whole group, events appended in `wanted` order.
+///   Used when the caller's list is ascending, because then the groups are
+///   already in output order and merging is a plain concatenation.
+/// - `true` — one chunk per entry, so the caller can reassemble in *its* order
+///   by reordering whole chunks instead of permuting packed jagged bytes. This
+///   costs a few small allocations per entry, which is invisible next to the
+///   record decode it saves but was measurable (+442% on an ascending list)
+///   when applied to the case that did not need it.
+///
+/// Duplicate indices are honoured either way — each occurrence is pushed.
+fn process_record_entries(
+    inner: &Arc<FileInner>,
+    ri: usize,
+    plan: &[BankPlan<'_>],
+    wanted: &[EntrySlot],
+    per_entry: bool,
+    record: &mut Record,
+    read_buf: &mut Vec<u8>,
+) -> Result<Vec<(usize, RecordChunk)>> {
+    let span = &inner.index.records()[ri];
+    let header = inner.read_record_into(span.file_offset, read_buf)?;
+    let mut out = Vec::with_capacity(if per_entry { wanted.len() } else { 1 });
+
+    // One accumulator, emitted after every entry (`per_entry`) or once at the
+    // end. `flush` is a macro rather than a closure because the fill loops below
+    // already hold `&mut banks`.
+    let mut banks: Vec<BankChunk> = plan.iter().map(BankChunk::empty).collect();
+    macro_rules! flush {
+        ($slot:expr) => {
+            if per_entry {
+                let fresh = plan.iter().map(BankChunk::empty).collect();
+                out.push((
+                    $slot,
+                    RecordChunk {
+                        banks: std::mem::replace(&mut banks, fresh),
+                    },
+                ));
+            }
+        };
+    }
+
+    if header.compression.is_by_bank() {
+        let rec = ByBankRecord::parse(read_buf)?;
+        let idxs: Vec<Option<u32>> = plan
+            .iter()
+            .map(|bp| rec.bank_index(bp.group, bp.item))
+            .collect();
+        for &(slot, e) in wanted {
+            for ((bp, bc), &idx) in plan.iter().zip(&mut banks).zip(&idxs) {
+                match idx {
+                    Some(b) if e < rec.event_count() && rec.has(e, b) => {
+                        let stream = rec.bank_stream(b)?;
+                        let bank = Bank::new(bp.schema, &stream[rec.bank_byte_range(e, b)])?;
+                        bc.push_event(bp, Some(&bank));
+                    }
+                    _ => bc.push_event(bp, None),
+                }
+            }
+            flush!(slot);
+        }
+    } else if header.compression.is_per_column() {
+        let rec = PerColumnRecord::parse(read_buf)?;
+        let idxs: Vec<Option<u32>> = plan
+            .iter()
+            .map(|bp| rec.bank_index(bp.group, bp.item))
+            .collect();
+        for &(slot, e) in wanted {
+            for ((bp, bc), &idx) in plan.iter().zip(&mut banks).zip(&idxs) {
+                match idx {
+                    Some(b) if e < rec.event_count() => {
+                        let bank = Bank::new_per_column(bp.schema, &rec, b, e);
+                        bc.push_event(bp, Some(&bank));
+                    }
+                    _ => bc.push_event(bp, None),
+                }
+            }
+            flush!(slot);
+        }
+    } else {
+        record.load_with_header(read_buf, header, Some(&inner.dict))?;
+        for &(slot, e) in wanted {
+            match record.event(e) {
+                Some(raw) => {
+                    let event = Event::new(raw);
+                    for (bp, bc) in plan.iter().zip(&mut banks) {
+                        match event.find(bp.group, bp.item) {
+                            Some((_, data)) => {
+                                let bank = Bank::new(bp.schema, data)?;
+                                bc.push_event(bp, Some(&bank));
+                            }
+                            None => bc.push_event(bp, None),
+                        }
+                    }
+                }
+                None => {
+                    for (bp, bc) in plan.iter().zip(&mut banks) {
+                        bc.push_event(bp, None);
+                    }
+                }
+            }
+            flush!(slot);
+        }
+    }
+
+    if !per_entry && let Some(&(first, _)) = wanted.first() {
+        out.push((first, RecordChunk { banks }));
+    }
+    Ok(out)
+}
+
 /// Collect the per-event tag (`EH_TAG`) of every surviving event in one record,
 /// in order — the tag-only analogue of [`process_record_columns`]. Reads the
 /// tag from the event header or the record directory; never inflates a bank.
@@ -666,39 +807,144 @@ impl Chain {
     /// Indices out of range contribute a 0-row sub-list rather than an error,
     /// matching how an absent bank is already reported.
     ///
-    /// **Pass ascending indices when you can.** Each lookup goes through
-    /// [`Chain::event`], which caches the last decoded record, so a run of
-    /// indices inside one record costs a single decode. A shuffled list
-    /// defeats that and re-decodes per lookup. Sequential, not parallel: the
-    /// list is usually short next to the file, and per-record parallelism does
-    /// not apply to scattered single-event lookups.
+    /// Order does not matter for speed. Entries are grouped by the record that
+    /// holds them, so each record is read and decompressed **once** however the
+    /// list is arranged, and the groups run in parallel under the usual
+    /// `threads` convention (`0` = rayon's global pool, `1` = sequential, `n` =
+    /// an `n`-thread pool). Previously every lookup went through
+    /// [`Chain::event`] and its single-slot record cache, so a non-ascending
+    /// list re-decoded a whole record *per index* — 256 scattered lookups cost
+    /// 7 ms against 13 µs for the same count ascending.
+    ///
+    /// Like [`Chain::event`], and unlike a range read, this addresses the
+    /// file's event stream and does not apply the chain filter.
     pub fn read_columns_at(
         &self,
         selection: &[(&str, &[&str])],
         entries: &[u64],
+        threads: usize,
     ) -> Result<Vec<ColumnBuffers>> {
         let plan = build_plan(self.schemas(), selection)?;
         if plan.is_empty() {
             return Ok(Vec::new());
         }
-        let mut chunk = RecordChunk::empty(&plan);
-        for &idx in entries {
-            match self.event(idx) {
-                Some(ev) => {
-                    for (bc, bp) in chunk.banks.iter_mut().zip(&plan) {
-                        bc.push_event(bp, ev.bank(&bp.name).as_ref());
-                    }
-                }
-                // Out of range: a present-but-empty entry keeps every bank's
-                // offsets the same length as `entries`.
-                None => {
-                    for (bc, bp) in chunk.banks.iter_mut().zip(&plan) {
-                        bc.push_event(bp, None);
-                    }
+        let files = self.files_inner();
+        let offsets = self.event_offsets();
+
+        // Resolve each index to (file, record, local event) once, and group by
+        // record. The value carries each entry's *slot* — its position in
+        // `entries` — which is what lets the result be reassembled in the
+        // caller's order at the end regardless of the order records run in.
+        // A `BTreeMap`, not a `HashMap`: the fast path below concatenates groups
+        // in iteration order, so that order *is* the output order. Getting it
+        // from the container rather than from a sort afterwards makes the
+        // invariant structural — and keeps a run reproducible instead of
+        // dependent on hash seed.
+        let mut groups: BTreeMap<(usize, usize), Vec<EntrySlot>> = BTreeMap::new();
+        let mut resolved = 0usize;
+        for (slot, &idx) in entries.iter().enumerate() {
+            let Some(file_idx) = offsets.partition_point(|&o| o <= idx).checked_sub(1) else {
+                continue;
+            };
+            if file_idx >= files.len() {
+                continue;
+            }
+            let local = idx - offsets[file_idx];
+            let Some((rec_idx, ev_local)) = files[file_idx].index.locate(local) else {
+                continue;
+            };
+            resolved += 1;
+            groups
+                .entry((file_idx, rec_idx))
+                .or_default()
+                .push((slot, ev_local));
+        }
+
+        // Everything in one record (or nothing resolvable): replay through
+        // `Chain::event`, as this always did.
+        //
+        // Grouping exists to stop a record being decoded once per index; with a
+        // single record there is nothing to stop, and `Chain::event`'s one-slot
+        // cache is *better* than reading it again — a second call with the same
+        // list decodes nothing at all, where the grouped path always re-reads.
+        // It is never worse either: a cold cache costs the same one decode.
+        // Skipping this made a repeated ascending read 3x slower.
+        if groups.len() <= 1 {
+            let mut chunk = RecordChunk::empty(&plan);
+            for &idx in entries {
+                let ev = self.event(idx);
+                for (bc, bp) in chunk.banks.iter_mut().zip(&plan) {
+                    bc.push_event(bp, ev.as_ref().and_then(|e| e.bank(&bp.name)).as_ref());
                 }
             }
+            return Ok(merge_chunks(&plan, vec![chunk]));
         }
-        Ok(merge_chunks(&plan, vec![chunk]))
+
+        // An ascending, fully-resolved list needs no reassembly: each record's
+        // slots are then contiguous and increasing, so visiting records in
+        // order and concatenating is already the caller's order. Taking that
+        // path avoids a chunk allocation per entry — which cost +442% on
+        // exactly this, the list shape the docs tell people to prefer.
+        let per_entry = resolved != entries.len() || entries.windows(2).any(|w| w[0] > w[1]);
+
+        // Already ordered by (file, record) — and within a group the slots are
+        // ascending too, having been pushed in `entries` order.
+        let work: Vec<EntryGroup> = groups.into_iter().collect();
+        let run_one =
+            |record: &mut Record, read_buf: &mut Vec<u8>, key: &(usize, usize), w: &[EntrySlot]| {
+                process_record_entries(&files[key.0], key.1, &plan, w, per_entry, record, read_buf)
+            };
+
+        // One group means one record to read, so there is nothing to run in
+        // parallel — and a small interactive `entries=[..]` inside one record is
+        // the normal case. Going through rayon anyway would make it pay for a
+        // `ThreadPoolBuilder::build()` it cannot use.
+        let filled: Vec<Vec<(usize, RecordChunk)>> = if threads == 1 || work.len() < 2 {
+            let mut record = Record::new();
+            let mut read_buf = Vec::new();
+            work.iter()
+                .map(|(key, w)| run_one(&mut record, &mut read_buf, key, w))
+                .collect::<Result<_>>()?
+        } else {
+            let run = || {
+                work.par_iter()
+                    .map_init(
+                        || (Record::new(), Vec::new()),
+                        |(record, read_buf), (key, w)| run_one(record, read_buf, key, w),
+                    )
+                    .collect::<Result<Vec<_>>>()
+            };
+            if threads == 0 {
+                run()?
+            } else {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .map_err(|e| HipoError::ThreadPool(e.to_string()))?;
+                pool.install(run)?
+            }
+        };
+
+        if !per_entry {
+            // Ascending and fully resolved: the per-record chunks are already
+            // in the caller's order, so concatenating them is the answer.
+            let chunks = filled.into_iter().flatten().map(|(_, c)| c).collect();
+            return Ok(merge_chunks(&plan, chunks));
+        }
+
+        // Otherwise scatter back into caller order. A slot left empty is an
+        // index that resolved to no event (out of range) — it still contributes
+        // one 0-row sub-list, so every bank's offsets stay the same length as
+        // `entries`.
+        let mut slots: Vec<Option<RecordChunk>> = (0..entries.len()).map(|_| None).collect();
+        for (slot, chunk) in filled.into_iter().flatten() {
+            slots[slot] = Some(chunk);
+        }
+        let chunks = slots
+            .into_iter()
+            .map(|c| c.unwrap_or_else(|| absent_event_chunk(&plan)))
+            .collect();
+        Ok(merge_chunks(&plan, chunks))
     }
 
     /// Every surviving event's per-event tag (`EH_TAG`), in global event order —

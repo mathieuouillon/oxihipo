@@ -35,6 +35,21 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Fixed
 
+- **`read_columns_at` no longer re-reads a record per index.** Every lookup went
+  through `Chain::event` and its single-slot record cache, so the cost depended
+  entirely on the order of the list: 256 indices that happened to ascend cost
+  13 µs, the same 256 scattered cost **7 ms**, because each one decompressed a
+  whole record that the next call threw away.
+
+  Entries are now resolved up front and grouped by the record holding them, so
+  each record is read once whatever the order, and the groups run in parallel
+  (`threads`, matching `read_columns`). Scattered reads are **~26× faster**
+  (7.09 ms → 271 µs, `lz4`); ascending reads, which the cache already handled,
+  stay put. This is what `arrays(entries=[...])` runs on, and a list of
+  interesting events found by an earlier pass is rarely sorted.
+
+  `Chain::read_columns_at` takes a trailing `threads` argument to match its
+  siblings — a breaking change, called out here because the crate is pre-1.0.
 - **A failed `with` block no longer produces output.** `Writer.__exit__` called
   `close()` unconditionally, so an exception inside the block still finalised the
   file — a failed run left one that opens cleanly. For the in-place

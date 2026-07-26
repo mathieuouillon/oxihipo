@@ -549,29 +549,135 @@ fn read_columns_at_matches_the_range_path() {
     }
     w.finish().unwrap();
 
+    /// The `pid` rows of entry-slot `k` of a `ColumnBuffers`.
+    fn pid_rows(b: &oxihipo::ColumnBuffers, k: usize) -> Vec<i32> {
+        let (lo, hi) = (b.offsets[k] as usize, b.offsets[k + 1] as usize);
+        match &b.columns[0].data {
+            oxihipo::ColumnData::I32(v) => v[lo..hi].to_vec(),
+            other => panic!("pid should be I32, got {other:?}"),
+        }
+    }
+
     let chain = Chain::open(&path).unwrap();
     let sel = [("REC::Particle", &["pid", "px"][..])];
 
     // A contiguous ascending list must reproduce the equivalent range exactly.
     let want = chain.read_columns(&sel, Some(10..20), 1).unwrap();
     let idx: Vec<u64> = (10..20).collect();
-    let got = chain.read_columns_at(&sel, &idx).unwrap();
+    let got = chain.read_columns_at(&sel, &idx, 1).unwrap();
     assert_eq!(got, want, "contiguous entries must equal the same range");
 
     // Caller order is preserved, including duplicates.
+    //
+    // Entries are grouped by record before reading, so slot k must still carry
+    // entry `shuffled[k]`'s rows. Checking row *counts* alone would not show a
+    // permutation that happens to move equal-length entries around, so assert
+    // on the values: the fixture writes `pid = e * 100 + r`, which makes every
+    // row name the entry it came from.
     let shuffled = [5u64, 5, 31, 2, 17];
-    let got = chain.read_columns_at(&sel, &shuffled).unwrap();
+    let got = chain.read_columns_at(&sel, &shuffled, 1).unwrap();
     assert_eq!(got[0].offsets.len(), shuffled.len() + 1);
     for (k, &e) in shuffled.iter().enumerate() {
-        let one = chain.read_columns_at(&sel, &[e]).unwrap();
+        let one = chain.read_columns_at(&sel, &[e], 1).unwrap();
         let rows = (got[0].offsets[k + 1] - got[0].offsets[k]) as usize;
         assert_eq!(rows, one[0].total_rows() as usize, "row count at slot {k}");
+        assert_eq!(
+            pid_rows(&got[0], k),
+            (0..e as i32 % 3)
+                .map(|r| e as i32 * 100 + r)
+                .collect::<Vec<_>>(),
+            "slot {k} must carry entry {e}'s rows"
+        );
+    }
+
+    // Grouping changes the order records are read in; it must not change the
+    // answer, at any thread count.
+    for threads in [0usize, 2, 4] {
+        assert_eq!(
+            chain.read_columns_at(&sel, &shuffled, threads).unwrap(),
+            got,
+            "threads={threads} disagrees with the sequential result"
+        );
+    }
+
+    // A long descending list spans every record backwards — the case that used
+    // to re-decode a record per index, and the one most likely to mis-order.
+    let descending: Vec<u64> = (0..40u64).rev().collect();
+    let desc = chain.read_columns_at(&sel, &descending, 0).unwrap();
+    for (k, &e) in descending.iter().enumerate() {
+        assert_eq!(
+            pid_rows(&desc[0], k),
+            (0..e as i32 % 3)
+                .map(|r| e as i32 * 100 + r)
+                .collect::<Vec<_>>(),
+            "descending slot {k} must carry entry {e}"
+        );
+    }
+
+    // A non-decreasing list takes a different internal path from a shuffled one
+    // (one chunk per record instead of one per entry), so it needs its own
+    // coverage — duplicates included, since those repeat an event within a
+    // single record's chunk.
+    let ascending_dups = [2u64, 2, 5, 5, 5, 31, 31];
+    let got = chain.read_columns_at(&sel, &ascending_dups, 1).unwrap();
+    assert_eq!(got[0].offsets.len(), ascending_dups.len() + 1);
+    for (k, &e) in ascending_dups.iter().enumerate() {
+        assert_eq!(
+            pid_rows(&got[0], k),
+            (0..e as i32 % 3)
+                .map(|r| e as i32 * 100 + r)
+                .collect::<Vec<_>>(),
+            "ascending slot {k} must carry entry {e}"
+        );
+    }
+    // ...and it must agree with the shuffled path over the same multiset.
+    let mut shuffled_same = ascending_dups;
+    shuffled_same.reverse();
+    let rev = chain.read_columns_at(&sel, &shuffled_same, 1).unwrap();
+    for (k, &e) in shuffled_same.iter().enumerate() {
+        assert_eq!(
+            pid_rows(&rev[0], k),
+            pid_rows(&got[0], ascending_dups.len() - 1 - k),
+            "reversed slot {k} (entry {e}) must mirror the ascending read"
+        );
+    }
+
+    // No entries at all: one offset, no rows — not an empty result.
+    let none = chain.read_columns_at(&sel, &[], 1).unwrap();
+    assert_eq!(
+        none[0].offsets,
+        vec![0],
+        "empty entries still describes a bank"
+    );
+
+    // An *ascending* list that still contains an out-of-range index, and that
+    // spans more than one record so it actually reaches the grouped path (a
+    // single-record list is replayed through `Chain::event` instead). This is
+    // the one shape where the cheap concatenating path would be taken but must
+    // not be: a skipped entry breaks the "records concatenate into caller
+    // order" invariant it relies on, and the result would come back short.
+    let ascending_oob = [3u64, 20, 9_999];
+    let got = chain.read_columns_at(&sel, &ascending_oob, 1).unwrap();
+    assert_eq!(
+        got[0].offsets.len(),
+        ascending_oob.len() + 1,
+        "an ascending list with an out-of-range index keeps one slot per entry"
+    );
+    for (k, &e) in ascending_oob.iter().enumerate() {
+        // 9_999 is past the end, so it contributes nothing — same as an entry
+        // whose row count happens to be zero.
+        let want: Vec<i32> = if e >= 40 {
+            Vec::new()
+        } else {
+            (0..e as i32 % 3).map(|r| e as i32 * 100 + r).collect()
+        };
+        assert_eq!(pid_rows(&got[0], k), want, "slot {k} is entry {e}");
     }
 
     // Out of range is an empty entry, not an error, and does not shorten the
     // result — otherwise offsets would stop lining up with `entries`.
     let with_oob = [3u64, 9_999, 4];
-    let got = chain.read_columns_at(&sel, &with_oob).unwrap();
+    let got = chain.read_columns_at(&sel, &with_oob, 1).unwrap();
     assert_eq!(
         got[0].offsets.len(),
         4,

@@ -232,11 +232,16 @@ impl PyChain {
     /// contiguous range. Output is aligned 1:1 with `entries`, so the caller's
     /// order and any duplicates are preserved and an out-of-range index is an
     /// empty entry. Backs `arrays(..., entries=[...])`.
+    ///
+    /// Entries are grouped by the record holding them before anything is read,
+    /// so the order of the list no longer decides how much work this does.
+    #[pyo3(signature = (selection, entries, threads=0))]
     fn read_columns_at<'py>(
         &self,
         py: Python<'py>,
         selection: Vec<(String, Vec<String>)>,
         entries: Vec<u64>,
+        threads: usize,
     ) -> PyResult<Vec<BankColumns<'py>>> {
         let cols: Vec<Vec<&str>> = selection
             .iter()
@@ -249,7 +254,7 @@ impl PyChain {
             .collect();
 
         let bufs = py
-            .detach(|| self.inner.read_columns_at(&sel, &entries))
+            .detach(|| self.inner.read_columns_at(&sel, &entries, threads))
             .map_err(to_pyerr)?;
 
         Ok(bufs
