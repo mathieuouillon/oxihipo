@@ -155,6 +155,19 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Added
 
+- **`ox.to_vector(array, mass=...)` — Lorentz-vector behaviours** over a
+  momentum bank, via [vector](https://vector.readthedocs.io). `v.E`, `v.pt`,
+  `v.eta`, `(v[:, 0] + v[:, 1]).mass` and `deltaR` on columns that were three
+  flat arrays, with `mass="pdg"` taking each row's mass from its `pid`.
+
+  Omitting `mass` gives a **3-vector**, not a massless 4-vector: an assumed-zero
+  mass wearing a four-vector's interface is how a wrong invariant mass happens.
+  `pid == 0` carries `nan` into `E` for the same reason. Columns not needed for
+  the vector come through untouched, so cuts still work on the result.
+
+  A function rather than a keyword on `arrays()`, so it composes with `iterate`
+  chunks, `to_dask` partitions and post-`cut=` results instead of only the one
+  call. `vector` is an optional extra (`pip install oxihipo[vector]`).
 - **`ox.pdg_mass(pid)` — PDG masses in bulk**, plus `ox.pdg_name` and the
   `ox.PDG_MASS_GEV` table behind them. Every tutorial hardcoded the constants it
   needed (`M_PIP = 0.139570`, `M_P = 0.938272`) because there was nothing to

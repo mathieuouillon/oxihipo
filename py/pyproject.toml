@@ -53,12 +53,15 @@ arrow = ["pyarrow>=14"]
 # large dependency and only pays off with a cluster or an existing dask graph;
 # `iterate()` / `workers=` cover single-machine scans with no extra install.
 dask = ["dask-awkward>=2024.2"]
+# `vector` = Lorentz-vector behaviours for `to_vector()`. Small and pure
+# Python, but still opt-in: the read path has no use for it.
+vector = ["vector>=1.4"]
 # `root` = the ROOT RDataFrame bridge. Awkward's ROOT interop generates the
 # RDataSource, so it's the pip-installable part; ROOT/PyROOT itself is NOT on
 # PyPI — install it via conda-forge or your system so `import ROOT` works.
 # This is the one extra still worth naming: it documents that split.
 root = ["awkward>=2.6"]
-all = ["awkward>=2.6", "pandas>=2.0", "pyarrow>=14", "dask-awkward>=2024.2"]
+all = ["awkward>=2.6", "pandas>=2.0", "pyarrow>=14", "dask-awkward>=2024.2", "vector>=1.4"]
 
 [project.urls]
 Homepage = "https://mathieuouillon.github.io/oxihipo/"

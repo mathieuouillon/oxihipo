@@ -169,6 +169,44 @@ nothing caches a derived copy:
 ox.PDG_MASS_GEV[9999] = 1.234    # some exotic your cook writes
 ```
 
+## Lorentz vectors
+
+Three momentum columns plus a mass is a four-vector, and
+[vector](https://vector.readthedocs.io) already knows the kinematics. `to_vector`
+hands the columns over under the names it expects:
+
+```python
+p = f.arrays("REC::Particle", ["pid", "px", "py", "pz"])
+v = ox.to_vector(p, mass="pdg")
+
+v.E, v.pt, v.eta, v.phi, v.mass
+(v[:, 0] + v[:, 1]).mass          # invariant mass of the first two
+v[:, 0].deltaR(v[:, 1])
+```
+
+`mass=` is what decides the dimensionality, and the default is deliberate:
+
+| `mass=` | you get |
+|---|---|
+| `"pdg"` | 4-vector, each row's mass from its `pid` (needs the `pid` column) |
+| a number | 4-vector, one mass for every row |
+| an array | 4-vector, your own per-row masses |
+| omitted | **3-vector** — `pt`/`eta`/`phi` and angles, no `E`/`mass` |
+
+Leaving `mass` out gives a 3-vector rather than assuming massless, because a
+massless assumption dressed as a four-vector is exactly how a wrong invariant
+mass gets published. Unidentified rows (`pid == 0`) carry `nan` through to `E`
+for the same reason.
+
+Columns you read but didn't need for the vector — `chi2pid`, `status`, `pid`
+itself — come through untouched, so cuts still work on the result. An `E` or
+`energy` field already on the record is used directly.
+
+It is a function, not a keyword on `arrays()`, so the same call works on an
+`iterate` chunk, a `to_dask` partition, or anything you have already cut.
+
+Needs `pip install oxihipo[vector]`.
+
 ## Discovery
 
 ```python

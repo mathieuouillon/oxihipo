@@ -65,6 +65,7 @@ __all__ = [
     "PDG_NAME",
     "pdg_mass",
     "pdg_name",
+    "to_vector",
     "__version__",
 ]
 
@@ -72,6 +73,7 @@ __all__ = [
 # know about chains, and re-exported here because `ox.pdg_mass(p.pid)` is how it
 # is used.
 from ._pdg import PDG_MASS_GEV, PDG_NAME, pdg_mass, pdg_name  # noqa: E402
+from ._vector import to_vector  # noqa: E402
 
 # Library name → return type, for the `library=` annotations below.
 _Library = Literal["ak", "np", "pd", "arrow"]

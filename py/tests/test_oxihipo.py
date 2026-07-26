@@ -1657,3 +1657,116 @@ def test_pdg_mass_composes_with_a_real_read(chain):
     m = oxihipo.pdg_mass(p.pid)
     # One mass per particle, aligned with the momentum column read beside it.
     assert ak.to_list(ak.num(m)) == ak.to_list(ak.num(p.px))
+
+
+# --- wave 4: Lorentz vectors ----------------------------------------------
+
+
+@pytest.fixture
+def momenta():
+    ak = pytest.importorskip("awkward")
+    pytest.importorskip("vector")
+    return ak.zip(
+        {
+            "pid": ak.Array([[211, 2212], [11, 22]]),
+            "px": ak.Array([[1.0, 0.5], [0.2, 0.3]]),
+            "py": ak.Array([[0.0, 0.2], [0.1, 0.0]]),
+            "pz": ak.Array([[3.0, 1.0], [2.0, 1.5]]),
+        }
+    )
+
+
+def test_to_vector_energy_uses_the_pdg_mass(momenta):
+    ak = pytest.importorskip("awkward")
+    v = oxihipo.to_vector(momenta, mass="pdg")
+    p2 = momenta.px**2 + momenta.py**2 + momenta.pz**2
+    want = np.sqrt(p2 + oxihipo.pdg_mass(momenta.pid) ** 2)
+    assert ak.almost_equal(v.E, want)
+    # ...and the mass really is the PDG one, not something vector inferred.
+    assert ak.to_list(v.mass)[0][0] == pytest.approx(oxihipo.pdg_mass(211))
+
+
+def test_to_vector_computes_an_invariant_mass(momenta):
+    ak = pytest.importorskip("awkward")
+    v = oxihipo.to_vector(momenta, mass="pdg")
+    pair = v[:, 0] + v[:, 1]
+    # Recomputed longhand, which is what this replaces.
+    a, b = v[:, 0], v[:, 1]
+    e = a.E + b.E
+    px, py, pz = a.px + b.px, a.py + b.py, a.pz + b.pz
+    assert ak.almost_equal(pair.mass, np.sqrt(e**2 - px**2 - py**2 - pz**2))
+
+
+def test_to_vector_defaults_to_three_dimensions(momenta):
+    ak = pytest.importorskip("awkward")
+    v = oxihipo.to_vector(momenta)
+    # No mass was given, so claiming a 4-vector would be inventing one — which
+    # is how a massless assumption turns into a wrong invariant mass.
+    assert "mass" not in ak.fields(v)
+    assert "E" not in ak.fields(v)
+    assert v.pt is not None  # the 3D kinematics still work
+
+
+def test_to_vector_marks_an_unidentified_track_rather_than_zeroing_it(momenta):
+    ak = pytest.importorskip("awkward")
+    lone = ak.zip(
+        {
+            "pid": ak.Array([[0]]),
+            "px": ak.Array([[1.0]]),
+            "py": ak.Array([[0.0]]),
+            "pz": ak.Array([[0.0]]),
+        }
+    )
+    v = oxihipo.to_vector(lone, mass="pdg")
+    assert math.isnan(ak.to_list(v.E)[0][0])
+
+
+def test_to_vector_accepts_a_constant_or_an_array_mass(momenta):
+    ak = pytest.importorskip("awkward")
+    const = oxihipo.to_vector(momenta, mass=0.13957)
+    assert ak.to_list(const.mass) == [[0.13957] * 2] * 2
+    given = ak.Array([[1.0, 2.0], [3.0, 4.0]])
+    assert ak.to_list(oxihipo.to_vector(momenta, mass=given).mass) == ak.to_list(given)
+
+
+def test_to_vector_carries_the_other_columns_through(momenta):
+    ak = pytest.importorskip("awkward")
+    v = oxihipo.to_vector(momenta, mass="pdg")
+    # `pid` came in and must still be there — otherwise a cut on it needs the
+    # original array kept alongside.
+    assert "pid" in ak.fields(v)
+    assert ak.to_list(v.pid) == ak.to_list(momenta.pid)
+
+
+def test_to_vector_uses_an_existing_energy_column(momenta):
+    ak = pytest.importorskip("awkward")
+    with_e = ak.with_field(momenta, momenta.px * 0 + 5.0, "E")
+    v = oxihipo.to_vector(with_e)
+    assert ak.to_list(v.E) == [[5.0, 5.0], [5.0, 5.0]]
+    # ...and refuses to also be told a mass, which could disagree with it.
+    with pytest.raises(ValueError, match="already a field"):
+        oxihipo.to_vector(with_e, mass="pdg")
+
+
+def test_to_vector_rejects_what_it_cannot_build(momenta):
+    ak = pytest.importorskip("awkward")
+    with pytest.raises(ValueError, match=r"missing \['pz'\]"):
+        oxihipo.to_vector(ak.Array({"px": momenta.px, "py": momenta.py}))
+    with pytest.raises(ValueError, match="'pdg'"):
+        oxihipo.to_vector(momenta, mass="proton")
+    no_pid = momenta[["px", "py", "pz"]]
+    with pytest.raises(ValueError, match="needs a `pid` field"):
+        oxihipo.to_vector(no_pid, mass="pdg")
+    with pytest.raises(ValueError, match="needs an energy or a mass"):
+        oxihipo.to_vector(momenta, momentum="Momentum4D")
+
+
+def test_to_vector_composes_with_a_real_read(chain):
+    ak = pytest.importorskip("awkward")
+    pytest.importorskip("vector")
+    p = chain.arrays("REC::Particle", ["pid", "px"])
+    # The sample bank has only px, so build the missing momenta from it — the
+    # point is that a chain-produced array flows straight in.
+    full = ak.zip({"pid": p.pid, "px": p.px, "py": p.px * 0, "pz": p.px * 0})
+    v = oxihipo.to_vector(full, mass="pdg")
+    assert ak.to_list(ak.num(v)) == ak.to_list(ak.num(p.px))
