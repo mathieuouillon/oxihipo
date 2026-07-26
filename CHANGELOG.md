@@ -33,6 +33,22 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   The mypy `python_version` is now `3.10` and CI's test job runs on 3.10, so a
   3.11+ construct fails in review rather than at a user's import.
 
+### Changed
+
+- **The read path goes through a `ReadAt` seam** instead of holding an
+  `Arc<File>` directly, so a source that is not a local file — an in-memory
+  image, eventually HTTP range requests — only has to supply bytes at an offset.
+  Entirely internal: `SharedFile` never left `src/read/inner.rs`, every caller
+  already went through `FileInner`'s two methods, and the in-place tag patch
+  opens its own handle, so nothing outside that file changed.
+
+  The trait fills a caller-owned buffer rather than returning one (the
+  zero-allocation scan loop is pinned by a test) and has no `len()` — the file
+  length is captured once at open, so no bounds check asks the source its size.
+  Measured against the pre-change baseline, one virtual call per multi-MB record
+  is not detectable: `scan` −1.2%/−2.2%/−6.0%, `columns` +1.5%/+1.2%/+3.5%,
+  `open` −5.9%/0.0%/−0.5%, all inside this machine's run-to-run spread.
+
 ### Fixed
 
 - **`read_columns_at` no longer re-reads a record per index.** Every lookup went

@@ -27,17 +27,8 @@ use crate::wire::file_header::FileHeader;
 use crate::wire::record::Record;
 use crate::wire::record_header::RecordHeader;
 
-/// A positioned-read file handle shared across the chain.
-///
-/// On Unix we use `pread`, which is safe to issue concurrently from many
-/// threads against one descriptor (it takes the offset as an argument and
-/// never touches the shared file cursor), so the parallel reader needs no
-/// per-thread handles. Elsewhere we serialise behind a `Mutex` — the
-/// non-Unix parallel path trades I/O concurrency for portability.
-#[cfg(unix)]
-type SharedFile = Arc<File>;
-#[cfg(not(unix))]
-type SharedFile = Arc<std::sync::Mutex<File>>;
+/// The byte source shared across the chain — see [`ReadAt`].
+type SharedFile = Arc<dyn ReadAt>;
 
 /// Read-only shared file state.
 #[derive(Debug)]
@@ -71,11 +62,13 @@ impl FileInner {
     fn open_inner(path: PathBuf) -> Result<Self> {
         let file = File::open(&path)?;
         let len = file.metadata()?.len();
-        #[cfg(unix)]
-        let shared: SharedFile = Arc::new(file);
-        #[cfg(not(unix))]
-        let shared: SharedFile = Arc::new(std::sync::Mutex::new(file));
+        Self::from_source(Arc::new(LocalFile::new(file)), len, path)
+    }
 
+    /// Parse a HIPO file out of any [`ReadAt`] source: header, dictionary,
+    /// record index. Split from [`Self::open_inner`] so obtaining the bytes and
+    /// interpreting them are separate concerns — the whole point of the seam.
+    fn from_source(shared: SharedFile, len: u64, path: PathBuf) -> Result<Self> {
         if len < FILE_HEADER_SIZE as u64 {
             return Err(HipoError::FileTooSmall {
                 actual: len,
@@ -145,18 +138,69 @@ impl FileInner {
     }
 }
 
-#[cfg(unix)]
 fn read_at(file: &SharedFile, offset: u64, buf: &mut [u8]) -> Result<()> {
-    use std::os::unix::fs::FileExt;
-    file.read_exact_at(buf, offset).map_err(HipoError::Io)
+    file.read_exact_at(buf, offset)
 }
 
-#[cfg(not(unix))]
-fn read_at(file: &SharedFile, offset: u64, buf: &mut [u8]) -> Result<()> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = file.lock().expect("file handle mutex poisoned");
-    f.seek(SeekFrom::Start(offset)).map_err(HipoError::Io)?;
-    f.read_exact(buf).map_err(HipoError::Io)
+/// A source of bytes at an offset — everything the read path asks of a file.
+///
+/// The whole read side goes through this one method, so a source that is not a
+/// local file (an in-memory image, eventually HTTP range requests) only has to
+/// implement it. Two design points are load-bearing:
+///
+/// - it fills a **caller-owned** `buf` rather than returning one, because
+///   `tests/no_alloc.rs` pins the steady-state scan loop at zero allocations;
+/// - there is no `len()`. The file length is captured once at open
+///   ([`FileInner::len`]) and every bounds check reads that, so a source is
+///   never asked its size on the hot path.
+///
+/// `Send + Sync` because the parallel readers hold `Arc<FileInner>` across rayon
+/// workers, and PyO3's `frozen` pyclass requires `Chain: Sync`. `Debug` because
+/// `FileInner` derives it.
+pub(crate) trait ReadAt: std::fmt::Debug + Send + Sync {
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()>;
+}
+
+/// The local-file source: `pread` where it exists, and a private cursor behind
+/// a mutex where it does not.
+///
+/// `pread` takes the offset as an argument and never touches the shared file
+/// cursor, so many threads can read one descriptor at once. The fallback
+/// serialises instead — the non-unix parallel path trades I/O concurrency for
+/// portability.
+#[derive(Debug)]
+struct LocalFile {
+    #[cfg(unix)]
+    file: File,
+    #[cfg(not(unix))]
+    file: std::sync::Mutex<File>,
+}
+
+impl LocalFile {
+    fn new(file: File) -> Self {
+        #[cfg(unix)]
+        return Self { file };
+        #[cfg(not(unix))]
+        return Self {
+            file: std::sync::Mutex::new(file),
+        };
+    }
+}
+
+impl ReadAt for LocalFile {
+    #[cfg(unix)]
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        self.file.read_exact_at(buf, offset).map_err(HipoError::Io)
+    }
+
+    #[cfg(not(unix))]
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = self.file.lock().expect("file handle mutex poisoned");
+        f.seek(SeekFrom::Start(offset)).map_err(HipoError::Io)?;
+        f.read_exact(buf).map_err(HipoError::Io)
+    }
 }
 
 /// Read a whole record at `offset` into `buf` (resized + reused). Returns
@@ -399,6 +443,103 @@ fn build_index_by_scanning(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A whole file held in memory. Test-only: nothing ships an alternative
+    /// source yet, and this exists to prove the seam is real — that the read
+    /// path goes through [`ReadAt`] and not through `File` behind its back.
+    #[derive(Debug)]
+    struct InMemory(Vec<u8>);
+
+    impl ReadAt for InMemory {
+        fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+            let start = offset as usize;
+            let end = start + buf.len();
+            if end > self.0.len() {
+                return Err(HipoError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "read past end of in-memory source",
+                )));
+            }
+            buf.copy_from_slice(&self.0[start..end]);
+            Ok(())
+        }
+    }
+
+    /// Everything — file header, dictionary, record index, record payloads —
+    /// must come back identically when the bytes arrive from something that is
+    /// not a file. If any part of the read path still reached for `File`, this
+    /// would not compile or would not match.
+    #[test]
+    fn the_read_path_works_over_a_non_file_source() {
+        use crate::{Chain, DataType, Schema, Writer};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mem.hipo");
+        let mut d = Dict::new();
+        d.add(Schema::from_columns(
+            "REC::Particle",
+            300,
+            31,
+            [("pid".into(), DataType::Int, 1)],
+        ));
+        let mut w = Writer::create(&path)
+            .schemas(&d)
+            .max_record_events(4)
+            .build()
+            .unwrap();
+        for e in 0..20i32 {
+            w.event(|ev| {
+                ev.bank("REC::Particle", |b| {
+                    b.row(|r| {
+                        r.set("pid", e)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let len = bytes.len() as u64;
+        let from_memory =
+            FileInner::from_source(Arc::new(InMemory(bytes)), len, PathBuf::from("mem")).unwrap();
+        let from_disk = FileInner::open(path.clone()).unwrap();
+
+        assert_eq!(from_memory.dict, from_disk.dict, "dictionary");
+        assert_eq!(
+            from_memory.index.total_events(),
+            from_disk.index.total_events(),
+            "event count"
+        );
+        assert_eq!(
+            from_memory.index.records().len(),
+            from_disk.index.records().len(),
+            "record count"
+        );
+
+        // ...and record payloads decode byte-for-byte the same.
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for (ra, rb) in from_memory
+            .index
+            .records()
+            .iter()
+            .zip(from_disk.index.records())
+        {
+            from_memory
+                .read_record_into(ra.file_offset, &mut a)
+                .unwrap();
+            from_disk.read_record_into(rb.file_offset, &mut b).unwrap();
+            assert_eq!(a, b, "record at {}", ra.file_offset);
+        }
+
+        // Sanity: the on-disk chain really does hold what we wrote.
+        let chain = Chain::open(&path).unwrap();
+        assert_eq!(chain.event_count(), 20);
+    }
 
     /// Build a one-structure dictionary event (same on-disk layout the writer
     /// emits): a 16-byte `EVNT` header, then group(2 LE) item(1) type(1)
