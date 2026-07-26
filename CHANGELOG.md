@@ -7,6 +7,10 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.1] - 2026-07-26
+
 ### Fixed
 
 - **`for_each_column` failed outright on `Lz4PerBank` files.** Its fallback
@@ -573,7 +577,8 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/mathieuouillon/oxihipo/compare/v0.2.1...v0.2.2
