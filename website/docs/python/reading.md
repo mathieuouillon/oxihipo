@@ -16,6 +16,35 @@ A single string auto-detects — an existing file opens directly, a directory
 expands to its `*.hipo` children, anything else is a glob. A list is taken
 verbatim, so don't wrap a single path in one.
 
+### Files with different banks
+
+The files in a chain do not have to declare the same banks. A run period rarely
+does — a pass-2 cook adds a bank, an MC file carries `MC::Lund` — so `keys()`
+reports the **union** of every bank any file declares, and a bank absent from a
+file gives empty entries for that file's events:
+
+```python
+f = ox.open("/cache/clas12/rg-a/production/pass2/*/dst/*.hipo")
+f.keys()                              # every bank in any of them
+f.arrays("ML::pred")                  # [] for events from files without it
+```
+
+Because the empties still occupy their events, columns from different banks stay
+length-aligned and `ak.zip`-able however the chain is composed.
+
+Two disagreements are refused rather than papered over, since neither can be
+read correctly: one bank name describing two different layouts, and one
+`(group, item)` id claimed by two different banks. The second matters most —
+banks are located by id, so a collision would decode one file's bytes against
+another file's schema and hand back wrong numbers instead of failing. Both
+errors name the files and banks involved.
+
+:::note Previously
+Every file's dictionary had to match file 0's exactly, and the comparison was
+even sensitive to the *order* the banks were written in — so a glob over a real
+run period could fail on files that were, for a reader's purposes, identical.
+:::
+
 ## The accessors
 
 | Call | Returns |
