@@ -137,6 +137,38 @@ The nesting carries through every `library=` backend. Because the array axis is
 **regular** (every cell the same length), reductions like `ak.sum(..., axis=-1)`
 and NumPy reshapes are exact — no ragged handling needed.
 
+## PDG masses
+
+`pid` is a code, and kinematics need a mass. `ox.pdg_mass` maps one to the other
+in bulk, keeping whatever shape you hand it — so the result lines up with the
+momentum columns read beside it:
+
+```python
+p = f.arrays("REC::Particle", ["pid", "px", "py", "pz"])
+m = ox.pdg_mass(p.pid)                       # jagged, same shape as p.pid
+E = np.sqrt(p.px**2 + p.py**2 + p.pz**2 + m**2)
+```
+
+Masses are in **GeV**, matching CLAS12 momenta (`unit="MeV"` if you want the
+other convention). `ox.pdg_name(11)` gives `'e-'`, for labelling.
+
+Two CLAS12 details are handled that general PDG helpers get wrong:
+
+* **`pid == 0`** — a track the reconstruction could not identify. Real files are
+  full of them. You get `nan`, not an exception; it propagates into the
+  kinematics it touches and cuts with `~np.isnan(m)`. Pass `unknown=0.0` for the
+  massless convention.
+* **`pid == 45`** — CLAS12 writes **Geant3** codes for light nuclei (45/46/47/49
+  = deuteron/triton/He4/He3), which are not PDG codes at all. They resolve to
+  the same masses as their PDG spellings (`1000010020` and friends).
+
+`ox.PDG_MASS_GEV` is the table, and assigning into it takes effect immediately —
+nothing caches a derived copy:
+
+```python
+ox.PDG_MASS_GEV[9999] = 1.234    # some exotic your cook writes
+```
+
 ## Discovery
 
 ```python

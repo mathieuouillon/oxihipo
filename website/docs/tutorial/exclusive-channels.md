@@ -71,7 +71,7 @@ variables relative to the virtual photon $q = k - k'$:
 - $\phi_h$ — the azimuth of the hadron around $\vec q$ (the Trento angle).
 
 ```python
-M_PIP = 0.139570
+M_PIP = ox.pdg_mass(211)     # 0.13957039 GeV
 pip = p[p.pid == 211]
 lead = ak.argmax(np.sqrt(pip.px**2 + pip.py**2 + pip.pz**2), axis=1, keepdims=True)
 h = ak.firsts(pip[lead])          # leading π⁺ per event (None if the event has none)

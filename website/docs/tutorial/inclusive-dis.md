@@ -42,7 +42,7 @@ import numpy as np
 import awkward as ak
 
 BEAM = 10.604          # GeV — from the run period, NOT the file
-M_P  = 0.938272        # proton mass (GeV)
+M_P  = ox.pdg_mass(2212)   # proton mass in GeV
 
 # `ele` is the scattered electron from the previous page (one record per event).
 Ee    = np.sqrt(ele.px**2 + ele.py**2 + ele.pz**2)     # E' ≈ |p| (electron is ~massless)

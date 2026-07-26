@@ -10,6 +10,7 @@ registry ``{dvcs: 0, sidis: 1, elastic: 2}``.
 """
 
 import fnmatch
+import math
 import os
 import pathlib
 import shutil
@@ -1542,3 +1543,117 @@ def test_recreate_two_arg_shim_warns_and_updates(tmp_path):
     w.close()
     # the shim must behave exactly as update(): source events copied through
     assert "REC::Particle" in oxihipo.open(str(dst)).keys()
+
+
+# --- wave 4: PDG masses ----------------------------------------------------
+#
+# The two cases that make `particle.Particle.from_pdgid` unusable here are the
+# two a CLAS12 file is full of, so they are pinned first.
+
+
+def test_pdg_mass_of_an_unidentified_track_is_not_an_error():
+    # `pid == 0` marks a track the reconstruction could not identify. Real
+    # REC::Particle columns carry it; `from_pdgid(0)` raises InvalidParticle.
+    assert math.isnan(oxihipo.pdg_mass(0))
+    assert oxihipo.pdg_mass(0, unknown=0.0) == 0.0
+
+
+def test_pdg_mass_handles_the_geant3_light_nuclei():
+    # CLAS12 writes Geant3 codes for light nuclei, and `from_pdgid(45)` raises
+    # even though the docs' own PID table lists 45 as the deuteron.
+    assert oxihipo.pdg_mass(45) == pytest.approx(1.8761239303)
+    assert oxihipo.pdg_mass(46) == pytest.approx(2.8094321221)
+    assert oxihipo.pdg_mass(47) == pytest.approx(3.7284013307)
+    assert oxihipo.pdg_mass(49) == pytest.approx(2.8094135301)
+    # ...and they agree with the PDG spelling of the same nuclei.
+    assert oxihipo.pdg_mass(45) == oxihipo.pdg_mass(1000010020)
+    assert oxihipo.pdg_mass(49) == oxihipo.pdg_mass(1000020030)
+
+
+def test_pdg_mass_matches_the_constants_the_tutorials_hardcode():
+    # These are the literals in website/docs/tutorial/*.md; the point of the
+    # function is to replace them, so it had better agree with them.
+    assert oxihipo.pdg_mass(2212) == pytest.approx(0.938272, abs=1e-6)
+    assert oxihipo.pdg_mass(211) == pytest.approx(0.139570, abs=1e-6)
+    assert oxihipo.pdg_mass(11) == pytest.approx(0.000511, abs=1e-6)
+    assert oxihipo.pdg_mass(321) == pytest.approx(0.493677, abs=1e-6)
+
+
+def test_pdg_mass_preserves_jagged_structure():
+    ak = pytest.importorskip("awkward")
+    pid = ak.Array([[11, 211], [2212], [], [0, 45, -321]])
+    m = oxihipo.pdg_mass(pid)
+    # Same nesting, so it lines up with the momentum columns beside it.
+    assert ak.to_list(ak.num(m)) == [2, 1, 0, 3]
+    got = ak.to_list(m)
+    assert got[0][1] == pytest.approx(0.13957039)
+    assert got[1][0] == pytest.approx(0.93827209)
+    assert math.isnan(got[3][0])
+    assert got[3][1] == pytest.approx(1.8761239303)
+
+
+def test_pdg_mass_keeps_its_input_kind():
+    ak = pytest.importorskip("awkward")
+    assert isinstance(oxihipo.pdg_mass(11), float)
+    assert isinstance(oxihipo.pdg_mass(np.array([11, 211])), np.ndarray)
+    assert isinstance(oxihipo.pdg_mass(ak.Array([[11]])), ak.Array)
+
+
+def test_pdg_mass_units():
+    assert oxihipo.pdg_mass(2212, unit="MeV") == pytest.approx(938.27208943)
+    assert oxihipo.pdg_mass(2212, unit="gev") == pytest.approx(0.93827208943)
+    with pytest.raises(ValueError, match="GeV"):
+        oxihipo.pdg_mass(2212, unit="TeV")
+
+
+def test_pdg_mass_reads_the_table_on_every_call():
+    # The table is documented as user-extensible, which only works if nothing
+    # caches a derived copy of it.
+    code = 999_999
+    assert math.isnan(oxihipo.pdg_mass(code))
+    oxihipo.PDG_MASS_GEV[code] = 12.5
+    try:
+        assert oxihipo.pdg_mass(code) == 12.5
+        assert oxihipo.pdg_mass(np.array([code]))[0] == 12.5
+    finally:
+        del oxihipo.PDG_MASS_GEV[code]
+    assert math.isnan(oxihipo.pdg_mass(code))
+
+
+def test_pdg_mass_rejects_codes_beyond_the_table_edges():
+    # `searchsorted` returns 0 and len(table) at the ends; both must miss
+    # rather than index the nearest neighbour.
+    lo = min(oxihipo.PDG_MASS_GEV) - 1
+    hi = max(oxihipo.PDG_MASS_GEV) + 1
+    got = oxihipo.pdg_mass(np.array([lo, hi]))
+    assert math.isnan(got[0]) and math.isnan(got[1])
+
+
+def test_pdg_name():
+    assert oxihipo.pdg_name(11) == "e-"
+    assert oxihipo.pdg_name(45) == "D2"
+    assert oxihipo.pdg_name(0) == "?"
+    assert oxihipo.pdg_name(np.array([2212, 0, 211])) == ["p", "?", "pi+"]
+
+
+def test_pdg_table_matches_the_particle_library():
+    # The baked numbers were generated from `particle`; this is what stops them
+    # drifting from it. Skipped when it is not installed — it is not a
+    # dependency, precisely so the answer does not depend on the environment.
+    particle = pytest.importorskip("particle")
+    for code, mass in oxihipo.PDG_MASS_GEV.items():
+        pdgid = (
+            int(particle.Geant3ID(code).to_pdgid()) if code in (45, 46, 47, 49) else code
+        )
+        ref = particle.Particle.from_pdgid(pdgid).mass
+        ref = 0.0 if ref is None else ref / 1000.0
+        assert mass == ref, f"pid {code}"
+        assert oxihipo.PDG_NAME[code] == particle.Particle.from_pdgid(pdgid).name
+
+
+def test_pdg_mass_composes_with_a_real_read(chain):
+    ak = pytest.importorskip("awkward")
+    p = chain.arrays("REC::Particle", ["pid", "px"])
+    m = oxihipo.pdg_mass(p.pid)
+    # One mass per particle, aligned with the momentum column read beside it.
+    assert ak.to_list(ak.num(m)) == ak.to_list(ak.num(p.px))

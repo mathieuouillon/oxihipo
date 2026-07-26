@@ -33,8 +33,6 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   The mypy `python_version` is now `3.10` and CI's test job runs on 3.10, so a
   3.11+ construct fails in review rather than at a user's import.
 
-### Changed
-
 - **A chain no longer requires every file to carry the same dictionary.** Opening
   one refused unless each file's `Dict` compared *equal* to file 0's, and that
   comparison was order-sensitive — `Dict` derives `PartialEq` over a positional
@@ -67,6 +65,31 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   Measured against the pre-change baseline, one virtual call per multi-MB record
   is not detectable: `scan` −1.2%/−2.2%/−6.0%, `columns` +1.5%/+1.2%/+3.5%,
   `open` −5.9%/0.0%/−0.5%, all inside this machine's run-to-run spread.
+- `record_decompressed_sizes()` reads its record headers in parallel. It runs
+  before `iterate(step_size="200 MB")` can plan a single batch, so on a
+  many-record chain the serial version was a visible stall before any data moved.
+
+- **The version badges on the GitHub README**, which showed `v0.1.1` and
+  `python 3.10 | … | 3.14` while 0.3.0 was current — stale across four releases.
+
+  They were dynamic, on the reasoning that a live page wants "latest". That
+  reasoning was wrong: a shields.io badge sits behind its own Cloudflare edge
+  (`max-age=10800`) *and*, on GitHub, behind `camo.githubusercontent.com`, and a
+  dynamic URL never changes, so neither cache ever refetches. A static
+  `pypi-vX.Y.Z` badge puts the version in the URL, so each release mints a URL no
+  cache has seen and the correct image appears immediately.
+
+  All four badge sites are now static. `scripts/release.py prepare` rewrites
+  three of them and the generated docs page reads the version from
+  `py/pyproject.toml`, so none can be forgotten. `check` also now asserts the
+  `python-3.13+` badges match `requires-python` — the mismatch that shipped in
+  0.2.0.
+
+- **A release no longer publishes without reaching the docs site.** The
+  release-notes page is generated from `CHANGELOG.md` at build time, but the docs
+  workflow was path-filtered to `website/**` — and a release commit touches the
+  changelog and manifests, not `website/`. So 0.3.0 shipped to PyPI while the
+  site still showed 0.2.2. `CHANGELOG.md` is now in the filter.
 
 ### Fixed
 
@@ -132,6 +155,27 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ### Added
 
+- **`ox.pdg_mass(pid)` — PDG masses in bulk**, plus `ox.pdg_name` and the
+  `ox.PDG_MASS_GEV` table behind them. Every tutorial hardcoded the constants it
+  needed (`M_PIP = 0.139570`, `M_P = 0.938272`) because there was nothing to
+  call, and the obvious substitute fails on exactly the two things a CLAS12
+  `REC::Particle` column is full of: `Particle.from_pdgid(0)` raises, though
+  `pid == 0` is simply a track the reconstruction could not identify, and
+  `from_pdgid(45)` raises, though CLAS12 writes **Geant3** codes for light
+  nuclei (45/46/47/49 = D/T/He4/He3) and the project's own PID table documents
+  45 as the deuteron.
+
+  It keeps the shape it is given — scalar, NumPy, or the jagged `ak.Array` a
+  column read returns — so a mass column lines up with the momenta beside it.
+  Unknown codes give `nan` rather than raising. Masses are GeV, matching CLAS12
+  momenta; `particle` reports MeV, and mixing them is a factor of 10³.
+
+  No new dependency: the table is baked (generated from `particle`, and a test
+  cross-checks all 44 codes against it when it is installed), so the answer does
+  not change with the environment. One `searchsorted`, ~37 ms over 2M particles
+  against ~3 s per-row — 61×, not the 250× the design note estimated. Its
+  suggested `np.unique` step turned out to be slower than looking up directly,
+  since it sorts the column to save a lookup over 44 entries.
 - **`to_dask()` is a real dask-awkward source.** It was `from_map` over a plain
   function, which dask-awkward cannot introspect, so the array was lazy in name
   only: constructing it **read partition 0** just to learn the type, `len()` and
@@ -167,34 +211,6 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   one at the sdist root.
 - `scripts/release.py check` also verifies `CITATION.cff`'s version and that
   `py/LICENSE` has not drifted from `LICENSE`.
-
-### Changed
-
-- `record_decompressed_sizes()` reads its record headers in parallel. It runs
-  before `iterate(step_size="200 MB")` can plan a single batch, so on a
-  many-record chain the serial version was a visible stall before any data moved.
-
-- **The version badges on the GitHub README**, which showed `v0.1.1` and
-  `python 3.10 | … | 3.14` while 0.3.0 was current — stale across four releases.
-
-  They were dynamic, on the reasoning that a live page wants "latest". That
-  reasoning was wrong: a shields.io badge sits behind its own Cloudflare edge
-  (`max-age=10800`) *and*, on GitHub, behind `camo.githubusercontent.com`, and a
-  dynamic URL never changes, so neither cache ever refetches. A static
-  `pypi-vX.Y.Z` badge puts the version in the URL, so each release mints a URL no
-  cache has seen and the correct image appears immediately.
-
-  All four badge sites are now static. `scripts/release.py prepare` rewrites
-  three of them and the generated docs page reads the version from
-  `py/pyproject.toml`, so none can be forgotten. `check` also now asserts the
-  `python-3.13+` badges match `requires-python` — the mismatch that shipped in
-  0.2.0.
-
-- **A release no longer publishes without reaching the docs site.** The
-  release-notes page is generated from `CHANGELOG.md` at build time, but the docs
-  workflow was path-filtered to `website/**` — and a release commit touches the
-  changelog and manifests, not `website/`. So 0.3.0 shipped to PyPI while the
-  site still showed 0.2.2. `CHANGELOG.md` is now in the filter.
 
 ## [0.3.0] - 2026-07-24
 

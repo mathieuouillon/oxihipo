@@ -61,8 +61,17 @@ __all__ = [
     "CorruptFileError",
     "OxihipoError",
     "FileHeader",
+    "PDG_MASS_GEV",
+    "PDG_NAME",
+    "pdg_mass",
+    "pdg_name",
     "__version__",
 ]
+
+# Masses live in their own module: a pure NumPy lookup table with no reason to
+# know about chains, and re-exported here because `ox.pdg_mass(p.pid)` is how it
+# is used.
+from ._pdg import PDG_MASS_GEV, PDG_NAME, pdg_mass, pdg_name  # noqa: E402
 
 # Library name → return type, for the `library=` annotations below.
 _Library = Literal["ak", "np", "pd", "arrow"]
