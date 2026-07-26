@@ -199,7 +199,10 @@ def generate(path, n_events=20000, seed=1):
     cdt = dict(pindex="i2", detector="i1", sector="i1", layer="i1", energy="f4", lv="f4", lw="f4")
     hdt = dict(pindex="i2", detector="i1", nphe="f4")
 
-    with ox.create(path, compression="lz4percolumn") as w:
+    # `recreate`, not `create`: regenerating the sample is exactly "replace it",
+    # and `create` refuses an existing path. `overwrite=True` is required for
+    # one release while `recreate(path)` guards against the old meaning.
+    with ox.recreate(path, overwrite=True, compression="lz4percolumn") as w:
         w.new_bank("RUN::config", {"run": "I", "torus": "F", "solenoid": "F"})
         w.new_bank("REC::Particle", {"pid": "I", "px": "F", "py": "F", "pz": "F",
                                      "vx": "F", "vy": "F", "vz": "F", "vt": "F",

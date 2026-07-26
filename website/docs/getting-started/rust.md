@@ -20,7 +20,9 @@ declared MSRV cannot silently drift.
 
 ### Optional features
 
-Pure-Rust by default; nothing below is required.
+`lz4-c` is **on by default**, so a plain dependency links the C liblz4 bindings.
+`default-features = false` gives a genuinely pure-Rust build on `lz4_flex`.
+Nothing else below is required.
 
 | Feature | What it gives you |
 |---|---|

@@ -197,7 +197,8 @@ megabytes it was filled from. `reduce=` defaults to `operator.add`, which
 are folded in **event order**, so a non-commutative `reduce` is safe.
 
 **Dask.** `f.to_dask(...)` is a real `dask-awkward` source: nothing is read to
-build the graph, entry boundaries are known (so `len()` and slices work), and
+build the graph, entry boundaries are known (so `len()` and slices work — except
+under `cut=`, which may drop events and so forfeits them), and
 columns are projected — `dak.sum(p.px)` reads `px`, not the whole bank.
 
 ## Filtering and skimming
@@ -215,7 +216,8 @@ yield (its `num_entries` stays the pre-filter total, as in uproot).
 
 ## Writing
 
-`create` opens a new file; `recreate` *decorates* an existing one. Both return a
+`create` opens a new file (and refuses an existing path); `recreate` *replaces*
+one; `update` *decorates* an existing one. All three return a
 columnar `Writer` with an uproot-style `new_bank` / `extend` / `close` API —
 columns are written **zero-copy** from NumPy or Awkward, with the GIL released.
 

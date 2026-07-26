@@ -174,7 +174,7 @@ def correct_momentum(part, torus):
 Two honest notes: (1) the coefficients are **collaboration-specific** and
 **period-specific** — don't hardcode someone else's; (2) apply corrections *before*
 computing $Q^2$, invariant masses, etc., and once you've settled them you can
-persist the corrected columns with [`recreate`](./scaling-up.md#write-a-derived-bank)
+persist the corrected columns with [`update`](./scaling-up.md#write-a-derived-bank)
 so downstream jobs skip the recomputation.
 
 With clean particles and honest kinematics, we can go after exclusive final states.

@@ -17,8 +17,9 @@ pip install oxihipo
 ```
 
 Wheels ship for Linux, macOS, and Windows (CPython ≥ 3.10). That one command is
-the whole install — **every backend comes with it**, so each `library=` value
-works out of the box and there is no extra to hunt for.
+the whole install — **every `library=` backend comes with it**, so `"ak"` / `"np"`
+/ `"pd"` / `"arrow"` all work out of the box. Two things are opt-in, and they are
+listed below: `[dask]` and `[vector]`.
 
 Or build from source with [maturin](https://www.maturin.rs) and the Rust
 toolchain:

@@ -96,7 +96,7 @@ The `tags` array must line up 1:1 with the events the chain yields. See the
 ## Write a derived bank {#write-a-derived-bank}
 
 Once your corrections and kinematics are settled, don't recompute them every run —
-**decorate** the file with a new bank holding them. `recreate` copies every event
+**decorate** the file with a new bank holding them. `update` copies every event
 verbatim and attaches the banks you add:
 
 ```python

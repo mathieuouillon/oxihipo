@@ -13,8 +13,10 @@ Jefferson Lab CLAS12. Built so that **read throughput meaningfully exceeds
 the C++ `hipo4` reader** on the same hardware, with an API that fits Rust
 idioms.
 
-Reads and writes HIPO version 6 files. Physics, FFI, ROOT, and XRootD
-layers are intentionally out of scope.
+Reads and writes HIPO version 6 files. FFI and XRootD layers are intentionally
+out of scope; ROOT is reachable from the Python side through RDataFrame, and that
+side also carries a thin analysis layer (PDG masses, Lorentz vectors, `pindex`
+joins). The Rust crate itself stays physics-free.
 
 ## Features
 
@@ -69,7 +71,8 @@ layers are intentionally out of scope.
   `f.filtered(event_tag="dvcs")` / `f.skim(tags=…)`). The pushdown costs
   nothing on reads that don't use it (benchmarked below). See the
   [event-tagging design & roadmap](https://mathieuouillon.github.io/oxihipo/docs/design/event-tagging).
-- **Pure-Rust by default**, with optional features: `lz4-c` (C LZ4
+- **A pure-Rust build is available** (`default-features = false`, on `lz4_flex`),
+  though `lz4-c` is on by **default**: `lz4-c` (C LZ4
   bindings — faster decode + `Lz4Best` HC), `lz4-apple` (Apple
   `libcompression` decode), and `mimalloc-allocator`.
 
@@ -235,9 +238,13 @@ h = f.map_reduce(analyze, "REC::Particle", workers=8)   # analyze runs IN the wo
 arr = f.to_dask("REC::Particle")            # lazy dask-awkward, columns projected
 ```
 
+`to_vector` needs `pip install oxihipo[vector]` and `to_dask` needs
+`oxihipo[dask]` — those two are real extras, unlike `[awkward]`/`[pandas]`/
+`[arrow]`, which ship by default.
+
 `pdg_mass` handles the two CLAS12 codes that break general PDG helpers — `pid == 0`
 (an unidentified track, so `nan` rather than an exception) and the **Geant3** nuclei
-`45`–`49`, which are not PDG codes at all. `map_reduce` is the one that matters for
+`45`/`46`/`47`/`49`, which are not PDG codes at all. `map_reduce` is the one that matters for
 scale: `workers=` parallelises only the read, leaving the physics on one core,
 where a CLAS12 selection actually spends its time.
 
@@ -342,10 +349,11 @@ cargo run --release --example bench_par -- /path/to/file.hipo 0
 ## Notable design decisions
 
 - **`Chain` is the only reader.** A chain of one file is the common case;
-  multi-file chains share one parsed dictionary and stream records on demand
-  (no whole-file mapping). `Chain::open` validates that every file in the
-  chain has the same `Dict` — catches mismatched cooking versions at
-  construction time.
+  multi-file chains stream records on demand and
+  present the **union** of their dictionaries. Files need not declare the same
+  banks — a run period rarely does — but one bank name with two layouts, or one
+  `(group, item)` claimed by two banks, is still refused: banks are located by
+  id, so a collision would decode one file's bytes against another's schema.
 - **`Event<'a>` carries only borrowed bytes;** the typical handle is
   `EventCtx<'a> = (Event<'a>, &Dict)`, which lets `ev.bank("REC::Particle")`
   resolve the schema without separate juggling.

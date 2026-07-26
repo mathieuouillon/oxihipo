@@ -20,8 +20,10 @@ exceeds the C++ `hipo4` reader on the same hardware, with an API that fits Rust
 idioms — and it ships a columnar, [uproot](https://uproot.readthedocs.io)-shaped
 Python binding on top.
 
-It reads and writes HIPO version 6 files. Physics, FFI, ROOT, and XRootD layers
-are intentionally out of scope.
+It reads and writes HIPO version 6 files. FFI and XRootD layers are intentionally
+out of scope; ROOT is reachable through [RDataFrame](./python/rdataframe.md), and
+the Python side carries a thin *analysis* layer — PDG masses, Lorentz vectors and
+`pindex` joins — described below. The Rust crate itself stays physics-free.
 
 ## Which language?
 

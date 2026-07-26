@@ -72,7 +72,7 @@ with ox.create("copy.hipo") as w:
 
 The workflow physicists actually want: cook once, then add derived per-event
 banks later — an ML score, a computed kinematic — **without rewriting the
-physics banks**. `recreate` copies every source event verbatim and attaches the
+physics banks**. `update` copies every source event verbatim and attaches the
 new banks you declare:
 
 ```python

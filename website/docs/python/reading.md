@@ -347,10 +347,16 @@ The result is aligned 1:1 with the list, so your order is preserved and
 duplicates are honoured; an out-of-range index gives an empty entry rather than
 an error. Mutually exclusive with `entry_start`/`entry_stop`.
 
-:::tip Sort the list
-Each lookup goes through the reader's record cache, so a run of indices inside
-one record costs a single decode — while a shuffled list re-decodes per lookup.
-`entries=sorted(interesting)` is materially faster on a big file.
+:::note Order no longer matters for speed
+Entries are grouped by the record that holds them before anything is read, so
+each record is decompressed once however the list is arranged, and the groups run
+in parallel (`threads=`). Sorting used to matter a great deal — a shuffled list
+re-decoded a whole record *per index*, 7 ms against 13 µs for the same 256
+ascending — which is exactly the case a list of interesting events found by an
+earlier pass falls into.
+
+`entries=` is not supported on a filtered chain: the indices address the file's
+event stream and would ignore the filter.
 :::
 
 ## Handing off to other tools
