@@ -7,7 +7,44 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`for_each_column` failed outright on `Lz4PerBank` files.** Its fallback
+  comment claimed to cover "Bytes / ByBank / chunked", but the fallback calls
+  `decode_record_into`, which expects a single whole-record payload. A by-bank
+  record is one LZ4 stream *per bank* plus a directory, so the call died with
+  `lz4 decompress failed`. Every other format worked, and the one existing test
+  only ever tried `Lz4PerColumn` and `Lz4`, so nothing caught it.
+
+  There is now a by-bank branch that inflates just the requested bank's stream
+  and reads the column per event, mirroring the per-column opaque path — and a
+  test that sweeps a scalar *and* a jagged column on all six formats and
+  requires them to agree with per-event reads.
+
+  Found from downstream: a CLI built on this crate could not run `stats` on
+  files its own `skim` had written, since `Lz4PerBank` is a common default.
+- **PDG masses for light nuclei were the neutral atom, not the bare nucleus.**
+  The table was generated from `particle`, which tabulates the atom for the
+  `10LZZZAAAI` codes — the deuteron entry was 2.014101778 u exactly. A detector
+  sees a stripped ion, so every nuclear mass was heavy by Z·m_e: 0.511 MeV for
+  a deuteron or triton, 1.022 MeV for an alpha or He3. Small, systematic, and
+  wrong for the one thing `pdg_mass` exists to do.
+
+  All eight nuclear codes (Geant3 45/46/47/49 and their PDG spellings) are
+  corrected; nothing else moves, since a free proton has no bound electron. The
+  cross-check against `particle` now subtracts Z·m_e for those codes — comparing
+  raw would have re-asserted the bug — and a second test pins the four values
+  against the literature independently of the library.
+
+### Changed
+
+- **`for_each_column` documents that it ignores the chain filter.** It walks the
+  record index directly, so `with_filter` and the record-tag pushdown are both
+  skipped and the caller gets every value in the file. That is deliberate — the
+  per-column fast path has no per-event predicate to apply — but silently
+  returning a plausible number over the wrong event set is a trap, so the doc
+  now says so and points at `read_columns`, which is also columnar and does
+  honour the filter.
 
 ## [0.4.0] - 2026-07-26
 

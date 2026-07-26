@@ -19,6 +19,13 @@ generated from it, but the answer here does not change with the environment.
 
 Masses are in **GeV**, matching CLAS12 momenta. ``particle`` reports MeV, which
 is a trap worth stating: mixing the two silently gives kinematics off by 10³.
+
+Light nuclei are **bare nuclei**, not neutral atoms. ``particle`` tabulates the
+neutral atom for the ``10LZZZAAAI`` codes — for the deuteron, 2.014101778 u
+exactly — which is heavier than the nucleus by Z·m_e. A detector sees a stripped
+ion, so the atomic value overstates its energy by 0.511 MeV for a deuteron and
+1.022 MeV for an alpha. Small, systematic, and wrong for the one thing this
+function exists to do.
 """
 
 from __future__ import annotations
@@ -79,18 +86,19 @@ PDG_MASS_GEV: dict[int, float] = {
     3322: 1.31486,
     3312: 1.32171,
     3334: 1.67245,
-    # nuclei, PDG form
-    1000010020: 1.8761239303,
-    1000010030: 2.8094321221,
-    1000020030: 2.8094135301,
-    1000020040: 3.7284013307,
+    # Nuclei, PDG form. Bare nuclei — the neutral-atom masses `particle`
+    # reports are heavier by Z*m_e; see the module docstring.
+    1000010020: 1.87561293134931,
+    1000010030: 2.80892112314931,
+    1000020030: 2.80839153219862,
+    1000020040: 3.72737933279862,
     # nuclei, Geant3 form — what CLAS12 actually writes into REC::Particle.pid.
     # Kept as distinct keys rather than remapped, because `pid == 45` is what a
     # user reads out of the file and what the docs' PID table lists.
-    45: 1.8761239303,
-    46: 2.8094321221,
-    47: 3.7284013307,
-    49: 2.8094135301,
+    45: 1.87561293134931,
+    46: 2.80892112314931,
+    47: 3.72737933279862,
+    49: 2.80839153219862,
 }
 
 #: PDG code → short name, for labelling. Same codes as :data:`PDG_MASS_GEV`.

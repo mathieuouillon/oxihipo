@@ -214,3 +214,62 @@ fn every_format_supports_partial_read() {
         assert_eq!(sum, want, "{name}: partial single-bank read");
     }
 }
+
+#[test]
+fn for_each_column_works_on_every_format() {
+    // The column-major sweep had a format-shaped hole: its fallback comment
+    // claimed to cover "Bytes / ByBank / chunked", but the fallback calls
+    // `decode_record_into`, which expects a whole-record payload. An
+    // `Lz4PerBank` record is per-bank streams plus a directory, so the LZ4 call
+    // failed outright — `lz4 decompress failed`. Every other format worked, and
+    // the existing test in tests/per_column.rs only ever tried `Lz4PerColumn`
+    // and `Lz4`, so nothing noticed.
+    //
+    // Sum the same column through `for_each_column` and through ordinary
+    // per-event reads, on all six formats, and require they agree.
+    let dir = tempfile::tempdir().unwrap();
+    let want: i64 = (0..N_EVENTS).sum(); // Σ evno
+
+    for (name, comp) in FORMATS {
+        let path = dir.path().join(format!("fec-{name}.hipo"));
+        write_file(&path, *comp).unwrap();
+        let chain = Chain::open(&path).unwrap();
+
+        let mut sum = 0i64;
+        chain
+            .for_each_column::<i64, _>("REC::Event", "evno", |v| sum += v.iter().sum::<i64>())
+            .unwrap_or_else(|e| panic!("{name}: for_each_column failed: {e}"));
+        assert_eq!(sum, want, "{name}: evno sum");
+
+        // A jagged bank too: the by-bank path reads per event out of one
+        // stream, so a bank with a varying row count is the case that would
+        // mis-slice if the byte ranges were wrong rather than merely absent.
+        let mut rows = 0usize;
+        let mut px = 0f64;
+        chain
+            .for_each_column::<f32, _>("REC::Particle", "px", |v| {
+                rows += v.len();
+                px += v.iter().map(|&x| x as f64).sum::<f64>();
+            })
+            .unwrap_or_else(|e| panic!("{name}: for_each_column(px) failed: {e}"));
+
+        // Reference: the same reduction through per-event reads.
+        let mut ref_rows = 0usize;
+        let mut ref_px = 0f64;
+        for ev in chain.events() {
+            let ev = ev.unwrap();
+            if let Some(b) = ev.bank("REC::Particle") {
+                let h = chain
+                    .schemas()
+                    .require("REC::Particle")
+                    .unwrap()
+                    .handle::<f32>("px")
+                    .unwrap();
+                ref_rows += b.rows() as usize;
+                ref_px += b.read(h).iter().map(|&x| x as f64).sum::<f64>();
+            }
+        }
+        assert_eq!(rows, ref_rows, "{name}: px row count");
+        assert!((px - ref_px).abs() < 1e-3, "{name}: px sum");
+    }
+}

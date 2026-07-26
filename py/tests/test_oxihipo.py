@@ -1575,10 +1575,10 @@ def test_pdg_mass_of_an_unidentified_track_is_not_an_error():
 def test_pdg_mass_handles_the_geant3_light_nuclei():
     # CLAS12 writes Geant3 codes for light nuclei, and `from_pdgid(45)` raises
     # even though the docs' own PID table lists 45 as the deuteron.
-    assert oxihipo.pdg_mass(45) == pytest.approx(1.8761239303)
-    assert oxihipo.pdg_mass(46) == pytest.approx(2.8094321221)
-    assert oxihipo.pdg_mass(47) == pytest.approx(3.7284013307)
-    assert oxihipo.pdg_mass(49) == pytest.approx(2.8094135301)
+    assert oxihipo.pdg_mass(45) == pytest.approx(1.87561293134931)
+    assert oxihipo.pdg_mass(46) == pytest.approx(2.80892112314931)
+    assert oxihipo.pdg_mass(47) == pytest.approx(3.72737933279862)
+    assert oxihipo.pdg_mass(49) == pytest.approx(2.80839153219862)
     # ...and they agree with the PDG spelling of the same nuclei.
     assert oxihipo.pdg_mass(45) == oxihipo.pdg_mass(1000010020)
     assert oxihipo.pdg_mass(49) == oxihipo.pdg_mass(1000020030)
@@ -1603,7 +1603,7 @@ def test_pdg_mass_preserves_jagged_structure():
     assert got[0][1] == pytest.approx(0.13957039)
     assert got[1][0] == pytest.approx(0.93827209)
     assert math.isnan(got[3][0])
-    assert got[3][1] == pytest.approx(1.8761239303)
+    assert got[3][1] == pytest.approx(1.87561293134931)
 
 
 def test_pdg_mass_keeps_its_input_kind():
@@ -1650,10 +1650,26 @@ def test_pdg_name():
     assert oxihipo.pdg_name(np.array([2212, 0, 211])) == ["p", "?", "pi+"]
 
 
+#: Electron mass in GeV — the per-Z correction between a neutral atom and the
+#: bare nucleus a detector actually sees.
+_M_E = 0.00051099895069
+
+#: Nuclear codes and their Z. `particle` tabulates the neutral *atom* for these.
+_NUCLEI_Z = {
+    45: 1, 46: 1, 47: 2, 49: 2,
+    1000010020: 1, 1000010030: 1, 1000020030: 2, 1000020040: 2,
+}
+
+
 def test_pdg_table_matches_the_particle_library():
     # The baked numbers were generated from `particle`; this is what stops them
     # drifting from it. Skipped when it is not installed — it is not a
     # dependency, precisely so the answer does not depend on the environment.
+    #
+    # Nuclei are compared against the atom *minus* Z electrons, because
+    # `particle` reports the neutral atom for the 10LZZZAAAI codes and a
+    # detected ion is stripped. Comparing raw would re-assert the bug this
+    # test exists to prevent.
     particle = pytest.importorskip("particle")
     for code, mass in oxihipo.PDG_MASS_GEV.items():
         pdgid = (
@@ -1661,8 +1677,24 @@ def test_pdg_table_matches_the_particle_library():
         )
         ref = particle.Particle.from_pdgid(pdgid).mass
         ref = 0.0 if ref is None else ref / 1000.0
-        assert mass == ref, f"pid {code}"
+        ref -= _NUCLEI_Z.get(code, 0) * _M_E
+        assert mass == pytest.approx(ref, abs=1e-12), f"pid {code}"
         assert oxihipo.PDG_NAME[code] == particle.Particle.from_pdgid(pdgid).name
+
+
+def test_light_nuclei_are_bare_nuclei_not_neutral_atoms():
+    # The distinguishing number, independent of `particle`: the deuteron nucleus
+    # is 1875.613 MeV and the deuterium atom is 1876.124. Getting the atom here
+    # overstates every ion's energy by Z * 0.511 MeV.
+    assert oxihipo.pdg_mass(45, unit="MeV") == pytest.approx(1875.613, abs=1e-3)
+    assert oxihipo.pdg_mass(46, unit="MeV") == pytest.approx(2808.921, abs=1e-3)
+    assert oxihipo.pdg_mass(47, unit="MeV") == pytest.approx(3727.379, abs=1e-3)
+    assert oxihipo.pdg_mass(49, unit="MeV") == pytest.approx(2808.391, abs=1e-3)
+    # The Geant3 and PDG spellings must stay in step.
+    for g3, pdg in ((45, 1000010020), (46, 1000010030), (47, 1000020040), (49, 1000020030)):
+        assert oxihipo.pdg_mass(g3) == oxihipo.pdg_mass(pdg), f"{g3} vs {pdg}"
+    # A free proton has no bound electron, so it must be untouched.
+    assert oxihipo.pdg_mass(2212, unit="MeV") == pytest.approx(938.272089, abs=1e-5)
 
 
 def test_pdg_mass_composes_with_a_real_read(chain):

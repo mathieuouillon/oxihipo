@@ -449,6 +449,19 @@ impl Chain {
     /// otherwise), so use it for order-independent work. Errors if
     /// `bank`/`column` is absent from the dictionary or `T` doesn't match
     /// the column's wire type and per-row length.
+    ///
+    /// # This does **not** apply the chain filter
+    ///
+    /// It walks the record index directly, so a filter set with
+    /// [`Chain::with_filter`] — and the record-tag pushdown — are both ignored:
+    /// you get every value in the file. That is deliberate, because the
+    /// per-column fast path reads whole column streams and has no per-event
+    /// predicate to apply, but it is a trap: a caller that filters and then
+    /// sweeps gets a plausible number over the wrong event set, silently.
+    ///
+    /// Use [`Chain::read_columns`] when a filter is in play. It is also
+    /// columnar, honours the filter and the tag pushdown, and costs little more
+    /// on the formats this method was written for.
     pub fn for_each_column<T, F>(&self, bank: &str, column: &str, mut visit: F) -> Result<()>
     where
         T: crate::schema::BankColumnType,
@@ -507,7 +520,29 @@ impl Chain {
                     }
                     continue;
                 }
-                // Fallback (Bytes / ByBank / chunked): decode + per-event read.
+                if header.compression.is_by_bank() {
+                    // By-bank: one LZ4 stream per bank plus a directory, so the
+                    // record has no single decompressible payload and the
+                    // fallback below cannot touch it. Inflate just this bank's
+                    // stream and read the column out of it per event — the same
+                    // shape as the per-column opaque path above.
+                    let rec = ByBankRecord::parse(&raw)?;
+                    let Some(b) = rec.bank_index(group, item) else {
+                        continue;
+                    };
+                    let stream = rec.bank_stream(b)?;
+                    for e in 0..rec.event_count() {
+                        if rec.has(e, b) {
+                            let r = rec.bank_byte_range(e, b);
+                            if let Ok(bk) = Bank::new(schema, &stream[r]) {
+                                visit(&bk.read(handle));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // Fallback (whole-record payloads: None / Lz4 / Lz4Best / Gzip):
+                // decode + per-event read.
                 payload.clear();
                 offsets.clear();
                 let decoded =
