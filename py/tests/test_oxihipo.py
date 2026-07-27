@@ -331,6 +331,34 @@ def test_module_arrays_workers():
     assert ak.to_list(par) == ak.to_list(single)
 
 
+def test_workers_from_an_unguarded_script_explains_itself(tmp_path):
+    """`workers>1` from a script with no ``__main__`` guard must say why.
+
+    ``spawn`` re-imports the caller's ``__main__`` in every worker, so a read at
+    module level re-runs during that import and the workers die on start-up.
+    What came out was a bare ``BrokenProcessPool`` naming neither the cause nor
+    the fix, and it is the first thing anyone hits who passes ``workers=`` from
+    a plain script.
+    """
+    import subprocess
+    import sys
+
+    script = tmp_path / "unguarded.py"
+    script.write_text(
+        "import oxihipo\n"
+        f"oxihipo.arrays({os.path.join(DATA, 'sample.hipo')!r}, "
+        "'REC::Particle', ['pid'], workers=2)\n"
+    )
+    r = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=300
+    )
+    assert r.returncode != 0
+    # The advice, not merely a non-zero exit: the point of the change is that
+    # the message tells the reader what to do about it.
+    assert '__name__ == "__main__"' in r.stderr
+    assert "workers=1" in r.stderr
+
+
 # --- correctness fixes (empty selections, guards, degenerate ranges) --------
 def test_empty_selection_returns_empty_not_crash(chain):
     """A non-matching filter_name / empty bank list yields an empty (length-0)

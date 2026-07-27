@@ -1,11 +1,28 @@
 """Multi-process reading — spawn worker processes so one chain is read by
 several concurrent I/O streams.
 
-On a parallel filesystem (JLab ifarm's ``/volatile``, Lustre) a single process
-saturates well below the filesystem's aggregate bandwidth — the limit is
-per-process, not per-node. Splitting the chain into disjoint, record-aligned
-event ranges and reading them from ``workers`` separate processes turns one
-stream into ``workers`` streams and scales the read up.
+Splitting the chain into disjoint, record-aligned event ranges and reading them
+from ``workers`` separate processes turns one stream into ``workers`` streams.
+
+**Measured on ifarm, this did not speed anything up** — read that before
+reaching for it. On a 9.1 GB DST in ``/volatile``, at a fixed budget of
+``workers x threads = 32``:
+
+- **cold** (page cache dropped per read): flat at ~4.1 s for every split from
+  1x32 to 16x2, and *worse* at 32x1 (5.1 s). There was no per-process ceiling
+  left to beat: the file had ``stripe_count: 1`` — the directory default — so
+  every read of it lands on a single Lustre OST no matter how many processes
+  ask. Re-striping a copy across 8 OSTs did not change it either.
+- **warm**: strictly worse, and monotonically so — 0.44 s at 1x32 against
+  1.26 s at 4x8 and 2.09 s at 32x1. Page cache has no per-process limit, so all
+  the extra processes add is pickling the buffers back to the parent.
+
+Where it should still pay is a *many-file* chain, where each worker opens
+different files and the parent is not the bottleneck; that case is not
+measured here. For a single large file, prefer ``threads`` (which scales to
+~16) and, if you control how the file is written, a per-bank or per-column
+codec — that was worth ~3x on a warm read, far more than anything ``workers``
+did.
 
 Each worker re-opens the source and runs the same Rust ``read_columns`` on its
 range (with the GIL released); the parent stitches the returned NumPy buffers
@@ -18,7 +35,24 @@ from __future__ import annotations
 
 import multiprocessing as mp
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
+
+# `spawn` re-imports the caller's `__main__` in every worker. A script whose
+# read sits at module level therefore re-runs that read while the worker starts,
+# and the children die during import — surfacing as a bare `BrokenProcessPool`
+# that names neither the cause nor the fix. It is the first thing anyone hits
+# who passes `workers=` from a plain script, so the exception says it.
+_SPAWN_HINT = (
+    "reading with workers>1 starts worker processes with 'spawn', which "
+    "re-imports your __main__ module in every worker. The workers died during "
+    "start-up. The two things that cause this:\n\n"
+    "  * the read runs at module level, so it re-runs during that import. "
+    'Put it behind:  if __name__ == "__main__":\n'
+    "  * __main__ is not an importable file - a script fed on stdin "
+    "(python - < s.py), `python -c`, or a REPL. Save it to a .py file and run "
+    "that.\n\n"
+    "Either way workers=1 reads in this process and always works."
+)
 
 
 # One opened (and filtered) chain per worker process, keyed by what identifies
@@ -125,12 +159,15 @@ def _pool(workers):
 def parallel_arrays(source, require, record_tag, event_tag, event_tag_any, selection, ranges, workers, threads, assemble):
     """Read every range across ``workers`` processes, stitch, and assemble once.
     Holds the whole result in the parent (like a non-streaming read)."""
-    with _pool(workers) as ex:
-        futs = [
-            ex.submit(_read_range, source, require, record_tag, event_tag, event_tag_any, selection, s, e, threads)
-            for s, e in ranges
-        ]
-        results = [f.result() for f in futs]  # collected in submission (event) order
+    try:
+        with _pool(workers) as ex:
+            futs = [
+                ex.submit(_read_range, source, require, record_tag, event_tag, event_tag_any, selection, s, e, threads)
+                for s, e in ranges
+            ]
+            results = [f.result() for f in futs]  # collected in submission (event) order
+    except BrokenExecutor as e:
+        raise RuntimeError(f"{_SPAWN_HINT}\n\nunderlying error: {e}") from e
     return assemble(_concat_raw(results))
 
 
@@ -138,6 +175,13 @@ def parallel_iterate(source, require, record_tag, event_tag, event_tag_any, sele
     """Stream ``batches`` across ``workers`` processes, keeping ~``workers`` reads
     in flight and yielding ``(assembled_chunk, start, stop, file_idx)`` in order.
     Resident memory stays ≈ ``workers`` chunks."""
+    try:
+        yield from _iter_batches(source, require, record_tag, event_tag, event_tag_any, selection, batches, workers, threads, assemble)
+    except BrokenExecutor as e:
+        raise RuntimeError(f"{_SPAWN_HINT}\n\nunderlying error: {e}") from e
+
+
+def _iter_batches(source, require, record_tag, event_tag, event_tag_any, selection, batches, workers, threads, assemble):
     with _pool(workers) as ex:
         it = iter(batches)
         inflight = deque()

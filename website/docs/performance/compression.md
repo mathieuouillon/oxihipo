@@ -238,6 +238,41 @@ tightly but inflates an order of magnitude slower. The full breakdown — an ext
 read scope plus the matching Python numbers — is on the
 [Benchmarks](./benchmarks.md) page.
 
+## Through the Python API on ifarm
+
+The table above is a laptop, single-threaded. The same comparison through
+`oxihipo.Chain.read_columns` on ifarm2402, reading `REC::Particle` from 150,000
+events of `rec_clas_022083` at `threads=16`, best-of-3 and repeated three times:
+
+| Format | Size | warm read | cold read |
+|---|---:|---:|---:|
+| `Lz4` (as cooked) | 3.24 GB | 0.169–0.193 s | 0.83–1.23 s |
+| `Lz4PerBank` | 2.61 GB | 0.057–0.072 s | 0.61–0.96 s |
+| `Lz4PerColumn` | 2.44 GB | **0.053–0.060 s** | 0.74–0.96 s |
+
+Values were checked identical across all three files first — a read that is
+faster and wrong is not faster.
+
+**Warm reads are ~3× faster**, and that is the largest single win available to a
+farm analysis: it beats every thread and process knob measured. The gain comes
+from not inflating the other ~46 banks, so it grows the *less* of the file you
+want and disappears if you read everything.
+
+**Cold reads gain much less** (~1.3×), and only in proportion to the smaller
+file — once the read is waiting on Lustre, the codec cannot help. See
+[Parallel reading](../python/parallel.md#when-this-actually-helps) for why extra
+processes do not help there either.
+
+Two costs to weigh before converting a production sample:
+
+- **Writing is 19–23× slower.** Re-encoding those 150,000 events took 224 s
+  (`Lz4PerBank`) and 274 s (`Lz4PerColumn`) against 12 s for `Lz4`. It is a
+  one-time cost paid once per file and repaid on every read, but it is not free.
+- **`hipo4` cannot read these files.** Wire tags 6 and 7 are oxihipo
+  extensions, so a converted sample is unreadable by C++ `hipo4` and anything
+  built on it (coatjava, `clas12root`). Convert a *working copy*, keep the
+  original, or stay on `Lz4` if colleagues need it.
+
 ## Converting existing files
 
 The `recook_by_bank` example re-emits an existing file as `Lz4PerBank`, for A/B

@@ -43,19 +43,46 @@ importable main module. See
 
 ## When this actually helps
 
-**Only when I/O is the bottleneck.** This is the single most important thing to
-understand about `workers=`:
+**Only when I/O is the bottleneck — and on ifarm, measurement did not find a
+case where it was.** This page previously claimed a single process cannot
+saturate a parallel filesystem, so more processes would mean more throughput.
+Tested on ifarm2402 against a 9.1 GB DST in `/volatile`, that did not happen.
 
-- On a **parallel filesystem** (ifarm `/volatile`, Lustre), a single process
-  can't saturate the available bandwidth. More processes, more streams, more
-  throughput. This is what the feature is for.
-- On a **local, already-cached disk**, the limit is decode and memory
-  bandwidth — not I/O. Extra processes add spawn and IPC overhead and make
-  things *slower*. Keep the default `workers=1` there.
+At a fixed budget of `workers × threads = 32`:
 
-Measured on a page-cached 9 GB local file (Apple M4 Pro), `workers=1` beats
-`workers=2`; the multi-process path is farm-specific by design. Don't
-benchmark it on your laptop and conclude it doesn't work.
+| `workers` × `threads` | cold | warm |
+|---|---|---|
+| 1 × 32 | 4.18 s | **0.44 s** |
+| 2 × 16 | 4.14 s | 1.15 s |
+| 4 × 8 | 4.10 s | 1.26 s |
+| 16 × 2 | 4.10 s | 1.45 s |
+| 32 × 1 | 5.06 s | 2.09 s |
+
+("cold" = the file's page cache dropped with `posix_fadvise(DONTNEED)` before
+each read.)
+
+Cold is **flat** — there was no per-process ceiling left to beat. The reason is
+the file layout, not the reader: `lfs getstripe` reported `stripe_count: 1`,
+which is the directory default on `/volatile`, so every read of that file lands
+on a **single Lustre OST** however many processes ask for it. Copying it into a
+`stripe_count: 8` directory did not change the result either (best cold 2.59 s
+striped against 2.44 s unstriped, inside the run-to-run scatter).
+
+Warm is **monotonically worse** — page cache has no per-process limit, so the
+extra processes only add spawn cost and pickling the buffers back to the parent.
+
+So: prefer `threads=` for a single large file (it scales to about 16), and reach
+for `workers=` only after measuring your own case. Where it should still pay is
+a **many-file** chain, with each worker on different files — that case is not
+measured here.
+
+:::warning `workers>1` needs an importable `__main__`
+Workers start with `spawn`, which re-imports your `__main__` in each one. A read
+at module level therefore re-runs during that import and the workers die on
+start-up; so does a script fed on stdin or `python -c`. Put the read behind
+`if __name__ == "__main__":` and run it from a `.py` file. The error says this
+now, having previously surfaced as a bare `BrokenProcessPool`.
+:::
 
 ## Behaviour
 
