@@ -44,8 +44,8 @@ pub mod write;
 pub use crate::error::{HipoError, Result};
 pub use crate::event::{Bank, BankRow, Composite, Event, EventCtx, OwnedEvent};
 pub use crate::read::{
-    Chain, ChainEventIter, ChainRecordSpan, ChainStats, ColumnBuffers, ColumnData, EventIter,
-    Filter, IntoSources, MaterializedColumn,
+    BankOccupancy, Chain, ChainEventIter, ChainRecordSpan, ChainStats, ColumnBuffers, ColumnData,
+    EventIter, Filter, IntoSources, MaterializedColumn, Occupancy,
 };
 pub use crate::schema::{ColumnHandle, DataType, Dict, Schema, SchemaEntry};
 pub use crate::tag::{TagRegistry, TagSet};

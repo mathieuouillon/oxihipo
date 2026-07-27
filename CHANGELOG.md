@@ -9,6 +9,42 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 Nothing yet.
 
+## [0.5.0] - 2026-07-26
+
+### Added
+
+- **`Chain::bank_occupancy`** — which banks carry data, in how many events, and
+  how many rows, **without inflating a single bank or column**. Every number is a
+  function of a bank's per-event byte extent, which both columnar layouts already
+  record in their bank-offset tables, so on `Lz4PerBank` and `Lz4PerColumn`
+  nothing beyond each record's header and offset tables is decompressed. Honors
+  the chain filter, takes an optional global-index range, and follows the usual
+  `threads` convention (`0` = all cores, `1` = sequential).
+
+  This exists because the operation is easy to get wrong outside the library.
+  Computing it from `Chain::events` costs an `OwnedEvent` — a copy of every
+  event's bytes — and enumerating a per-column event's structures first
+  *synthesises* a whole event out of separate column streams: measured at
+  19 µs/event on `Lz4PerBank` and 26 µs/event on `Lz4PerColumn` in a downstream
+  tool, against roughly 1.5 µs/event for reading the presence tables.
+
+  `EventCtx` looks like the escape route and is not: it avoids the copy but
+  cannot enumerate a per-column record's banks, because that needs exactly the
+  synthesis it exists to avoid. A caller who tried it got **4 banks out of 71** —
+  fast, plausible, and wrong with no error. Putting the operation here, with a
+  cross-format equality test, is the fix for that class of mistake rather than
+  for one instance of it.
+
+  Banks declared but never populated are returned with zero counts, so "never
+  written" stays distinguishable from "not in the dictionary". A bank opened with
+  no rows counts as carrying no data, which is the question being asked.
+
+  Classic layouts (`None`/`Lz4`/`Lz4Best`/`Gzip`) keep no per-bank table, so
+  their records are decompressed and their events walked — but with no per-event
+  allocation, so they gain too.
+
+- **`BankOccupancy`** in the crate root, the per-bank result type.
+
 ## [0.4.1] - 2026-07-26
 
 ### Fixed
