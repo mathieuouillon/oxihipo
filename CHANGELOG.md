@@ -7,7 +7,20 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Five more bank-stream slices guarded against a corrupt offset table.** 0.5.1
+  fixed the four columnar sites; the same `&stream[record.bank_byte_range(e, b)]`
+  pattern — a raw slice index with bounds read from the file — remained in
+  `Event::iter_structures`, `OwnedEvent::bank` (twice) and `EventCtx::bank` (twice).
+  These are the *whole-event* paths, so they are what a consumer reaches through
+  `structures()`, `ev.bank()` and the `for_each` callback: a wider surface than the
+  columnar ones. `None` is returned instead of panicking, which already means "no
+  such bank in this event" at every call site.
+
+  After the 0.5.1 fix a downstream fuzz test found the fifth site immediately, so
+  the pattern was grepped for rather than the report chased, which found the other
+  four at once.
 
 ## [0.5.1] - 2026-07-26
 
