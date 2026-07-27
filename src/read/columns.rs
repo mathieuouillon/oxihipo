@@ -457,7 +457,19 @@ fn process_record_columns(
                 match idx {
                     Some(b) if rec.has(e, b) => {
                         let stream = rec.bank_stream(b)?;
-                        let bank = Bank::new(bp.schema, &stream[rec.bank_byte_range(e, b)])?;
+                        // Bounds-checked: the byte range comes from the record's
+                        // own offset table, so a corrupted file can point it past
+                        // the end of the decompressed stream. Indexing the slice
+                        // raw panicked there — "range end index 3400 out of range
+                        // for slice of length 3379" — where every other kind of
+                        // damage in this reader surfaces as an error. A bank whose
+                        // extent does not fit is treated as absent, which is how a
+                        // bank that is not there is already reported.
+                        let Some(raw) = stream.get(rec.bank_byte_range(e, b)) else {
+                            bc.push_event(bp, None);
+                            continue;
+                        };
+                        let bank = Bank::new(bp.schema, raw)?;
                         bc.push_event(bp, Some(&bank));
                     }
                     _ => bc.push_event(bp, None),
@@ -595,7 +607,19 @@ fn process_record_entries(
                 match idx {
                     Some(b) if e < rec.event_count() && rec.has(e, b) => {
                         let stream = rec.bank_stream(b)?;
-                        let bank = Bank::new(bp.schema, &stream[rec.bank_byte_range(e, b)])?;
+                        // Bounds-checked: the byte range comes from the record's
+                        // own offset table, so a corrupted file can point it past
+                        // the end of the decompressed stream. Indexing the slice
+                        // raw panicked there — "range end index 3400 out of range
+                        // for slice of length 3379" — where every other kind of
+                        // damage in this reader surfaces as an error. A bank whose
+                        // extent does not fit is treated as absent, which is how a
+                        // bank that is not there is already reported.
+                        let Some(raw) = stream.get(rec.bank_byte_range(e, b)) else {
+                            bc.push_event(bp, None);
+                            continue;
+                        };
+                        let bank = Bank::new(bp.schema, raw)?;
                         bc.push_event(bp, Some(&bank));
                     }
                     _ => bc.push_event(bp, None),

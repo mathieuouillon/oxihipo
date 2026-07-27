@@ -249,3 +249,79 @@ fn empty_record_does_not_truncate_a_scan() {
         chain.event_count()
     );
 }
+
+/// A corrupted by-bank offset table must not panic.
+///
+/// `read_columns` (and `for_each_column`) sliced the decompressed bank stream with
+/// a byte range taken from the record's own offset table. A corrupted table points
+/// past the end, and indexing a slice raw panicked — "range end index 3400 out of
+/// range for slice of length 3379" — where every other kind of damage in this
+/// reader surfaces as an error.
+///
+/// Found by property-testing the downstream CLI against byte-flipped files, not by
+/// reasoning about the code: the offsets survive enough of the header to be used,
+/// which is a narrow enough window that no hand-written case had hit it.
+#[test]
+fn a_corrupt_by_bank_offset_table_errors_rather_than_panicking() {
+    use oxihipo::{Chain, Compression, DataType, Dict, Schema, Writer};
+
+    let dir = std::env::temp_dir().join("oxihipo_corrupt_offsets");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("f.hipo");
+
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "A::b",
+        900,
+        1,
+        [("v".into(), DataType::Float, 1)],
+    ));
+    let mut w = Writer::create(&path)
+        .schemas(&d)
+        .compression(Compression::Lz4PerBank)
+        .build()
+        .unwrap();
+    for e in 0..64i32 {
+        w.event(|ev| {
+            ev.bank("A::b", |b| {
+                for r in 0..=(e % 4) {
+                    b.row(|c| {
+                        c.set("v", (e * 10 + r) as f32)?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+
+    // Flip bytes across the whole file. Most mutations are rejected earlier; the
+    // point is that none of them reaches a panic, whichever stage catches it.
+    let good = std::fs::read(&path).unwrap();
+    let mut reached = 0usize;
+    for i in 0..good.len() {
+        for mask in [0xff_u8, 0x01, 0x80] {
+            let mut bytes = good.clone();
+            bytes[i] ^= mask;
+            std::fs::write(&path, &bytes).unwrap();
+
+            // Every columnar entry point that slices a bank stream.
+            if let Ok(chain) = Chain::open(&path) {
+                reached += 1;
+                let _ = chain.read_columns(&[("A::b", &["v"][..])], None, 1);
+                let _ = chain.bank_occupancy(None, 1);
+                let _ = chain.for_each_column::<f32, _>("A::b", "v", |_| {});
+                let _ = chain.event_count();
+            }
+        }
+    }
+    assert!(
+        reached > 0,
+        "no mutation produced an openable file, so nothing was exercised"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

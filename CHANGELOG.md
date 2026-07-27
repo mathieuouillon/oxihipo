@@ -7,7 +7,30 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A corrupt bank offset table panicked instead of erroring.** Four places sliced
+  a decompressed bank stream with a byte range read from the record's own offset
+  table — `&stream[rec.bank_byte_range(e, b)]` — in `read_columns` (both the
+  by-bank and per-column branches) and in `for_each_column` (likewise). A damaged
+  table points past the end of the stream, and indexing a slice raw panics:
+  `range end index 3400 out of range for slice of length 3379`. Every other kind of
+  damage in this reader surfaces as an `Err`, so this was reachable from `scan`,
+  `stats`, `hist` and `banks` in any downstream tool, on a file that opened cleanly.
+
+  A bank whose extent does not fit is now treated as absent, which is how a bank
+  that is not there was already reported.
+
+  Found by property-testing a downstream CLI against byte-flipped files, not by
+  reading the code: the offsets have to survive enough of the header to be used at
+  all, which is a narrow enough window that no hand-written case had hit it. The
+  regression test flips every byte of a by-bank file three ways and drives every
+  columnar entry point — which is what turned up the fourth site, after the first
+  three were fixed.
+
+  One further raw slice in the same function, `&stream[..n * elem]`, was checked
+  and left alone: `n` is derived by dividing by `elem`, so the bound holds by
+  construction.
 
 ## [0.5.0] - 2026-07-26
 

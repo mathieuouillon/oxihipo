@@ -492,8 +492,14 @@ impl Chain {
                         let stream = rec.column_stream(b, 0)?;
                         for e in 0..rec.event_count() {
                             if rec.has(e, b) {
+                                // Bounds-checked for the same reason as in
+                                // `read_columns`: the range comes from the file's
+                                // own offset table, and a corrupt one indexed the
+                                // slice out of range and panicked.
                                 let r = rec.bank_byte_range(e, b);
-                                if let Ok(bk) = Bank::new(schema, &stream[r]) {
+                                if let Some(Ok(bk)) =
+                                    stream.get(r).map(|raw| Bank::new(schema, raw))
+                                {
                                     visit(&bk.read(handle));
                                 }
                             }
@@ -533,8 +539,12 @@ impl Chain {
                     let stream = rec.bank_stream(b)?;
                     for e in 0..rec.event_count() {
                         if rec.has(e, b) {
+                            // Bounds-checked, as in the by-bank branch above: a
+                            // corrupt offset table indexed this slice out of range
+                            // and panicked. An exhaustive byte-flip test found this
+                            // second site after the first three were fixed.
                             let r = rec.bank_byte_range(e, b);
-                            if let Ok(bk) = Bank::new(schema, &stream[r]) {
+                            if let Some(Ok(bk)) = stream.get(r).map(|raw| Bank::new(schema, raw)) {
                                 visit(&bk.read(handle));
                             }
                         }
