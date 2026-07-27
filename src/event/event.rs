@@ -223,8 +223,15 @@ impl<'a> Iterator for StructureIter<'a> {
                     // A decompression error here is corruption the iterator
                     // construction already ruled out; treat it as the end.
                     let stream = rec.bank_stream(b).ok()?;
+                    // Bounds-checked: the range comes from the record's own offset
+                    // table, so a corrupt one points past the end of the stream and
+                    // indexing raw panics. Same fix as in `read_columns` and
+                    // `for_each_column`; this site is reached through
+                    // `structures()`, which is how a whole-event consumer sees a
+                    // by-bank record. An out-of-range extent ends the iteration
+                    // rather than yielding a bank that is not there.
                     let range = rec.bank_byte_range(e, b);
-                    return Some((hdr, &stream[range]));
+                    return Some((hdr, stream.get(range)?));
                 }
                 None
             }

@@ -277,8 +277,11 @@ impl OwnedEvent {
                     return None;
                 }
                 let stream = record.bank_stream(bank_idx).ok()?;
+                // Bounds-checked: a corrupt offset table points this range past
+                // the end of the stream, and indexing raw panics. `None` here means
+                // the same thing it already means — no such bank in this event.
                 let range = record.bank_byte_range(*event_idx, bank_idx);
-                let bank = Bank::new(schema, &stream[range]).ok()?;
+                let bank = Bank::new(schema, stream.get(range)?).ok()?;
                 self.bank_cache.set(Some(CachedBank {
                     group: g,
                     item: i,
@@ -296,8 +299,9 @@ impl OwnedEvent {
                 }
                 let bank = if record.is_opaque(bank_idx) {
                     let stream = record.column_stream(bank_idx, 0).ok()?;
+                    // Bounds-checked, as above.
                     let range = record.bank_byte_range(*event_idx, bank_idx);
-                    Bank::new(schema, &stream[range]).ok()?
+                    Bank::new(schema, stream.get(range)?).ok()?
                 } else {
                     Bank::new_per_column(schema, record, bank_idx, *event_idx)
                 };
@@ -340,8 +344,12 @@ impl OwnedEvent {
                 Loc::ByBank { bank_idx },
             ) => {
                 let stream = record.bank_stream(bank_idx).ok()?;
+                // Bounds-checked, as elsewhere in this file: a corrupt offset
+                // table points past the end of the stream.
                 let range = record.bank_byte_range(*event_idx, bank_idx);
-                Bank::new(schema, &stream[range]).ok()
+                stream
+                    .get(range)
+                    .and_then(|raw| Bank::new(schema, raw).ok())
             }
             (
                 Inner::PerColumn {
@@ -367,8 +375,12 @@ impl OwnedEvent {
                     return None;
                 }
                 let stream = record.bank_stream(bank_idx).ok()?;
+                // Bounds-checked, as elsewhere in this file: a corrupt offset
+                // table points past the end of the stream.
                 let range = record.bank_byte_range(*event_idx, bank_idx);
-                Bank::new(schema, &stream[range]).ok()
+                stream
+                    .get(range)
+                    .and_then(|raw| Bank::new(schema, raw).ok())
             }
             Inner::PerColumn {
                 record, event_idx, ..

@@ -188,7 +188,12 @@ impl<'a> EventCtx<'a> {
                 }
                 let stream = record.bank_stream(bank_idx).ok()?;
                 let range = record.bank_byte_range(event_idx, bank_idx);
-                Bank::new(schema, &stream[range]).ok()
+                // Bounds-checked: the range comes from the record's own offset
+                // table, which a corrupt file can point past the end of the
+                // stream. `None` already means "no such bank here".
+                stream
+                    .get(range)
+                    .and_then(|raw| Bank::new(schema, raw).ok())
             }
             Backend::PerColumn { record, event_idx } => {
                 let bank_idx = record.bank_index(schema.group(), schema.item())?;
@@ -199,7 +204,12 @@ impl<'a> EventCtx<'a> {
                     // Opaque bank: one whole-bank stream, served contiguously.
                     let stream = record.column_stream(bank_idx, 0).ok()?;
                     let range = record.bank_byte_range(event_idx, bank_idx);
-                    Bank::new(schema, &stream[range]).ok()
+                    // Bounds-checked: the range comes from the record's own offset
+                    // table, which a corrupt file can point past the end of the
+                    // stream. `None` already means "no such bank here".
+                    stream
+                        .get(range)
+                        .and_then(|raw| Bank::new(schema, raw).ok())
                 } else {
                     Some(Bank::new_per_column(schema, record, bank_idx, event_idx))
                 }
