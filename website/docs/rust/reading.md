@@ -190,6 +190,55 @@ as the scalar reads, and `get` can be inferred from the binding
 when `N` isn't known at compile time (e.g. a generic dump tool walking a
 dictionary): it returns a `Cow<[T]>` slice.
 
+## What's in the file — `bank_occupancy`
+
+Which banks carry data, in how many events, and how many rows — **without
+inflating a single bank or column**:
+
+```rust
+let occ = chain.bank_occupancy(None, 0)?;   // whole chain, all cores
+for b in &occ.banks {
+    if b.events == 0 {
+        continue;                            // declared, never populated
+    }
+    let pct = 100.0 * b.events as f64 / occ.events_scanned as f64;
+    println!("{:<24} {:>7} events ({pct:.1}%)  {} rows, max {}",
+             b.name, b.events, b.total_rows, b.max_rows);
+}
+```
+
+Every number is a function of a bank's per-event *byte extent*, which both
+columnar layouts already record in their bank-offset tables. So on `Lz4PerBank`
+and `Lz4PerColumn` nothing beyond each record's header and offset tables is
+decompressed. The classic layouts have no such table, so their records are
+inflated and their events walked — but with no per-event allocation.
+
+`range` restricts to global event indices `[start, stop)`; `threads` follows the
+usual convention (`0` = all cores, `1` = sequential). The chain filter applies.
+
+`events_scanned` is part of the result rather than something you compute,
+because it is the denominator of every percentage above and you cannot recover
+it from the bank counts. **`event_count()` is not it** — that is pre-filter, so
+under a filter every rate derived from it is wrong.
+
+Banks declared but never written come back with zero counts rather than being
+omitted, so "never populated" stays distinguishable from "not in the
+dictionary". A bank opened with no rows counts as carrying no data.
+
+:::tip Don't rebuild this from `events()`
+It is tempting to walk [`events()`](#iterating-events) and enumerate each
+event's structures. That costs an `OwnedEvent` — a copy of every event's bytes —
+and on a per-column file enumerating an event's structures *synthesises the
+whole event* out of separate column streams first. Measured on 20,000 events of
+a CLAS12 run: 19 µs/event on `Lz4PerBank`, 26 µs/event on `Lz4PerColumn`,
+against 1.5 µs/event here.
+
+`EventCtx` looks like the way around the copy and is not: it cannot enumerate a
+per-column record's banks at all, because that needs exactly the synthesis it
+exists to avoid. A caller who tried it got **4 banks out of 71** — fast,
+plausible, and wrong with no error anywhere.
+:::
+
 ## Typed rows
 
 `ev.rows::<T>()` decodes a bank into a generated row struct; `bank_row!` builds
