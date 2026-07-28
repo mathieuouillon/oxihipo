@@ -128,7 +128,7 @@ impl FileInner {
             first + RecordHeader::parse(&hdr)?.total_bytes()
         };
 
-        let mut index = build_index_by_scanning(&shared, len, first_data)?;
+        let mut index = build_index_by_scanning(&shared, len, first_data, true)?;
 
         // Drop the trailer if the scan walked into it.
         //
@@ -204,10 +204,10 @@ impl FileInner {
         let index = if file_header.trailer_position != 0 {
             match build_index_from_trailer(&shared, len, &file_header, first_data_record_offset) {
                 Ok(idx) => idx,
-                Err(_) => build_index_by_scanning(&shared, len, first_data_record_offset)?,
+                Err(_) => build_index_by_scanning(&shared, len, first_data_record_offset, false)?,
             }
         } else {
-            build_index_by_scanning(&shared, len, first_data_record_offset)?
+            build_index_by_scanning(&shared, len, first_data_record_offset, false)?
         };
 
         Ok(Self {
@@ -522,6 +522,7 @@ fn build_index_by_scanning(
     file: &SharedFile,
     file_len: u64,
     first_data_record_offset: u64,
+    stop_at_truncated: bool,
 ) -> Result<FileEventIndex> {
     let mut idx = FileEventIndex::new();
     let mut off = first_data_record_offset;
@@ -536,10 +537,16 @@ fn build_index_by_scanning(
             break;
         }
         // A record claiming more bytes than the file has is where a killed
-        // writer stopped. Indexing it produced an entry that opened fine and
-        // then failed on read ("record extends past EOF") — the file appeared
-        // to hold events that could not be fetched. The usable data ends here.
-        if off + len > file_len {
+        // writer stopped.
+        //
+        // Only *salvage* stops here. On the normal path the entry is indexed
+        // and the read fails loudly later, which is deliberate: truncation is
+        // genuine corruption and the library's contract is to raise on it, not
+        // to hand back a shorter file. Making this unconditional turned a
+        // truncated file into one that opened quietly with fewer events — the
+        // binding's `test_truncated_file_raises` caught it, which is exactly
+        // the silent loss that test exists to prevent.
+        if stop_at_truncated && off + len > file_len {
             break;
         }
         // An empty record is legal (e.g. a skim that kept nothing from a
