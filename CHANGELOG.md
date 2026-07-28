@@ -60,12 +60,17 @@ Nothing yet.
 
 ### Fixed
 
-- **`build_index_by_scanning` indexed a record that extends past EOF.** It
-  checked that a record's *header* fits in the file, not the record, so a killed
+- **A truncated tail no longer defeats `open_salvage`.** The record scan checked
+  that a record's *header* fits in the file, not the record, so a killed
   writer's half-written last record produced an index entry that opened fine and
-  then failed on read with "record extends past EOF" — the file appeared to hold
-  events that could not be fetched. Affects any trailer-less truncated file, not
-  only salvage.
+  then failed on read with "record extends past EOF".
+
+  Salvage now stops there and keeps the intact prefix. **The normal path is
+  unchanged and still raises**, deliberately: truncation is genuine corruption,
+  and a reader that quietly returned a shorter file would give no way to tell.
+  Making the stop unconditional was the first attempt, and the binding's
+  `test_truncated_file_raises` caught it — the difference matters only because
+  salvage's caller has already been told the file is damaged.
 
 ## [0.5.2] - 2026-07-26
 
