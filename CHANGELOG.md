@@ -7,7 +7,61 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`Chain::for_each_range` / `for_each_ranges`** — stream one or several global
+  event ranges, reading only the records they touch. Reading part of a file
+  previously meant `event(idx)` per index, which is why a per-record index could
+  not be exploited: a downstream cut that correctly skipped 85% of events came
+  out **4.5x slower** through that path than a full scan.
+
+  Measured on a 3 GB CLAS12 file, 21,506 events over 89 ranges (warm, best of 3):
+
+  | | `-j 1` | `-j 16` |
+  |---|---|---|
+  | all ranges, one call | 0.24 s | **0.11 s** |
+  | one call per range | 0.62 s | 0.80 s |
+  | `event(idx)` per index | 0.61 s | — |
+
+  So 5.9x against per-index reading at 16 threads and 2.6x at one. The
+  single-threaded margin is modest because `event` caches the record it last
+  inflated — contiguous access was already reasonable; what this adds is
+  parallelism across records.
+
+  **Pass every range in one call.** Each call rebuilds the record task list and
+  pays a rayon dispatch, so looping spends its time on bookkeeping — at 16
+  threads that overhead makes the loop slower than one thread. A record
+  straddling a boundary is read once and its out-of-range events dropped, so
+  `events_in` counts what the ranges hold. Ranges may overlap and arrive
+  unsorted; indices are the same pre-filter space as `read_columns(range)`.
+- **`Chain::open_salvage`** — open a file whose 56-byte header is unusable, by
+  finding the records themselves. The header is bookkeeping (magic, version,
+  counts, where the dictionary and trailer are) and all of it is re-derivable,
+  because every record carries its own header and magic. A file missing its
+  first 56 bytes was not unreadable, only unopenable by a path that parses that
+  header first.
+
+  Two things the scan has to handle, both found by testing rather than by
+  reading the format. **The trailer looks like a data record** — nothing in its
+  header says otherwise (measured: `is_last_record` is 0 on both, and the
+  `bit_info` difference is only padding), so a 120-event file came back with 121
+  events; it is now recognised by content, the `file::index` bank. And **a
+  truncated tail was indexed and then unreadable**, because the scan checked
+  that a record's header fits in the file but not the record — fixed below.
+
+  What it cannot recover is the dictionary, which lives in the record right
+  after the header, so damage that took one usually took the other. The chain
+  then has an empty dictionary rather than a guess; the events are still there
+  and still copyable, but their banks have no names or column types.
+
+### Fixed
+
+- **`build_index_by_scanning` indexed a record that extends past EOF.** It
+  checked that a record's *header* fits in the file, not the record, so a killed
+  writer's half-written last record produced an index entry that opened fine and
+  then failed on read with "record extends past EOF" — the file appeared to hold
+  events that could not be fetched. Affects any trailer-less truncated file, not
+  only salvage.
 
 ## [0.5.2] - 2026-07-26
 
