@@ -25,6 +25,17 @@ impl FileEventIndex {
         Self::default()
     }
 
+    /// Drop the last record, and the events it contributed.
+    ///
+    /// For salvage, which scans a file that may still have a trailer: a trailer
+    /// is an ordinary-looking one-event record, so it is recognised only after
+    /// being indexed.
+    pub fn pop_last(&mut self) {
+        if let Some(last) = self.records.pop() {
+            self.total_events -= u64::from(last.event_count);
+        }
+    }
+
     pub fn push(&mut self, file_offset: u64, record_length: u64, event_count: u32) {
         let first = self.total_events;
         self.records.push(RecordSpan {

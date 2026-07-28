@@ -145,6 +145,30 @@ impl Chain {
         Self::from_paths(src.into_sources()?)
     }
 
+    /// [`open`](Self::open), for a file whose 56-byte header is unusable.
+    ///
+    /// The normal path parses that header first, so a file missing it cannot be
+    /// opened at all — even though nothing important is in it. It holds the
+    /// magic, the version, record counts, where the dictionary starts and where
+    /// the trailer is, and every one of those is re-derivable: each record
+    /// carries its own header and magic, so the records can simply be found.
+    ///
+    /// Use this only after [`open`](Self::open) has failed. It trusts less and
+    /// therefore checks less: it locates the first structure that parses as a
+    /// record and claims a length fitting inside the file, reads the dictionary
+    /// from it if one is there, and indexes the rest by scanning.
+    ///
+    /// **The dictionary may not survive.** It lives in the record right after
+    /// the header, so damage that took the header often took it too. Then the
+    /// events are still readable as bytes — `skim`-style verbatim copying works
+    /// — but their banks have no names or column types, because those appear
+    /// nowhere else in the file. The returned chain has an empty dictionary in
+    /// that case rather than a guess.
+    pub fn open_salvage<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        let inner = FileInner::open_salvage(path.as_ref().to_path_buf())?;
+        Self::from_inners(vec![Arc::new(inner)])
+    }
+
     /// Open every resolved path in parallel, then validate dict equality.
     fn from_paths(paths: Vec<PathBuf>) -> Result<Self> {
         // Each `FileInner::open` is a latency-bound round-trip — a file open

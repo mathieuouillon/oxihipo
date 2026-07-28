@@ -65,6 +65,118 @@ impl FileInner {
         Self::from_source(Arc::new(LocalFile::new(file)), len, path)
     }
 
+    /// Open a file whose 56-byte header cannot be trusted, by finding the
+    /// records themselves.
+    ///
+    /// The file header is pure bookkeeping — magic, version, counts, where the
+    /// dictionary starts, where the trailer is — and every one of those can be
+    /// re-derived from what follows it, because each record carries its own
+    /// header and magic. So a file whose first 56 bytes are gone is not
+    /// unreadable, it is only unopenable by the normal path, which parses that
+    /// header before it does anything else.
+    ///
+    /// What this cannot recover is the **dictionary**, which lives in the record
+    /// immediately after the header. If the damage reached it, the events are
+    /// still there and still copyable, but their banks have no names or column
+    /// types — those exist nowhere else in the file. Callers get an empty
+    /// dictionary and should expect to supply one from a sibling file.
+    pub fn open_salvage(path: PathBuf) -> Result<Self> {
+        let file = File::open(&path)?;
+        let len = file.metadata()?.len();
+        Self::salvage_from_source(Arc::new(LocalFile::new(file)), len, path.clone())
+            .map_err(|e| e.with_path(path))
+    }
+
+    fn salvage_from_source(shared: SharedFile, len: u64, path: PathBuf) -> Result<Self> {
+        // Start the scan *after* an intact file header. The two header kinds
+        // carry the same endian magic at the same offset (both
+        // `..._MAGIC_NUMBER == 28`) and the file header's compression word
+        // reads as a valid `None`, so a file header does parse as a record
+        // header. What rejects it in practice is the length check in
+        // `find_first_record`: word 0 of a file header is the ASCII `HIPO`
+        // magic, which as a record length is far past EOF.
+        //
+        // So this is belt and braces, not the thing that makes salvage correct
+        // — a mutation removing it changes no test. It is kept because relying
+        // on `HIPO` being an implausible length is an accident of the layout,
+        // and because starting at the dictionary is what the code means.
+        let mut fh = [0u8; FILE_HEADER_SIZE];
+        let scan_from = match read_at(&shared, 0, &mut fh) {
+            Ok(()) => match FileHeader::parse(&fh) {
+                Ok(h) => u64::from(h.header_length).max(FILE_HEADER_SIZE as u64),
+                Err(_) => 0,
+            },
+            Err(_) => 0,
+        };
+
+        let first = find_first_record(&shared, len, scan_from).ok_or(HipoError::BadMagic {
+            offset: 0,
+            found: 0,
+            expected: HEADER_MAGIC,
+        })?;
+
+        // The record at the front is the dictionary in a well-formed file. Try
+        // it as one: if it yields schemas, the data starts after it; if not,
+        // this file's dictionary is gone (or it never had one) and that first
+        // record is data, so indexing must start there rather than skip it.
+        let (dict, tag_registry, config) = parse_dictionary(&shared, len, first)?;
+        let first_data = if dict.is_empty() {
+            first
+        } else {
+            let mut hdr = [0u8; RECORD_HEADER_SIZE];
+            read_at(&shared, first, &mut hdr)?;
+            first + RecordHeader::parse(&hdr)?.total_bytes()
+        };
+
+        let mut index = build_index_by_scanning(&shared, len, first_data)?;
+
+        // Drop the trailer if the scan walked into it.
+        //
+        // The normal path never meets this: with a trailer present it indexes
+        // *from* the trailer, and it only scans when there is none. Salvage
+        // scans a file that usually still has one, and a trailer looks like an
+        // ordinary one-event record — no header bit distinguishes it (measured:
+        // `is_last_record` is 0 on both it and a data record). So it is
+        // identified by what it holds, the `file::index` bank, which is what
+        // `build_index_from_trailer` looks for too. Left in, it added a
+        // thirteenth "record" and one phantom event to a 120-event file.
+        if index
+            .records()
+            .last()
+            .is_some_and(|last| holds_file_index(&shared, len, last.file_offset))
+        {
+            index.pop_last();
+        }
+
+        // A header describing what was actually found. `trailer_position` is 0:
+        // the trailer is not looked for here, and claiming one that may not
+        // exist would send a later reader to a bogus offset.
+        let file_header = FileHeader {
+            file_number: 1,
+            header_length: FILE_HEADER_SIZE as u32,
+            record_count: index.records().len() as u32,
+            index_array_length: 0,
+            bit_info: 0x5000_0006,
+            user_header_length: (first_data - first) as u32,
+            user_register: 0,
+            trailer_position: 0,
+            user_int1: 0,
+            user_int2: 0,
+            endianness: crate::wire::bytes::Endianness::Little,
+        };
+
+        Ok(Self {
+            path,
+            file: shared,
+            len,
+            file_header,
+            dict: Arc::new(dict),
+            tag_registry: Arc::new(tag_registry),
+            config: Arc::new(config),
+            index,
+        })
+    }
+
     /// Parse a HIPO file out of any [`ReadAt`] source: header, dictionary,
     /// record index. Split from [`Self::open_inner`] so obtaining the bytes and
     /// interpreting them are separate concerns — the whole point of the seam.
@@ -423,6 +535,13 @@ fn build_index_by_scanning(
         if len == 0 {
             break;
         }
+        // A record claiming more bytes than the file has is where a killed
+        // writer stopped. Indexing it produced an entry that opened fine and
+        // then failed on read ("record extends past EOF") — the file appeared
+        // to hold events that could not be fetched. The usable data ends here.
+        if off + len > file_len {
+            break;
+        }
         // An empty record is legal (e.g. a skim that kept nothing from a
         // batch); skip it and keep scanning. Breaking here silently truncated
         // every later record in a trailer-less file.
@@ -438,6 +557,51 @@ fn build_index_by_scanning(
         }
     }
     Ok(idx)
+}
+
+/// Whether the record at `offset` carries the trailer's `file::index` bank.
+fn holds_file_index(file: &SharedFile, file_len: u64, offset: u64) -> bool {
+    let mut buf = Vec::new();
+    if read_record_into(file, file_len, offset, &mut buf).is_err() {
+        return false;
+    }
+    let mut record = Record::new();
+    if record.load(&buf).is_err() {
+        return false;
+    }
+    record.event(0).is_some_and(|ev| {
+        Event::new(ev)
+            .find(FILE_INDEX_GROUP, FILE_INDEX_ITEM)
+            .is_some()
+    })
+}
+
+/// The offset of the first thing that parses as a record header.
+///
+/// Scans on the 4-byte word grid every HIPO structure sits on, from `from`.
+/// `RecordHeader::parse` already rejects a bad magic and an unknown compression
+/// code, so the remaining check is that the record claims a length that fits in
+/// the file — which is what keeps a stray `0xc0da0100` inside compressed
+/// payload from being mistaken for the start of a record.
+///
+/// `from` exists because a *file* header carries the same endian magic at the
+/// same offset as a record header, so a scan starting at 0 on an intact file
+/// matches the file header itself.
+fn find_first_record(file: &SharedFile, file_len: u64, from: u64) -> Option<u64> {
+    let mut hdr = [0u8; RECORD_HEADER_SIZE];
+    let mut off = from;
+    while off + RECORD_HEADER_SIZE as u64 <= file_len {
+        if read_at(file, off, &mut hdr).is_ok()
+            && let Ok(h) = RecordHeader::parse(&hdr)
+        {
+            let total = h.total_bytes();
+            if total >= RECORD_HEADER_SIZE as u64 && off + total <= file_len {
+                return Some(off);
+            }
+        }
+        off += 4;
+    }
+    None
 }
 
 #[cfg(test)]
