@@ -20,9 +20,24 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   The directory gained a `B × u8` composite `header_size` table, appended after
   the existing tables so every offset before it is byte-for-byte unchanged. One
   parser reads both versions, with the tail defaulting to 0 — which is exactly
-  what the old versions meant. Any other version is rejected rather than
-  misread. Neither codec was ever readable by C++ hipo4, so nothing outside this
-  library is affected; files written by 0.6.0 and earlier still read.
+  what the old versions meant. Any other version is refused rather than
+  misread — measured: a 0.6.0 reader opens a 0.7.0 split-codec file and reports
+  its event count, then fails the first `events()` item with `Lz4PerBank:
+  unsupported extension-format version`. It never returns wrong data.
+
+  Compatibility was checked in both directions, all four codecs, by building
+  v0.6.0 and HEAD side by side and cross-reading:
+
+  | | `None` | `Lz4` | `Lz4PerBank` | `Lz4PerColumn` |
+  |---|---|---|---|---|
+  | HEAD reads 0.6.0 | ✅ | ✅ | ✅ | ✅ |
+  | 0.6.0 reads HEAD | ✅ | ✅ | clean error | clean error |
+
+  The blob codecs are not merely compatible, they are **byte-identical**: the
+  same inputs written by 0.6.0 and by HEAD hash to the same SHA-256. Since those
+  are the only codecs C++ hipo4 and Java can read, interoperability with them
+  cannot have changed. Neither split codec was ever readable outside this
+  library.
 
 ### Fixed
 

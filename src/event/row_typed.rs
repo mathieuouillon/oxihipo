@@ -25,8 +25,12 @@
 //! ```ignore
 //! // Define the row structs once with `bank_row!`, then iterate; the
 //! // handle cache is resolved once per `rows` call and reused per row.
-//! for p in ev.rows::<RecParticle>() {
-//!     for c in ev.rows_for_pindex::<RecCalorimeter>(p.row_index as i16) {
+//! //
+//! // The join key is the particle's *row number*, which comes from
+//! // `enumerate` — `bank_row!` generates only the fields you declare, so
+//! // there is no implicit `row_index` on the row struct.
+//! for (row, p) in ev.rows::<RecParticle>().enumerate() {
+//!     for c in ev.rows_for_pindex::<RecCalorimeter>(row as i16) {
 //!         // O(1) pindex join after the first call builds the index.
 //!     }
 //! }
