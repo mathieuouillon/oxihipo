@@ -75,6 +75,10 @@ struct BankDescriptor {
     group: u16,
     item: u8,
     data_type: u8,
+    /// Composite `header_size` — the top byte of the structure length word.
+    /// Zero for an ordinary bank, and zero for every bank in a v2 record,
+    /// which had nowhere to store it.
+    header_size: u8,
 }
 
 /// Overflow-checked byte length of the by-bank directory *body*
@@ -82,7 +86,11 @@ struct BankDescriptor {
 /// header). `num_banks` and `event_count` are attacker-controlled, so the
 /// `4 * num_banks * event_count` size matrix is computed with checked
 /// arithmetic to avoid a `usize` wrap that could bypass a length gate.
-fn directory_body_len(num_banks: usize, event_count: u32) -> Result<usize> {
+///
+/// `ext_version` 3 appends one `header_size` byte per bank after the per-event
+/// size table; version 2 has no such tail. The length is exact, so it has to
+/// know which layout it is measuring.
+fn directory_body_len(num_banks: usize, event_count: u32, ext_version: u8) -> Result<usize> {
     let nb = num_banks as u64;
     let ec = event_count as u64;
     let bpr = (num_banks.div_ceil(8)) as u64;
@@ -93,11 +101,13 @@ fn directory_body_len(num_banks: usize, event_count: u32) -> Result<usize> {
         let tags = 4u64.checked_mul(ec)?;
         let presence = ec.checked_mul(bpr)?;
         let sizes = 4u64.checked_mul(nb)?.checked_mul(ec)?;
+        let header_sizes = if ext_version >= 3 { nb } else { 0 };
         desc.checked_add(comp)?
             .checked_add(decomp)?
             .checked_add(tags)?
             .checked_add(presence)?
-            .checked_add(sizes)
+            .checked_add(sizes)?
+            .checked_add(header_sizes)
     })()
     .ok_or(HipoError::CorruptRecord {
         offset: 0,
@@ -178,7 +188,12 @@ impl ByBankRecord {
                 reason: "Lz4PerBank: section truncated (header)",
             });
         }
-        if section[0] != 2 {
+        // v2 and v3 differ only by a `num_banks`-byte tail on the directory
+        // carrying each bank's composite `header_size`. Every offset before it
+        // is identical, so one parser reads both: v2 simply has no tail and
+        // every `header_size` defaults to 0 — which is exactly what v2 meant.
+        let ext_version = section[0];
+        if ext_version != 2 && ext_version != 3 {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "Lz4PerBank: unsupported extension-format version",
@@ -209,7 +224,7 @@ impl ByBankRecord {
         // The declared decompressed directory length must match the layout
         // implied by the bank/event counts — reject before inflating into a
         // buffer of that size.
-        if dir_decomp_len != directory_body_len(num_banks, event_count)? {
+        if dir_decomp_len != directory_body_len(num_banks, event_count, ext_version)? {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "Lz4PerBank: directory size inconsistent with bank/event counts",
@@ -237,6 +252,7 @@ impl ByBankRecord {
             event_count,
             &dir,
             streams_off,
+            ext_version,
         )
     }
 
@@ -244,6 +260,7 @@ impl ByBankRecord {
     /// assemble the record. `streams_off` is the byte offset of the first
     /// bank stream within `section`. Shared by v1 (where `dir` borrows the
     /// section) and v2 (where `dir` is the inflated directory).
+    #[allow(clippy::too_many_arguments)]
     fn from_directory(
         header: RecordHeader,
         section: &[u8],
@@ -252,8 +269,9 @@ impl ByBankRecord {
         event_count: u32,
         dir: &[u8],
         streams_off: usize,
+        ext_version: u8,
     ) -> Result<Arc<Self>> {
-        let dir_body_len = directory_body_len(num_banks, event_count)?;
+        let dir_body_len = directory_body_len(num_banks, event_count, ext_version)?;
         if dir.len() < dir_body_len {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
@@ -268,7 +286,9 @@ impl ByBankRecord {
         let presence_bytes = event_count as usize * bytes_per_row;
         let event_bank_sizes_off = presence_off + presence_bytes;
 
-        // descriptors
+        // descriptors, plus the v3 `header_size` tail if this record has one.
+        let header_sizes_off = event_bank_sizes_off + 4 * num_banks * event_count as usize;
+        let has_header_sizes = ext_version >= 3 && dir.len() >= header_sizes_off + num_banks;
         let mut descriptors = Vec::with_capacity(num_banks);
         for b in 0..num_banks {
             let off = b * 4;
@@ -276,6 +296,11 @@ impl ByBankRecord {
                 group: u16::from_le_bytes([dir[off], dir[off + 1]]),
                 item: dir[off + 2],
                 data_type: dir[off + 3],
+                header_size: if has_header_sizes {
+                    dir[header_sizes_off + b]
+                } else {
+                    0
+                },
             });
         }
         // `bank_index` binary-searches this slice, so ascending (group, item)
@@ -403,6 +428,11 @@ impl ByBankRecord {
     pub fn descriptor(&self, bank_idx: u32) -> (u16, u8, u8) {
         let d = &self.descriptors[bank_idx as usize];
         (d.group, d.item, d.data_type)
+    }
+
+    /// The bank's composite `header_size`, or 0 for an ordinary bank.
+    pub fn header_size(&self, bank_idx: u32) -> u8 {
+        self.descriptors[bank_idx as usize].header_size
     }
 
     /// Byte size of event `event_idx`'s instance of bank `bank_idx`.

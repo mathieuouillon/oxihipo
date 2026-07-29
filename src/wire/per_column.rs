@@ -35,6 +35,10 @@ struct BankDescriptor {
     group: u16,
     item: u8,
     data_type: u8,
+    /// Composite `header_size` — the top byte of the structure length word.
+    /// Zero for an ordinary bank, and zero for every bank in a v1 record,
+    /// which had nowhere to store it.
+    header_size: u8,
 }
 
 /// Precomputed column geometry for one bank, cached per record so
@@ -166,7 +170,12 @@ impl PerColumnRecord {
                 reason: "Lz4PerColumn: section truncated (header)",
             });
         }
-        if section[0] != 1 {
+        // v1 and v2 differ only by a `num_banks`-byte tail on the directory
+        // carrying each bank's composite `header_size`. Every offset before it
+        // is identical, so one parser reads both: v1 simply has no tail and
+        // every `header_size` defaults to 0 — which is exactly what v1 meant.
+        let ext_version = section[0];
+        if ext_version != 1 && ext_version != 2 {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "Lz4PerColumn: unsupported extension-format version",
@@ -223,9 +232,11 @@ impl PerColumnRecord {
             event_count,
             &dir,
             streams_off,
+            ext_version,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn from_directory(
         header: RecordHeader,
@@ -235,6 +246,7 @@ impl PerColumnRecord {
         event_count: u32,
         dir: &[u8],
         streams_off: usize,
+        ext_version: u8,
     ) -> Result<Arc<Self>> {
         let fixed_len = directory_fixed_len(num_banks, event_count)?;
         if dir.len() < fixed_len {
@@ -252,7 +264,9 @@ impl PerColumnRecord {
         let sizes_off = presence_off + presence_bytes; // event_bank_byte_sizes
         let stream_sizes_off = sizes_off + 4 * num_banks * ec;
 
-        // descriptors
+        // descriptors, plus the v2 `header_size` tail if this record has one.
+        // The tail sits after the per-stream size table, whose length depends on
+        // `num_cols` — so it is located below, once the stream count is known.
         let mut descriptors = Vec::with_capacity(num_banks);
         for b in 0..num_banks {
             let off = b * 4;
@@ -260,6 +274,7 @@ impl PerColumnRecord {
                 group: u16::from_le_bytes([dir[off], dir[off + 1]]),
                 item: dir[off + 2],
                 data_type: dir[off + 3],
+                header_size: 0,
             });
         }
         // `bank_index` binary-searches this slice, so ascending (group, item)
@@ -308,6 +323,16 @@ impl PerColumnRecord {
                 offset: 0,
                 reason: "Lz4PerColumn: per-stream size table truncated",
             });
+        }
+
+        // v2 tail: one composite `header_size` per bank, after the stream table.
+        // Read here rather than with the descriptors because its offset depends
+        // on the stream count, which `num_cols` only reveals above.
+        let header_sizes_off = stream_sizes_off + stream_table_len;
+        if ext_version >= 2 && dir.len() >= header_sizes_off + num_banks {
+            for (b, d) in descriptors.iter_mut().enumerate() {
+                d.header_size = dir[header_sizes_off + b];
+            }
         }
 
         // event tags
@@ -430,6 +455,11 @@ impl PerColumnRecord {
     pub fn descriptor(&self, bank_idx: u32) -> (u16, u8, u8) {
         let d = &self.descriptors[bank_idx as usize];
         (d.group, d.item, d.data_type)
+    }
+
+    /// The bank's composite `header_size`, or 0 for an ordinary bank.
+    pub fn header_size(&self, bank_idx: u32) -> u8 {
+        self.descriptors[bank_idx as usize].header_size
     }
 
     /// Decompressed byte size of event `event_idx`'s instance of bank

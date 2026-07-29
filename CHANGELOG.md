@@ -7,7 +7,57 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Split-codec record format bumped: `Lz4PerBank` 2 → 3, `Lz4PerColumn` 1 → 2.**
+  The directory gained a `B × u8` composite `header_size` table, appended after
+  the existing tables so every offset before it is byte-for-byte unchanged. One
+  parser reads both versions, with the tail defaulting to 0 — which is exactly
+  what the old versions meant. Any other version is rejected rather than
+  misread. Neither codec was ever readable by C++ hipo4, so nothing outside this
+  library is affected; files written by 0.6.0 and earlier still read.
+
+### Fixed
+
+- **Composite banks lost their format string under `Lz4PerBank` and
+  `Lz4PerColumn`.** A bank's structure length word packs the data size into its
+  low 24 bits and the composite `header_size` — the format string's length —
+  into its top byte. Both split codecs take a record apart and store bank
+  payloads separately, discarding the structure headers, and rebuilt that byte
+  as zero. A composite bank therefore came back looking like an ordinary one:
+  `header_size` read as 0 and `composite()` returned `None`. The two blob
+  codecs, `None` and `Lz4`, were unaffected, so the same file written two ways
+  disagreed about whether its banks were composite. Fixed by the format change
+  above, plus carrying the byte through the by-bank structure iterator and both
+  event synthesisers.
+
+- **`OwnedEvent::composite` returned `None` on every split-codec event.** It
+  delegated to `EventCtx::composite`, which needs original structure bytes and
+  documents itself as returning `None` for by-bank backends — advising callers
+  to up-convert to `OwnedEvent`, the very thing that did not work. It now goes
+  through the synthesised event blob, which (since the fix above) carries the
+  composite `header_size`.
+
+- **`Lz4PerColumn` stored a composite bank column-major** when a schema happened
+  to describe its group/item and its payload divided evenly into rows — a layout
+  that assumes fixed-width rows the bank does not have. Composites are now kept
+  opaque regardless. Belt-and-braces: the split is a permutation the synthesiser
+  inverts, so no round-trip through this library could observe it.
+
+### Added
+
+- `tests/composite_codecs.rs` — composite banks across all four codecs, checked
+  both for the surviving `header_size` and for decoded field values. Two
+  composites with different format-string padding, since only the 8-byte-padded
+  one divides evenly into rows and so reaches the `Lz4PerColumn` guard.
+- `Lz4PerBank` added to the read benchmark's format list. It reaches the reader
+  through the by-bank structure iterator rather than the per-column synthesiser,
+  so benching only `Lz4PerColumn` left that scan path unmeasured.
+
+### Removed
+
+- `tests/zz_b.rs` — a diagnostic that printed record `bit_info` words and
+  asserted nothing, committed by accident in the record-header bit fix.
 
 ## [0.6.0] - 2026-07-29
 

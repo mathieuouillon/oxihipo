@@ -25,7 +25,9 @@ use crate::event::ctx::EventCtx;
 use crate::event::event::{Event, StructureIter};
 use crate::schema::{Dict, Schema};
 use crate::wire::by_bank::ByBankRecord;
-use crate::wire::constants::{BANK_STRUCTURE_SIZE, EH_SIZE, EVENT_HEADER_SIZE};
+use crate::wire::constants::{
+    BANK_STRUCTURE_SIZE, EH_SIZE, EVENT_HEADER_SIZE, STRUCT_FORMAT_SHIFT,
+};
 use crate::wire::per_column::{BankLayout, PerColumnRecord};
 
 /// An event that owns its byte buffer (via `Arc`) and shares the schema
@@ -489,8 +491,21 @@ impl OwnedEvent {
     }
 
     /// Decode a composite structure by name.
+    ///
+    /// Works on every backend, including the split codecs. Those store banks
+    /// bank- or column-major, so [`EventCtx::composite`] has no structure bytes
+    /// to hand back and returns `None`; here the synthesised blob is used
+    /// instead, which restores each bank's composite `header_size` from the
+    /// record directory.
     pub fn composite(&self, name: &str) -> Option<Composite<'_>> {
-        self.ctx().composite(name)
+        match &self.inner {
+            Inner::Bytes { .. } => self.ctx().composite(name),
+            _ => {
+                let schema = self.dict.get(name)?;
+                let (group, item) = (schema.group(), schema.item());
+                EventCtx::new(Event::new(self.bytes()), &self.dict).composite_by_id(group, item)
+            }
+        }
     }
 
     /// Internal: handle-cached [`BankView`](crate::event::BankView) for
@@ -566,10 +581,16 @@ fn synthesize_event_bytes(record: &ByBankRecord, event_idx: u32) -> Vec<u8> {
         let size = record.bank_size(event_idx, b);
 
         // BankStructure header — 8 bytes: u16 group, u8 item, u8 type, u32 length.
+        // The length word is split: low 24 bits are the data size, the top byte
+        // is the composite `header_size`. Splitting a record into per-bank
+        // streams drops the original structure header, so that byte is carried
+        // in the directory and restored here — without it a composite bank
+        // would come back looking non-composite.
         out.extend_from_slice(&group.to_le_bytes());
         out.push(item);
         out.push(data_type);
-        out.extend_from_slice(&size.to_le_bytes());
+        let len_word = size | (u32::from(record.header_size(b)) << STRUCT_FORMAT_SHIFT);
+        out.extend_from_slice(&len_word.to_le_bytes());
 
         // Bank data — decompress this bank's stream (lazy / cached) and
         // copy our event's slice.
@@ -650,7 +671,10 @@ fn synthesize_per_column_event_bytes(
         out.extend_from_slice(&group.to_le_bytes());
         out.push(item);
         out.push(data_type);
-        out.extend_from_slice(&size.to_le_bytes());
+        // See `synthesize_event_bytes` — the top byte of the length word is the
+        // composite `header_size`, restored from the directory.
+        let len_word = size | (u32::from(record.header_size(b)) << STRUCT_FORMAT_SHIFT);
+        out.extend_from_slice(&len_word.to_le_bytes());
         if size == 0 {
             continue;
         }

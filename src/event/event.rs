@@ -215,7 +215,10 @@ impl<'a> Iterator for StructureIter<'a> {
                         item,
                         ty,
                         data_size,
-                        header_size: 0,
+                        // Carried in the record directory: splitting a record
+                        // into per-bank streams discards the original structure
+                        // headers, so this is the only place it survives.
+                        header_size: rec.header_size(b),
                     };
                     if data_size == 0 {
                         return Some((hdr, &[]));

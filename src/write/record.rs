@@ -265,6 +265,10 @@ struct ByBankParts {
     event_count: u32,
     e_count: usize,
     descriptors: Vec<(u16, u8, u8)>,
+    /// Per-bank composite `header_size` — the top byte of the structure length
+    /// word. Carried because the descriptor alone cannot express it, and a bank
+    /// that loses it stops reading as composite.
+    header_sizes: Vec<u8>,
     compressed_streams: Vec<Vec<u8>>,
     compressed_sizes: Vec<u32>,
     decompressed_sizes: Vec<u32>,
@@ -283,6 +287,7 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
 
     let mut event_tags: Vec<u32> = Vec::with_capacity(e_count);
     let mut descriptors: Vec<(u16, u8, u8)> = Vec::new();
+    let mut header_sizes: Vec<u8> = Vec::new(); // [b] composite header_size
     let mut lookup: std::collections::HashMap<(u16, u8), usize> = std::collections::HashMap::new();
     let mut present: Vec<Vec<bool>> = Vec::new(); // [b][e]
     let mut sizes: Vec<Vec<u32>> = Vec::new(); // [b][e]
@@ -298,6 +303,7 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
                 None => {
                     let b = descriptors.len();
                     descriptors.push((hdr.group, hdr.item, hdr.ty));
+                    header_sizes.push(0);
                     lookup.insert(key, b);
                     present.push(vec![false; e_count]);
                     sizes.push(vec![0u32; e_count]);
@@ -305,6 +311,9 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
                     b
                 }
             };
+            // One descriptor describes the bank across every event, so take the
+            // largest header seen. In practice it is constant per bank.
+            header_sizes[b] = header_sizes[b].max(hdr.header_size);
             present[b][e_idx] = true;
             sizes[b][e_idx] = data.len() as u32;
             streams[b].extend_from_slice(data);
@@ -316,6 +325,7 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
     let mut sort_idx: Vec<usize> = (0..num_banks).collect();
     sort_idx.sort_by_key(|&b| (descriptors[b].0, descriptors[b].1));
     let descriptors: Vec<(u16, u8, u8)> = sort_idx.iter().map(|&b| descriptors[b]).collect();
+    let header_sizes: Vec<u8> = sort_idx.iter().map(|&b| header_sizes[b]).collect();
     let present: Vec<Vec<bool>> = sort_idx.iter().map(|&b| present[b].clone()).collect();
     let sizes: Vec<Vec<u32>> = sort_idx.iter().map(|&b| sizes[b].clone()).collect();
     let mut streams: Vec<Vec<u8>> = sort_idx
@@ -362,6 +372,7 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
         event_count,
         e_count,
         descriptors,
+        header_sizes,
         compressed_streams,
         compressed_sizes,
         decompressed_sizes,
@@ -372,7 +383,7 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
     })
 }
 
-/// By-bank **version 2** record path.
+/// By-bank **version 3** record path.
 ///
 /// Same bank streams as v1, but the directory is prefixed with an
 /// extension-format-version byte and LZ4-compressed (it is dominated by
@@ -380,7 +391,7 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
 ///
 /// ```text
 /// +-- compressed payload section -------------------+
-/// | u8  ext_format_version (= 2)                    |
+/// | u8  ext_format_version (= 3)                    |
 /// | u8  reserved[3]                                 |   pad to 4-byte align
 /// | u32 num_banks (B)                               |
 /// | u32 event_count (E)                             |
@@ -397,7 +408,25 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
 ///   E × u32 event_tags
 ///   E × ceil(B/8) presence
 ///   B × E × u32 event_bank_sizes
+///   B × u8  composite header_size            <- v3 only
 /// ```
+///
+/// ## What version 3 adds
+///
+/// A bank's structure length word packs the data size into its low 24 bits and
+/// the composite `header_size` — the length of the format string — into its top
+/// byte. Splitting a record into per-bank streams throws the structure headers
+/// away, so v2 rebuilt that byte as zero and a composite bank came back looking
+/// ordinary. The `header_size` table is what restores it.
+///
+/// It is appended **after** the per-event size matrix rather than widening the
+/// descriptor, so every offset above is byte-for-byte what v2 had. One parser
+/// therefore reads both: v2 simply has no tail, and every `header_size`
+/// defaults to 0 — which is exactly what v2 meant.
+///
+/// The reader rejects any other version, so a v3 file is not silently misread
+/// by an older build. Neither version is readable by C++ hipo4, which does not
+/// know the split codecs at all.
 fn build_by_bank_record_bytes(
     events: &[&[u8]],
     user_word_1: u64,
@@ -406,13 +435,14 @@ fn build_by_bank_record_bytes(
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
-    const EXT_FORMAT_VERSION: u8 = 2;
+    const EXT_FORMAT_VERSION: u8 = 3;
 
     let ByBankParts {
         num_banks,
         event_count,
         e_count,
         descriptors,
+        header_sizes,
         compressed_streams,
         compressed_sizes,
         decompressed_sizes,
@@ -428,7 +458,8 @@ fn build_by_bank_record_bytes(
         + 4 * num_banks                     // decompressed sizes
         + 4 * e_count                       // tags
         + e_count * bytes_per_row           // presence
-        + 4 * num_banks * e_count; // event_bank_sizes
+        + 4 * num_banks * e_count           // event_bank_sizes
+        + num_banks; // composite header_size (v3)
     let mut dir = Vec::with_capacity(dir_len);
     for &(g, i, t) in &descriptors {
         dir.extend_from_slice(&g.to_le_bytes());
@@ -450,6 +481,10 @@ fn build_by_bank_record_bytes(
             dir.extend_from_slice(&s.to_le_bytes());
         }
     }
+    // v3 tail: one composite `header_size` per bank. Appended rather than
+    // widening the descriptor so every offset above is unchanged, which is what
+    // lets a v2 reader be a v3 reader with the tail defaulted to zero.
+    dir.extend_from_slice(&header_sizes);
     debug_assert_eq!(dir.len(), dir_len);
 
     // ---- LZ4-compress the directory. ----------------------------------
@@ -534,7 +569,7 @@ fn build_by_bank_record_bytes(
 ///
 /// ```text
 /// +-- compressed payload section -------------------+
-/// | u8  ext_format_version (= 1)                    |
+/// | u8  ext_format_version (= 2)                    |
 /// | u8  reserved[3]                                 |   pad to 4-byte align
 /// | u32 num_banks (B)                               |
 /// | u32 event_count (E)                             |
@@ -551,10 +586,23 @@ fn build_by_bank_record_bytes(
 ///   E × ceil(B/8) presence
 ///   B × E × u32 event_bank_byte_sizes               (decompressed bank size)
 ///   S × { u32 compressed_size, u32 decompressed_size }
+///   B × u8  composite header_size                   <- v2 only
 /// ```
 ///
 /// Streams appear bank-major: bank 0's columns (or its single opaque
 /// stream), then bank 1's, and so on — matching the `num_cols` order.
+///
+/// ## What version 2 adds
+///
+/// The `header_size` table, for the same reason as by-bank v3: a bank's
+/// structure length word carries the composite format-string length in its top
+/// byte, splitting a record discards the structure headers, and v1 rebuilt that
+/// byte as zero — so a composite bank came back looking ordinary.
+///
+/// It is appended **after** the per-stream size table (whose length depends on
+/// `num_cols`, hence the position) rather than widening the descriptor, so every
+/// offset above is byte-for-byte what v1 had and one parser reads both, with the
+/// tail defaulting to 0. The reader rejects any other version.
 fn build_per_column_record_bytes(
     events: &[&[u8]],
     dict: &Dict,
@@ -564,7 +612,7 @@ fn build_per_column_record_bytes(
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
-    const EXT_FORMAT_VERSION: u8 = 1;
+    const EXT_FORMAT_VERSION: u8 = 2;
     let event_count = events.len() as u32;
     let e_count = events.len();
 
@@ -575,7 +623,7 @@ fn build_per_column_record_bytes(
     let mut present: Vec<Vec<bool>> = Vec::new(); // [b][e]
     let mut byte_sizes: Vec<Vec<u32>> = Vec::new(); // [b][e] decompressed bank size
     let mut bank_bytes: Vec<Vec<u8>> = Vec::new(); // [b] = concat of bank data across events
-    let mut composite: Vec<bool> = Vec::new(); // [b] any structure carries an inline header
+    let mut header_sizes: Vec<u8> = Vec::new(); // [b] composite header_size
 
     for (e_idx, ev_bytes) in events.iter().enumerate() {
         let ev = Event::new(ev_bytes);
@@ -591,16 +639,16 @@ fn build_per_column_record_bytes(
                     present.push(vec![false; e_count]);
                     byte_sizes.push(vec![0u32; e_count]);
                     bank_bytes.push(Vec::new());
-                    composite.push(false);
+                    header_sizes.push(0);
                     b
                 }
             };
             present[b][e_idx] = true;
             byte_sizes[b][e_idx] = data.len() as u32;
             bank_bytes[b].extend_from_slice(data);
-            if hdr.header_size > 0 {
-                composite[b] = true;
-            }
+            // One descriptor per bank, so keep the largest header seen; in
+            // practice it is constant per bank.
+            header_sizes[b] = header_sizes[b].max(hdr.header_size);
         }
     }
     let num_banks = descriptors.len();
@@ -611,7 +659,7 @@ fn build_per_column_record_bytes(
     let descriptors: Vec<(u16, u8, u8)> = sort_idx.iter().map(|&b| descriptors[b]).collect();
     let present: Vec<Vec<bool>> = sort_idx.iter().map(|&b| present[b].clone()).collect();
     let byte_sizes: Vec<Vec<u32>> = sort_idx.iter().map(|&b| byte_sizes[b].clone()).collect();
-    let composite: Vec<bool> = sort_idx.iter().map(|&b| composite[b]).collect();
+    let header_sizes: Vec<u8> = sort_idx.iter().map(|&b| header_sizes[b]).collect();
     let mut bank_bytes: Vec<Vec<u8>> = sort_idx
         .iter()
         .map(|&b| std::mem::take(&mut bank_bytes[b]))
@@ -628,7 +676,7 @@ fn build_per_column_record_bytes(
         // of rows. Otherwise store the bank as one opaque stream.
         let schema = dict.get_by_id(group, item);
         let columnar = match schema {
-            Some(s) if s.row_size() > 0 && !composite[b] => {
+            Some(s) if s.row_size() > 0 && header_sizes[b] == 0 => {
                 let rs = s.row_size();
                 (0..e_count).all(|e| !present[b][e] || byte_sizes[b][e].is_multiple_of(rs))
             }
@@ -700,7 +748,8 @@ fn build_per_column_record_bytes(
         + 4 * e_count                       // event tags
         + e_count * bytes_per_row           // presence
         + 4 * num_banks * e_count           // event_bank_byte_sizes
-        + 8 * num_streams; // per-stream compressed+decompressed sizes
+        + 8 * num_streams                   // per-stream compressed+decompressed sizes
+        + num_banks; // composite header_size (v2)
     let mut dir = Vec::with_capacity(dir_len);
     for &(g, i, t) in &descriptors {
         dir.extend_from_slice(&g.to_le_bytes());
@@ -723,6 +772,10 @@ fn build_per_column_record_bytes(
         dir.extend_from_slice(&compressed_sizes[i].to_le_bytes());
         dir.extend_from_slice(&decompressed_sizes[i].to_le_bytes());
     }
+    // v2 tail: one composite `header_size` per bank. Appended rather than
+    // widening the descriptor so every offset above is unchanged, which is what
+    // lets a v1 reader be a v2 reader with the tail defaulted to zero.
+    dir.extend_from_slice(&header_sizes);
     debug_assert_eq!(dir.len(), dir_len);
 
     // ---- 7. LZ4-compress the directory. --------------------------------

@@ -97,9 +97,13 @@ fn write_fixture(path: &Path, compression: Compression) {
 
 /// Formats worth tracking: no compression (pure decode cost), the default LZ4,
 /// and the per-column extension (the partial-decode path).
-const FORMATS: [(&str, Compression); 3] = [
+const FORMATS: [(&str, Compression); 4] = [
     ("none", Compression::None),
     ("lz4", Compression::Lz4),
+    // Both split codecs, not just one: they reach the reader through different
+    // code (the by-bank structure iterator vs. the per-column synthesiser), so
+    // benching only `percolumn` left the by-bank scan path unmeasured.
+    ("perbank", Compression::Lz4PerBank),
     ("percolumn", Compression::Lz4PerColumn),
 ];
 
