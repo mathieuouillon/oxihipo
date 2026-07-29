@@ -9,6 +9,76 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 Nothing yet.
 
+## [0.6.0] - 2026-07-28
+
+A correctness release. Each entry is something that was **silently wrong** — the
+library returned success and stored the wrong bytes, or aborted the process where
+it should have returned an error — rather than something that failed visibly.
+
+### Breaking
+
+- **`BankBuilder::finish` and `EventBuilder::add` return `Result`.** Both are
+  public, so this is a semver break, taken deliberately: the alternative is an
+  API that silently corrupts data (below). Neither is used by `hipo-tools`, which
+  builds and passes its 204 tests against this release unchanged.
+
+### Fixed
+
+- **A bank at or past 2^24 bytes was written truncated, with no error.** The
+  structure length word carries the data size in its low 24 bits — the top byte
+  is the composite `header_size` field — and `BankBuilder::finish` wrote a full
+  `u32` into it. `Writer::finish` returned `Ok` regardless, so the loss was
+  invisible until the file was read back. On a one-column `Int` bank:
+
+  | rows written | data bytes | rows read back |
+  |---|---:|---:|
+  | 4,194,303 | 16,777,212 | 4,194,303 |
+  | 4,194,304 | 16,777,216 | **0** |
+  | 5,000,000 | 20,000,000 | **805,696** |
+
+  At exactly 2^24 the size masks to zero *and* the overflowed `0x01` re-reads as
+  `header_size = 1`, so the bank comes back looking composite. Every codec was
+  affected — this is the structure header, not the compression. The boundary is
+  now `HipoError::BankTooLarge`.
+
+- **`Bank::read` was documented "Infallible" and panicked in release builds.**
+  Every check in it was a `debug_assert`, while `ColumnHandle::placeholder()` is
+  public and safe — and the `bank_row!`-generated `resolve_handles` hands one out
+  for any column a runtime schema lacks. Reading through it fell into
+  `schema.entries()[65535]` and aborted with "index out of bounds: the len is 1
+  but the index is 65535", with `debug_assertions = false`.
+
+  The documentation was the defect: it now states the real contract with a
+  `# Panics` section, and the bounds check is unconditional with a message that
+  names the mistake. Returning an empty column instead was rejected — `read` is
+  the bulk accessor and callers zip parallel columns, so a zero-length result
+  silently truncates the loop to no rows, trading a loud abort for quietly wrong
+  physics. `read_handle_or_default` remains the per-row path that does accept
+  placeholders.
+
+- **Iterating onto a zero-event record panicked.** `EventIter::next_result`
+  refilled the current record with `if` rather than `while`. `advance_record`
+  resets the event cursor to 0, so the guard was tested against the record being
+  left and never against the one arrived at; landing on an empty record indexed
+  `event_offsets[1]` on a one-element table. A library may return `Err` for
+  damaged input, but a panic leaves its caller — a CLI, a Python binding, a batch
+  job — no way to handle the file at all.
+
+  The empty record need not come from corruption: `Writer::flush_record` will not
+  emit one, but the public `Writer::write_record` takes a prebuilt record and
+  checks only that it is at least a header long.
+
+### Internal
+
+- **New `tests/mutation_sweep.rs`.** Mutates every byte of a real file, truncates
+  at every length, and writes hostile values into every header word, then drives
+  the whole public read path over each result asserting only that nothing panics.
+  It is what found the iterator bug — six single-byte mutations of a 2 KB file
+  reached it, each the low byte of a record's event count. `corruption.rs`
+  already had an empty-record test that could not have caught it: that test also
+  blanks the trailer to force the scan path, and the scan drops empty records
+  before iteration ever sees one.
+
 ## [0.5.3] - 2026-07-28
 
 ### Added
