@@ -193,9 +193,14 @@ pub struct WriteSummary {
 /// HIPO file writer.
 ///
 /// Call [`Writer::finish`] when done — it consumes the writer, writes the
-/// trailer index, and returns a [`WriteSummary`]. Dropping a writer without
-/// finishing finalises best-effort but cannot report errors, so it warns
-/// instead (loudly if that best-effort finalisation itself fails).
+/// trailer index, and returns a [`WriteSummary`].
+///
+/// Dropping a writer without finishing finalises best-effort, because `Drop`
+/// cannot return an error. If that finalisation *fails* it prints to stderr in
+/// every build — the file may then be truncated or index-less, which is worth
+/// saying whatever the profile. If it succeeds, the reminder to call `finish()?`
+/// is a debug-build nicety only, so a release binary that drops a writer is
+/// silent. Do not rely on drop: `finish()?` is the only path that reports.
 #[derive(Debug)]
 pub struct Writer {
     path: PathBuf,

@@ -1,9 +1,11 @@
 //! Record-building primitives + the public `Compression` enum.
 //!
-//! Most users never touch [`RecordBuilder`] or [`build_record_bytes`]
-//! directly — the [`Writer`](super::Writer) handles record building
-//! transparently. They're exposed for advanced callers that assemble
-//! compressed records themselves.
+//! Crate-internal: this module is `pub(crate)`, and only [`Compression`] is
+//! re-exported from it. `RecordBuilder` and `build_record_bytes` are reachable
+//! from inside the crate only — the doc used to offer them to "advanced callers
+//! that assemble compressed records themselves", which no external caller can
+//! take up. [`Writer`](super::Writer) is the whole public write surface, and
+//! `Writer::write_record` is the escape hatch for a prebuilt record.
 
 use crate::compress::{ScratchBuf, compress};
 use crate::error::{HipoError, Result};
