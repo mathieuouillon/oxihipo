@@ -38,16 +38,24 @@ impl RecordHeader {
         self.bit_info & BITINFO_VERSION_MASK
     }
 
-    pub fn is_last_record(&self) -> bool {
-        (self.bit_info >> 8) & 1 == 1
-    }
-
+    /// Does this record carry the dictionary?
+    ///
+    /// Uses the same named bit as [`FileHeader::has_dictionary`], which reads
+    /// the identical `bit_info` word. These had drifted: this accessor read bit
+    /// **10** — the constant for *trailer-with-index* — while `FileHeader` read
+    /// bit 8. Both cannot be right about one word's layout.
+    ///
+    /// [`FileHeader::has_dictionary`]: crate::wire::file_header::FileHeader::has_dictionary
     pub fn has_dictionary(&self) -> bool {
-        (self.bit_info >> 10) & 1 == 1
+        (self.bit_info >> BITINFO_HAS_DICTIONARY_BIT) & 1 == 1
     }
 
+    /// Does this record carry the "first event" that HIPO lets a file pin?
+    ///
+    /// Read bit **11** before, which no constant names; the first-event flag is
+    /// bit 9.
     pub fn has_first_event(&self) -> bool {
-        (self.bit_info >> 11) & 1 == 1
+        (self.bit_info >> BITINFO_HAS_FIRST_EVENT_BIT) & 1 == 1
     }
 
     pub fn parse(buf: &[u8]) -> Result<Self> {

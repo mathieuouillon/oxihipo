@@ -136,7 +136,8 @@ impl FileInner {
         // *from* the trailer, and it only scans when there is none. Salvage
         // scans a file that usually still has one, and a trailer looks like an
         // ordinary one-event record — no header bit distinguishes it (measured:
-        // `is_last_record` is 0 on both it and a data record). So it is
+        // every record header this crate writes has bits 8-11 of `bit_info`
+        // clear, trailer and data record alike). So it is
         // identified by what it holds, the `file::index` bank, which is what
         // `build_index_from_trailer` looks for too. Left in, it added a
         // thirteenth "record" and one phantom event to a 120-event file.
@@ -559,9 +560,18 @@ fn build_index_by_scanning(
             offset: off,
             reason: "record length overflows file offset",
         })?;
-        if h.is_last_record() {
-            break;
-        }
+        // No early break on a "last record" flag. The accessor that provided
+        // one read bit 8, which this crate's own constants name
+        // `BITINFO_HAS_DICTIONARY_BIT` — so on a file whose writer sets that bit
+        // on its dictionary record, the scan would have stopped at the
+        // dictionary and reported an empty file. Nothing this crate writes sets
+        // it (verified: every record header it emits has bits 8-11 clear, while
+        // the *file* header sets 8 and 10), which is the only reason the bug was
+        // inert rather than catastrophic.
+        //
+        // Termination does not need the flag: the loop advances by each
+        // record's own length and is bounded by the file, which is what the
+        // trailer-less scan has always actually relied on.
     }
     Ok(idx)
 }

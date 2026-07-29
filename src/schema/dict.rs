@@ -1,7 +1,8 @@
 //! `Dict` — the schema directory parsed from a HIPO file's dictionary record.
 //!
-//! Cheap to clone (a few `Vec`s and a `HashMap`). Wrapped in an `Arc` inside
-//! [`File`](crate::read::File) so multi-threaded scans share a single copy.
+//! Cheap to clone (a few `Vec`s and a `HashMap`). Held in an `Arc` by
+//! [`Chain`](crate::Chain) and by each file it opens, so a multi-threaded scan
+//! shares one copy rather than one per worker.
 
 use std::collections::HashMap;
 

@@ -42,8 +42,8 @@ use crate::write::{Compression, WriteSummary, Writer};
 ///
 /// Construct via [`Chain::open`] — its single argument accepts a file, a
 /// directory, a glob pattern, or an explicit list of paths (see
-/// [`IntoSources`]). All files in a chain must share the same dict — this
-/// is validated at construction.
+/// [`IntoSources`]). Files in a chain must not *contradict* each other's
+/// dictionaries — see [`Chain::open`] for exactly what is checked.
 #[derive(Clone)]
 pub struct Chain {
     files: Vec<Arc<FileInner>>,
@@ -128,9 +128,15 @@ impl Chain {
     /// - an explicit **list** of paths (`&[_]` / `Vec<_>` / `[_; N]`) ⇒
     ///   those files, in order.
     ///
-    /// All files in the resulting chain must share one dictionary; this is
-    /// validated at construction and returns [`HipoError::SchemaParse`] if
-    /// any file's dict differs from the first.
+    /// Dictionaries are checked for **contradiction**, not for equality: a
+    /// later file that declares a bank the first file also declares, but with a
+    /// different layout, returns [`HipoError::SchemaParse`], because reading
+    /// them together would decode columns against the wrong schema.
+    ///
+    /// A file that merely *lacks* a bank another file has is accepted — that is
+    /// a subset, not a conflict, and it is what a chain of runs with different
+    /// detectors looks like. Such a bank is then absent from that file's events,
+    /// and [`Filter::require`] rejects them there.
     ///
     /// ```no_run
     /// # use oxihipo::Chain;
@@ -868,9 +874,6 @@ impl Chain {
     /// modes visit events out of order, so use atomics or a `Mutex` in `f`
     /// for shared state. Returns aggregate [`ChainStats`].
     ///
-    /// The parallel modes switch each file's `madvise` to `MADV_NORMAL`
-    /// and prefetch the records they'll touch; the sequential mode leaves
-    /// the `MADV_SEQUENTIAL` advice set at open.
     ///
     /// ```no_run
     /// use std::sync::atomic::{AtomicU64, Ordering};

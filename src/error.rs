@@ -30,9 +30,6 @@ pub enum HipoError {
     )]
     UnsupportedVersion { version: u32 },
 
-    #[error("big-endian HIPO files are not supported (endian magic at offset {offset:#x})")]
-    UnsupportedEndianness { offset: u64 },
-
     #[error("unknown compression type: {0}")]
     UnknownCompression(u32),
 

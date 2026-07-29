@@ -243,10 +243,15 @@ pub fn decompress(
 /// `dst.len()` bytes and returns the count produced (which must equal
 /// `dst.len()` for LZ4 streams produced from inputs of that size).
 ///
-/// This is the slice-only variant used by the chunked-record decoder:
-/// the destination is a `split_at_mut` view into a single record-wide
-/// buffer, so per-chunk inflate can run in parallel without owning a
-/// separate `Vec` per chunk.
+/// The slice-only variant: it inflates into a caller-owned `&mut [u8]` rather
+/// than growing a `Vec`, which is what lets several inflates share one
+/// record-wide buffer through `split_at_mut`.
+///
+/// No decoder in the crate takes that shape today — the chunked-record decoder
+/// this was written for is gone, and the doc described it in the present tense
+/// long after. It is kept, and tested, because it is the only inflate path that
+/// writes into borrowed memory, and re-deriving the underflow handling would be
+/// the expensive part of bringing one back.
 pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) -> Result<usize> {
     let expected = dst.len();
     match kind {
