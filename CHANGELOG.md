@@ -7,10 +7,6 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
-
-## [0.6.0] - 2026-07-28
-
 A correctness release. Each entry is something that was **silently wrong** — the
 library returned success and stored the wrong bytes, or aborted the process where
 it should have returned an error — rather than something that failed visibly.
