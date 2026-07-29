@@ -787,7 +787,7 @@ mod tests {
         bb.push_row().set_f32("e", 1.5).unwrap();
         let mut eb = EventBuilder::new().with_tag(7u32);
         eb.add_bank_bytes(src.structures_bytes());
-        eb.add(bb);
+        eb.add(bb).unwrap();
         let merged = eb.finish();
 
         let ev = Event::new(&merged);

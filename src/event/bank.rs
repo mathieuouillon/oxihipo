@@ -229,16 +229,41 @@ impl<'b> Bank<'b> {
     /// Read using a pre-resolved typed handle. Constant-time after handle
     /// construction; this is the recommended hot-loop path.
     ///
-    /// Infallible — the handle's column index and type were verified at
-    /// resolution time. In debug builds, asserts the handle's schema is
-    /// compatible with the bank's schema; release builds trust the
-    /// handle. Passing a handle resolved against a different schema is a
-    /// programming error.
+    /// The handle must have been **resolved against this bank's schema**. In
+    /// debug builds the column type is asserted too; release builds trust it.
+    ///
+    /// # Panics
+    ///
+    /// If the handle is a [`ColumnHandle::placeholder`] or is otherwise out of
+    /// range for this schema.
+    ///
+    /// This was documented "Infallible", which was untrue in release builds:
+    /// every check was a `debug_assert`, while `placeholder()` is public and
+    /// safe — and the `bank_row!`-generated `resolve_handles` hands one out for
+    /// any column a runtime schema lacks. Reading through it fell into
+    /// `self.schema.entries()[65535]` and aborted with
+    /// "index out of bounds: the len is 1 but the index is 65535".
+    ///
+    /// Returning an empty slice instead would be worse. `read` is the bulk
+    /// accessor and callers zip parallel columns, so a zero-length column
+    /// silently truncates the loop to no rows — a loud abort traded for quietly
+    /// wrong physics. Use [`Self::read_handle_or_default`], which is per-row and
+    /// does accept placeholders, or [`Self::col`], which returns an error for a
+    /// missing column.
     pub fn read<T: BankColumnType>(&self, handle: ColumnHandle<T>) -> Cow<'b, [T]> {
         let col = handle.column_index();
-        debug_assert!(
+        // Unconditional, and close to free: the length is already in cache, and
+        // the bounds check this replaces was being paid inside `col_bytes`
+        // anyway. Worth it for a message that names the mistake.
+        assert!(
             col < self.schema.entries().len(),
-            "ColumnHandle out of bounds for this bank's schema"
+            "Bank::read was given an unresolved or placeholder ColumnHandle \
+             (column index {}) for schema {:?}, which has {} columns; resolve \
+             it against this bank's schema, or use read_handle_or_default / \
+             col for a column that may be absent",
+            col,
+            self.schema.name(),
+            self.schema.entries().len()
         );
         debug_assert_eq!(
             self.schema.entries()[col].ty,

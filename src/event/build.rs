@@ -262,8 +262,28 @@ impl<'s> BankBuilder<'s> {
 
     /// Serialise as `[structure header | column-major data]`. Byte-
     /// compatible with what [`Bank::new`](crate::event::Bank::new) decodes.
-    pub fn finish(self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`HipoError::BankTooLarge`] once the bank's data reaches 2^24 bytes.
+    /// The structure length word holds the size in its low 24 bits and the
+    /// composite `header_size` in its top byte, so a larger bank cannot be
+    /// described at all.
+    ///
+    /// This used to be written anyway, truncated and without an error:
+    /// 5,000,000 `Int` rows read back as 805,696, and exactly 2^24 bytes read
+    /// back as **zero** rows with the overflowed top byte reinterpreted as a
+    /// composite header. `Writer::finish` returned `Ok` in both cases, so the
+    /// loss was invisible until the file was read.
+    pub fn finish(self) -> Result<Vec<u8>> {
         let data_size: usize = self.columns.iter().map(|c| c.len()).sum();
+        if data_size > STRUCT_SIZE_MASK as usize {
+            return Err(HipoError::BankTooLarge {
+                schema: self.schema.name().to_string(),
+                size: data_size,
+                max: STRUCT_SIZE_MASK as usize,
+            });
+        }
         let mut out = Vec::with_capacity(BANK_STRUCTURE_SIZE + data_size);
         out.extend_from_slice(&self.schema.group().to_le_bytes());
         out.push(self.schema.item());
@@ -272,7 +292,7 @@ impl<'s> BankBuilder<'s> {
         for col in self.columns {
             out.extend_from_slice(&col);
         }
-        out
+        Ok(out)
     }
 }
 
@@ -315,9 +335,16 @@ impl EventBuilder {
         self
     }
 
-    pub fn add(&mut self, bank: BankBuilder<'_>) -> &mut Self {
-        let bytes = bank.finish();
-        self.add_bank_bytes(&bytes)
+    /// Serialise `bank` and append it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`BankBuilder::finish`] returns — in practice
+    /// [`HipoError::BankTooLarge`] for a bank at or past 2^24 bytes, which was
+    /// previously appended with a truncated size word and no error.
+    pub fn add(&mut self, bank: BankBuilder<'_>) -> Result<&mut Self> {
+        let bytes = bank.finish()?;
+        Ok(self.add_bank_bytes(&bytes))
     }
 
     pub fn structure_count(&self) -> usize {
@@ -396,7 +423,7 @@ mod tests {
             .set_i8("charge", 0)
             .unwrap();
         assert_eq!(b.rows(), 3);
-        let bytes = b.finish();
+        let bytes = b.finish().unwrap();
 
         assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), 300);
         assert_eq!(bytes[2], 1);
@@ -419,7 +446,7 @@ mod tests {
         b.set_i32_at("pid", 2, 33).unwrap();
         b.set_i32_at("pid", 1, 22).unwrap();
         b.set_i32_at("pid", 0, 11).unwrap();
-        let bytes = b.finish();
+        let bytes = b.finish().unwrap();
         let bank = Bank::new(&s, &bytes[BANK_STRUCTURE_SIZE..]).unwrap();
         assert_eq!(&*bank.col::<i32>("pid").unwrap(), &[11, 22, 33]);
     }
@@ -462,7 +489,7 @@ mod tests {
             .set_i8("charge", 1)
             .unwrap();
         let mut eb = EventBuilder::new().with_tag(7u32);
-        eb.add(b);
+        eb.add(b).unwrap();
         let bytes = eb.finish();
 
         let event = Event::new(&bytes);
@@ -505,7 +532,7 @@ mod tests {
             .unwrap()
             .set_array("px", &[2.0f32, 2.1, 2.2])
             .unwrap();
-        let bytes = b.finish();
+        let bytes = b.finish().unwrap();
 
         let bank = Bank::new(&s, &bytes[BANK_STRUCTURE_SIZE..]).unwrap();
         assert_eq!(bank.rows(), 3);
@@ -559,7 +586,7 @@ mod tests {
         // Via the trait method (what RowWriter::set calls under the hood):
         <[f32; 4] as crate::schema::BankColumnType>::set_in([0.25, 0.5, 0.75, 1.0], &mut b, "v")
             .unwrap();
-        let bytes = b.finish();
+        let bytes = b.finish().unwrap();
         let bank = Bank::new(&s, &bytes[BANK_STRUCTURE_SIZE..]).unwrap();
         let row0: [f32; 4] = bank.get("v", 0);
         assert_eq!(row0, [0.25, 0.5, 0.75, 1.0]);
@@ -576,7 +603,7 @@ mod tests {
         b2.push_row().set_i64("evno", 99).unwrap();
 
         let mut eb = EventBuilder::new().with_tag(0u32);
-        eb.add(b1).add(b2);
+        eb.add(b1).unwrap().add(b2).unwrap();
         assert_eq!(eb.structure_count(), 2);
         let bytes = eb.finish();
 

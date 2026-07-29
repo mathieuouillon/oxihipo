@@ -746,3 +746,81 @@ fn lz4_by_bank_skips_unused_banks() {
         assert_eq!(particle_total, 150 * 5);
     }
 }
+
+/// A bank too large for the wire format must be refused, not truncated.
+///
+/// The HIPO structure length word carries the data size in its low **24 bits**;
+/// the top byte is the composite `header_size` field. `BankBuilder::finish`
+/// wrote a full `u32` into it, so a bank at or past 2^24 bytes had its size
+/// silently truncated and `Writer::finish` still returned `Ok`. Measured before
+/// the fix, with a one-column `Int` bank (4 bytes/row):
+///
+/// ```text
+/// wrote rows=4194303 (16777212 bytes) -> read rows=4194303
+/// wrote rows=4194304 (16777216 bytes) -> read rows=0
+/// wrote rows=5000000 (20000000 bytes) -> read rows=805696
+/// ```
+///
+/// 20,000,000 & 0xFFFFFF is 3,222,784 bytes — 805,696 rows. At exactly 2^24 the
+/// size masks to zero *and* the overflowed `0x01` re-reads as `header_size = 1`,
+/// so the bank comes back looking composite. Every codec was affected: this is
+/// the structure header, not the compression.
+///
+/// The library accepting data, reporting success, and storing a fraction of it
+/// is the worst failure available to a writer, so the boundary is now an error.
+#[test]
+fn a_bank_too_large_for_the_size_field_is_refused_not_truncated() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "B::big",
+        300,
+        1,
+        [("x".into(), DataType::Int, 1)],
+    ));
+    const MAX: usize = 0x00FF_FFFF; // STRUCT_SIZE_MASK
+    let write = |rows: u32, path: &std::path::Path| -> oxihipo::Result<()> {
+        let mut w = Writer::create(path)
+            .schemas(&d)
+            .compression(Compression::None)
+            .build()?;
+        w.event(|ev| {
+            ev.bank("B::big", |b| {
+                b.push_rows(rows);
+                Ok(())
+            })?;
+            Ok(())
+        })?;
+        w.finish()?;
+        Ok(())
+    };
+
+    // The largest bank the field *can* describe still round-trips exactly.
+    let ok_rows = (MAX / 4) as u32; // 4_194_303 rows = 16_777_212 bytes
+    let good = dir.path().join("ok.hipo");
+    write(ok_rows, &good).expect("a bank inside the 24-bit limit must write");
+    let chain = Chain::open(&good).unwrap();
+    let got = chain
+        .events()
+        .next()
+        .unwrap()
+        .unwrap()
+        .bank("B::big")
+        .map(|b| b.rows())
+        .unwrap_or(0);
+    assert_eq!(got, ok_rows, "the largest describable bank must round-trip");
+
+    // One row past it, and well past it, are both refused rather than written.
+    for rows in [ok_rows + 1, 5_000_000] {
+        let path = dir.path().join(format!("over_{rows}.hipo"));
+        let err = write(rows, &path).expect_err(&format!(
+            "{rows} rows is {} bytes, over the {MAX}-byte field — must not write",
+            rows as usize * 4
+        ));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("24-bit") || msg.contains("limit"),
+            "the error should name the wire limit, got: {msg}"
+        );
+    }
+}

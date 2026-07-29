@@ -62,6 +62,24 @@ pub enum HipoError {
         actual: u32,
     },
 
+    /// A bank's data exceeded what the HIPO structure header can describe.
+    ///
+    /// The structure length word carries the size in its low **24 bits**; the
+    /// top byte is the composite `header_size` field. Writing a larger bank
+    /// used to truncate the size silently — 5,000,000 `Int` rows came back as
+    /// 805,696, and exactly 2^24 bytes came back as *zero* while the top byte
+    /// re-read as a composite header — so it is refused instead.
+    #[error(
+        "bank {schema:?} holds {size} bytes of data, over the {max}-byte limit \
+         a HIPO structure header can describe (24-bit size field); split it \
+         across events or banks"
+    )]
+    BankTooLarge {
+        schema: String,
+        size: usize,
+        max: usize,
+    },
+
     #[error("corrupt record at offset {offset:#x}: {reason}")]
     CorruptRecord { offset: u64, reason: &'static str },
 

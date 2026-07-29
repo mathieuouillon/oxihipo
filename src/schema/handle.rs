@@ -276,6 +276,12 @@ impl<T: BankColumnType> ColumnHandle<T> {
     /// Lets a typed-row catalog keep handle resolution infallible: an
     /// absent column resolves to a placeholder rather than aborting the
     /// whole row read.
+    ///
+    /// Only `read_handle_or_default` accepts one.
+    /// [`Bank::read`](crate::event::Bank::read) **panics** on a placeholder —
+    /// it is the bulk accessor, and handing back an empty column would silently
+    /// truncate a caller zipping parallel columns to zero rows. Guard with
+    /// [`Self::is_placeholder`] where a handle may be one.
     pub const fn placeholder() -> Self {
         Self {
             col: u16::MAX,

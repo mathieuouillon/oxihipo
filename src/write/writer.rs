@@ -673,7 +673,7 @@ impl<'a> EventWriter<'a> {
         let schema = self.dict.require(name)?;
         let mut bw = BankWriter::new(BankBuilder::new(schema));
         f(&mut bw)?;
-        let bytes = bw.into_inner().finish();
+        let bytes = bw.into_inner().finish()?;
         self.builder.add_bank_bytes(&bytes);
         Ok(self)
     }
