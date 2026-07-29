@@ -816,7 +816,7 @@ impl Chain {
             }
         };
 
-        Ok(merge_chunks(&plan, chunks))
+        merge_chunks(&plan, chunks)
     }
 
     /// [`Self::read_columns`] for an explicit list of global event indices,
@@ -901,7 +901,7 @@ impl Chain {
                     bc.push_event(bp, ev.as_ref().and_then(|e| e.bank(&bp.name)).as_ref());
                 }
             }
-            return Ok(merge_chunks(&plan, vec![chunk]));
+            return merge_chunks(&plan, vec![chunk]);
         }
 
         // An ascending, fully-resolved list needs no reassembly: each record's
@@ -953,7 +953,7 @@ impl Chain {
             // Ascending and fully resolved: the per-record chunks are already
             // in the caller's order, so concatenating them is the answer.
             let chunks = filled.into_iter().flatten().map(|(_, c)| c).collect();
-            return Ok(merge_chunks(&plan, chunks));
+            return merge_chunks(&plan, chunks);
         }
 
         // Otherwise scatter back into caller order. A slot left empty is an
@@ -968,7 +968,7 @@ impl Chain {
             .into_iter()
             .map(|c| c.unwrap_or_else(|| absent_event_chunk(&plan)))
             .collect();
-        Ok(merge_chunks(&plan, chunks))
+        merge_chunks(&plan, chunks)
     }
 
     /// Every surviving event's per-event tag (`EH_TAG`), in global event order —
@@ -1114,7 +1114,21 @@ impl Chain {
 /// Concatenate the ordered per-record chunks into one [`ColumnBuffers`] per
 /// bank: prefix-sum the row counts into shared `i64` offsets and append each
 /// column's values.
-fn merge_chunks(plan: &[BankPlan<'_>], chunks: Vec<RecordChunk>) -> Vec<ColumnBuffers> {
+/// Concatenate per-record chunks into one buffer set per bank.
+///
+/// # Errors
+///
+/// [`HipoError::CorruptRecord`] if the assembled buffers violate the contract
+/// `ColumnBuffers` promises its caller: offsets starting at 0 and
+/// non-decreasing, and each column holding exactly `total_rows * inner_len`
+/// values. A per-column record whose row counts and column payloads disagree
+/// produces exactly that, and this used to be a `debug_assert` — so a release
+/// build handed the caller buffers whose data length did not match its own
+/// offsets, and slicing a row read the wrong values instead of failing.
+///
+/// Found by `tests/mutation_sweep.rs` on the `Lz4PerColumn` path, and only in a
+/// debug build; the release runs it had been checked against could not see it.
+fn merge_chunks(plan: &[BankPlan<'_>], chunks: Vec<RecordChunk>) -> Result<Vec<ColumnBuffers>> {
     let mut out: Vec<ColumnBuffers> = plan
         .iter()
         .map(|bp| ColumnBuffers {
@@ -1149,13 +1163,20 @@ fn merge_chunks(plan: &[BankPlan<'_>], chunks: Vec<RecordChunk>) -> Vec<ColumnBu
         }
     }
 
-    debug_assert!(out.iter().all(|b| {
+    let sound = out.iter().all(|b| {
         b.offsets.first() == Some(&0)
             && b.offsets.windows(2).all(|w| w[0] <= w[1])
             && b.columns
                 .iter()
                 .all(|c| c.data.len() as i64 == b.total_rows() * i64::from(c.inner_len))
-    }));
+    });
+    if !sound {
+        return Err(HipoError::CorruptRecord {
+            offset: 0,
+            reason: "record's row counts and column payloads disagree; the \
+                     assembled columns cannot be sliced per event",
+        });
+    }
 
-    out
+    Ok(out)
 }

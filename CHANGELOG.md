@@ -56,6 +56,19 @@ it should have returned an error — rather than something that failed visibly.
   physics. `read_handle_or_default` remains the per-row path that does accept
   placeholders.
 
+- **`read_columns` could hand back buffers that contradicted their own
+  offsets.** `merge_chunks` states the contract `ColumnBuffers` owes its caller —
+  offsets starting at 0 and non-decreasing, each column holding exactly
+  `total_rows * inner_len` values — but only as a `debug_assert`. A corrupted
+  `Lz4PerColumn` record whose row counts and column payloads disagree produces
+  exactly that violation, so a **release** build returned buffers whose data
+  length did not match their offsets and slicing a row read the wrong values.
+  The invariant is now enforced and returns `HipoError::CorruptRecord`.
+
+  Found by the new sweep, and only in a debug build — the release runs it had
+  been checked against compile the assertion out, which is precisely why it had
+  survived. CI runs the debug profile and caught it on the first push.
+
 - **Iterating onto a zero-event record panicked.** `EventIter::next_result`
   refilled the current record with `if` rather than `while`. `advance_record`
   resets the event cursor to 0, so the guard was tested against the record being
