@@ -68,7 +68,10 @@ impl Default for WriterOptions {
 pub struct WriterBuilder {
     path: PathBuf,
     dict: Option<Dict>,
-    tag_registry: TagRegistry,
+    /// `Err` if a name given to [`WriterBuilder::tag_names`] cannot round-trip
+    /// through the on-disk text form. The builder methods return `Self`, so the
+    /// error is held here and surfaced from `build`.
+    tag_registry: Result<TagRegistry>,
     /// User key/value configuration written into the dictionary record, in
     /// insertion order (`(120,…)` schemas plus these `(32555,…)` entries).
     config: Vec<(String, String)>,
@@ -109,7 +112,7 @@ impl WriterBuilder {
     /// file via [`Chain::tag_registry`](crate::read::Chain::tag_registry), to
     /// carry names through a copy). Replaces any registry set so far.
     pub fn tag_registry(mut self, registry: &TagRegistry) -> Self {
-        self.tag_registry = registry.clone();
+        self.tag_registry = Ok(registry.clone());
         self
     }
 
@@ -153,7 +156,7 @@ impl WriterBuilder {
             options.max_record_bytes = default_max_record_bytes(options.compression);
         }
         let dict = dict.unwrap_or_default();
-        Writer::create_inner(path, dict, tag_registry, config, options)
+        Writer::create_inner(path, dict, tag_registry?, config, options)
     }
 }
 
@@ -235,7 +238,7 @@ impl Writer {
         WriterBuilder {
             path: path.as_ref().to_path_buf(),
             dict: None,
-            tag_registry: TagRegistry::new(),
+            tag_registry: Ok(TagRegistry::new()),
             config: Vec::new(),
             options: WriterOptions::default(),
             record_bytes_explicit: false,

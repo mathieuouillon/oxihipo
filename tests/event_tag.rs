@@ -297,7 +297,7 @@ fn named_tags_via_macro_round_trip() {
 #[test]
 fn tag_registry_persists_and_survives_skim() {
     let dir = tempfile::tempdir().unwrap();
-    let want = TagRegistry::from_names(Cat::NAMES.iter().copied());
+    let want = TagRegistry::from_names(Cat::NAMES.iter().copied()).unwrap();
 
     for (name, comp) in FORMATS {
         let path = dir.path().join(format!("reg_{name}.hipo"));
@@ -364,7 +364,7 @@ fn tag_registry_persists_and_survives_skim() {
 #[test]
 fn skim_tagged_retags_records_registry_and_rereads_by_name() {
     let dir = tempfile::tempdir().unwrap();
-    let want_reg = TagRegistry::from_names(Cat::NAMES.iter().copied());
+    let want_reg = TagRegistry::from_names(Cat::NAMES.iter().copied()).unwrap();
 
     // A fresh scheme, unrelated to the source tags: carries REC::Particle
     // (evno even) → Dvcs, else Sidis. Non-capturing ⇒ `Copy`, reusable.
@@ -516,4 +516,86 @@ fn set_event_tag_rejects_compressed_records() {
             "{comp:?}: file changed"
         );
     }
+}
+
+/// The registry is stored as `name=bit` lines, so a name carrying `=`, a line
+/// break, or edge whitespace cannot round-trip. Those used to be written and
+/// read back **under a different name** — `has\nnewline` came back as
+/// `newline`, `  padded  ` as `padded` — so every later lookup missed and the
+/// flag silently stopped matching. Four of five names were lost or renamed.
+#[test]
+fn a_tag_name_the_text_form_cannot_round_trip_is_refused() {
+    for (name, why) in [
+        ("has=equals", "'='"),
+        ("has\nnewline", "line break"),
+        ("has\rcarriage", "line break"),
+        ("  padded  ", "whitespace"),
+        ("", "empty"),
+    ] {
+        let err = TagRegistry::from_names([(name, 1)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("invalid tag name"),
+            "{name:?} ({why}) should be refused, got: {err}"
+        );
+
+        // And it must be refused by the writer too, not only by the registry.
+        let dir = std::env::temp_dir().join("oxihipo_tag_names");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad_tag.hipo");
+        let built = Writer::create(&path).tag_names(&[(name, 1)]).build();
+        assert!(
+            built.is_err(),
+            "{name:?} ({why}) should fail the writer build"
+        );
+    }
+}
+
+/// Names that do round-trip must still work end to end, through a real file.
+#[test]
+fn ordinary_tag_names_survive_a_write_and_read() {
+    let dir = std::env::temp_dir().join("oxihipo_tag_names");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("good_tags.hipo");
+
+    let names = [("dvcs", 0u32), ("sidis", 1), ("elastic", 2)];
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "A::b",
+        300,
+        1,
+        [("x".into(), DataType::Int, 1)],
+    ));
+    let mut w = Writer::create(&path)
+        .schemas(&d)
+        .tag_names(&names)
+        .build()
+        .unwrap();
+    w.event(|ev| {
+        ev.bank("A::b", |b| {
+            b.row(|r| {
+                r.set("x", 1)?;
+                Ok(())
+            })?;
+            Ok(())
+        })?;
+        Ok(())
+    })
+    .unwrap();
+    w.finish().unwrap();
+
+    let chain = Chain::open(&path).unwrap();
+    let back: Vec<(String, u32)> = chain
+        .tag_registry()
+        .iter()
+        .map(|(n, b)| (n.to_string(), b))
+        .collect();
+    assert_eq!(
+        back,
+        names
+            .iter()
+            .map(|(n, b)| (n.to_string(), *b))
+            .collect::<Vec<_>>()
+    );
 }

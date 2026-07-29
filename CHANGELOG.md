@@ -7,6 +7,13 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`TagRegistry::insert` and `TagRegistry::from_names` return `Result`.** A tag
+  name that cannot survive the on-disk `name=bit` text form is now refused
+  instead of silently mangled (below). `WriterBuilder::tag_names` keeps its
+  signature and surfaces the error from `build`.
+
 ### Changed
 
 - **Split-codec record format bumped: `Lz4PerBank` 2 → 3, `Lz4PerColumn` 1 → 2.**
@@ -53,6 +60,83 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 - `Lz4PerBank` added to the read benchmark's format list. It reaches the reader
   through the by-bank structure iterator rather than the per-column synthesiser,
   so benching only `Lz4PerColumn` left that scan path unmeasured.
+- `tests/salvage.rs` — four tests for the sequential scan: the trailer is not
+  indexed as data, salvage resynchronises past a damaged header, an impossible
+  `event_count` is rejected, and an intact file still indexes exactly on every
+  codec.
+- `tests/event_tag.rs` — tag names that cannot round-trip are refused, by the
+  registry and by the writer; ordinary names still survive a real write and read.
+- `tests/no_alloc.rs` — the per-event allocation contract is now checked on
+  **every** codec, by comparing two files with the same record count and 4× the
+  events rather than against a fixed budget.
+
+### Performance
+
+- **`Lz4PerBank` and `Lz4PerColumn` sequential reads are ~25 % faster.**
+  Removing the per-event `Arc` allocation below: 959 µs → 724 µs and 998 µs →
+  713 µs on the benchmark fixture. The blob codecs are unchanged — two
+  interleaved A/B rounds disagreed on their sign (+4 % then −2.6 %), which is
+  the machine's noise floor, and `OwnedEvent` is the same 56 bytes it was.
+
+- **A tag name containing `=`, a line break, or edge whitespace was written and
+  silently read back as something else.** The registry is stored as `name=bit`
+  lines and the reader splits on the first `=`, splits lines on `\n`, and trims
+  each name. Of five names written, only one survived unchanged:
+
+  | written | read back |
+  |---|---|
+  | `plain` | `plain` |
+  | `has=equals` | *dropped* |
+  | `has\nnewline` | `newline` |
+  | `␣␣padded␣␣` | `padded` |
+  | `` (empty) | *dropped* |
+
+  Two came back under a *different* name, so `mask("has\nnewline")` returned
+  `None` and the flag quietly stopped matching. Such names are now refused when
+  inserted, and `Writer::build` fails rather than writing one.
+
+- **The scan indexed the trailer as a data record.** A trailer is an ordinary
+  one-event record carrying the `file::index` bank — no header bit sets it
+  apart — and the fallback scan walked straight into it. The comment said the
+  normal path never met this; it does, whenever a trailer *exists but does not
+  parse*, which is exactly when the fallback runs. A 12-event file with a
+  corrupted trailer index reported 13 events.
+
+- **One damaged record header cost the whole file, `open_salvage` included.**
+  The scan propagated the parse error instead of resynchronising, so the salvage
+  path — whose entire purpose is recovering from this — recovered nothing.
+  Salvage now finds the next record and continues: on a 12-event file with one
+  destroyed header it returns the 8 events on either side of the damage. The
+  normal path still reports the corruption, deliberately.
+
+- **`event_count` was taken on trust.** A corrupt header propagated straight
+  into `Chain::event_count()`: flipping one record's count to 1,000,000 made a
+  12-event file report 1,000,009, and the *first* `events()` item was an error.
+  The record's index array bounds the real count at four bytes per event, and
+  that is a header field, so no decompression is needed. Checked against real
+  data before relying on it: across 1,951 records of an 8.5 GB CLAS12 DST, a
+  simulation file, and C++ hipo4's own golden file, `index_array_length` is
+  exactly `event_count * 4`.
+
+- **Every split-codec event heap-allocated a cell it usually never filled.**
+  `OwnedEvent` held the lazy whole-event blob as `Arc<OnceLock<Vec<u8>>>`, so
+  constructing one allocated even when nothing ever asked for the blob: 852
+  allocations for 800 events created and dropped untouched. The `Arc` moved
+  inside the cell (`cell::OnceCell<Arc<Vec<u8>>>`), which allocates only on
+  first use and keeps `OwnedEvent` at 56 bytes. `Chain::events` documents "no
+  per-event allocation"; that is now true on every codec, and tested.
+
+### Documentation
+
+- `Chain::events`' memory contract now says what the split codecs actually cost
+  (more per *record*, still nothing per event) and notes that the whole-event
+  views synthesise a blob on first use.
+- The split codecs sort banks by `(group, item)` — load-bearing, since the
+  reader binary-searches that table — so they do **not** preserve the order
+  banks were added in. `structures()` yields ascending `(group, item)` there and
+  write order on the blob codecs. Nothing addresses a bank by position, so this
+  is an iteration-order difference rather than a data one; it is now documented
+  on `Compression` and at both sort sites rather than left to be discovered.
 
 ### Removed
 

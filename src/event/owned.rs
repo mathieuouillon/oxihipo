@@ -16,7 +16,7 @@
 //! backend except when calling `bytes()` (which is cheap for `Bytes` and
 //! incurs a synthesis copy for `ByBank`).
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 use std::sync::Arc;
 
 use crate::event::bank::Bank;
@@ -79,14 +79,30 @@ enum Inner {
         event_idx: u32,
         /// Lazy synthetic event-bytes blob — built only if `bytes()` /
         /// `structures()` / similar full-event APIs are called.
-        synth: Arc<std::sync::OnceLock<Vec<u8>>>,
+        ///
+        /// `OnceCell<Arc<_>>`, not `Arc<OnceLock<_>>`: the cell lives inline,
+        /// so constructing an event costs nothing, and the `Arc` is allocated
+        /// only when a whole-event view is actually asked for. Cloning still
+        /// shares the blob rather than copying it — the `Arc` moved inside the
+        /// cell instead of around it. It was outside, which meant every by-bank
+        /// event heap-allocated an empty cell it usually never filled: measured
+        /// at 852 allocations for 800 events created and dropped untouched.
+        ///
+        /// `cell::OnceCell`, not `sync::OnceLock`: the sync version carries a
+        /// `Once` alongside the value, which pushed `OwnedEvent` from 56 to 64
+        /// bytes and cost ~10 % on the *blob*-codec scan, which has no synth
+        /// cell at all. `OnceCell<Option<Arc<_>>>` is one niche-optimised
+        /// pointer. `OwnedEvent` is already `!Sync` (it holds a `Cell` bank
+        /// locator), so nothing is given up; it stays `Send`.
+        synth: OnceCell<Arc<Vec<u8>>>,
     },
     PerColumn {
         record: Arc<PerColumnRecord>,
         event_idx: u32,
         /// Lazy synthetic event-bytes blob — built (by reassembling each
-        /// bank from its columns) only if a full-event API is called.
-        synth: Arc<std::sync::OnceLock<Vec<u8>>>,
+        /// bank from its columns) only if a full-event API is called. See
+        /// [`Inner::ByBank::synth`] for why the `Arc` is inside the cell.
+        synth: OnceCell<Arc<Vec<u8>>>,
     },
 }
 
@@ -130,7 +146,7 @@ impl OwnedEvent {
             inner: Inner::ByBank {
                 record,
                 event_idx,
-                synth: Arc::new(std::sync::OnceLock::new()),
+                synth: OnceCell::new(),
             },
             dict,
             bank_cache: Cell::new(None),
@@ -149,7 +165,7 @@ impl OwnedEvent {
             inner: Inner::PerColumn {
                 record,
                 event_idx,
-                synth: Arc::new(std::sync::OnceLock::new()),
+                synth: OnceCell::new(),
             },
             dict,
             bank_cache: Cell::new(None),
@@ -173,13 +189,16 @@ impl OwnedEvent {
                 record,
                 event_idx,
                 synth,
-            } => synth.get_or_init(|| synthesize_event_bytes(record, *event_idx)),
+            } => synth.get_or_init(|| Arc::new(synthesize_event_bytes(record, *event_idx))),
             Inner::PerColumn {
                 record,
                 event_idx,
                 synth,
-            } => synth
-                .get_or_init(|| synthesize_per_column_event_bytes(record, *event_idx, &self.dict)),
+            } => synth.get_or_init(|| {
+                Arc::new(synthesize_per_column_event_bytes(
+                    record, *event_idx, &self.dict,
+                ))
+            }),
         }
     }
 

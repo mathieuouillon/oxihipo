@@ -51,6 +51,12 @@ pub enum Compression {
     /// Banks without a schema (or composite banks) are stored opaquely as a
     /// single stream. Writes are slower (HC). Layout in `wire/per_column.rs`.
     Lz4PerColumn,
+    // Both split codecs store banks sorted by (group, item) — the reader
+    // binary-searches that table — so neither preserves the order banks were
+    // added in. `structures()` yields ascending (group, item) here and write
+    // order on the blob codecs. Banks are addressed by group/item everywhere,
+    // so nothing but iteration order depends on it. Neither codec is readable
+    // by C++ hipo4.
 }
 
 impl Compression {
@@ -322,6 +328,18 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
     let num_banks = descriptors.len();
 
     // Sort banks by (group, item) for a reproducible on-disk layout.
+    //
+    // This is load-bearing, not cosmetic: the reader binary-searches the
+    // descriptor table by (group, item) and rejects an unsorted one outright,
+    // so bank lookup is O(log B) rather than a scan.
+    //
+    // The visible consequence is that the split codecs do **not** preserve the
+    // order banks were added in — `structures()` yields them in ascending
+    // (group, item), while the blob codecs yield write order. Events written
+    // `Z::last` then `A::first` come back the other way round. Nothing keys off
+    // position (banks are addressed by group/item everywhere), so this is an
+    // ordering difference rather than a data one, and it is not worth another
+    // B-byte directory table to undo.
     let mut sort_idx: Vec<usize> = (0..num_banks).collect();
     sort_idx.sort_by_key(|&b| (descriptors[b].0, descriptors[b].1));
     let descriptors: Vec<(u16, u8, u8)> = sort_idx.iter().map(|&b| descriptors[b]).collect();
@@ -654,6 +672,8 @@ fn build_per_column_record_bytes(
     let num_banks = descriptors.len();
 
     // ---- 2. Sort banks by (group, item) for a reproducible layout. ------
+    //
+    // Load-bearing, and it reorders `structures()` — see the by-bank writer.
     let mut sort_idx: Vec<usize> = (0..num_banks).collect();
     sort_idx.sort_by_key(|&b| (descriptors[b].0, descriptors[b].1));
     let descriptors: Vec<(u16, u8, u8)> = sort_idx.iter().map(|&b| descriptors[b]).collect();

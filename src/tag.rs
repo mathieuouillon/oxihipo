@@ -28,6 +28,8 @@
 use core::fmt;
 use core::ops::{BitAnd, BitOr, BitOrAssign};
 
+use crate::error::{HipoError, Result};
+
 /// A set of up to 32 event-tag bits — the ergonomic form of the per-event
 /// `EH_TAG` (`u32`). Combine flags with `|`, test with
 /// [`contains`](Self::contains) (superset) / [`intersects`](Self::intersects)
@@ -154,11 +156,14 @@ impl From<TagSet> for u32 {
 ///
 /// tag_flags! { pub EventTag { Dvcs = 0, Sidis = 1 } }
 ///
-/// let reg = TagRegistry::from_names(EventTag::NAMES.iter().copied());
+/// # fn main() -> oxihipo::Result<()> {
+/// let reg = TagRegistry::from_names(EventTag::NAMES.iter().copied())?;
 /// assert_eq!(reg.position("Dvcs"), Some(0));
 /// assert_eq!(reg.name(1), Some("Sidis"));
 /// assert_eq!(reg.mask("Sidis"), Some(0b10)); // 1 << 1
 /// assert_eq!(reg.mask_of(["Dvcs", "Sidis"]), Some(0b11));
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TagRegistry {
@@ -175,24 +180,59 @@ impl TagRegistry {
     /// Build from a `(name, bit)` list — pass a `tag_flags!` type's `NAMES`
     /// (via `.iter().copied()`) or any iterator of pairs. Later duplicate
     /// names replace earlier ones.
-    pub fn from_names<'a, I>(names: I) -> Self
+    ///
+    /// Fails on the first name [`insert`](Self::insert) rejects.
+    pub fn from_names<'a, I>(names: I) -> Result<Self>
     where
         I: IntoIterator<Item = (&'a str, u32)>,
     {
         let mut reg = Self::new();
         for (name, bit) in names {
-            reg.insert(name, bit);
+            reg.insert(name, bit)?;
         }
-        reg
+        Ok(reg)
     }
 
     /// Record (or replace, by name) one `name → bit position` mapping.
-    pub fn insert(&mut self, name: impl Into<String>, bit: u32) {
+    ///
+    /// # Errors
+    ///
+    /// The registry is stored as `name=bit` lines, and the reader splits on the
+    /// first `=`, splits lines on `\n`, and trims each name. A name that does
+    /// not survive that round trip is refused here rather than written and
+    /// silently changed on the way back:
+    ///
+    /// | written | read back before |
+    /// |---|---|
+    /// | `has=equals` | *dropped* |
+    /// | `has\nnewline` | `newline` |
+    /// | `␣␣padded␣␣` | `padded` |
+    /// | `` (empty) | *dropped* |
+    ///
+    /// Only `plain` survived unchanged. Two of the four came back under a
+    /// *different name*, so a later `mask("has\nnewline")` returned `None` and
+    /// the flag silently stopped matching.
+    pub fn insert(&mut self, name: impl Into<String>, bit: u32) -> Result<()> {
         let name = name.into();
+        let reason = if name.is_empty() {
+            Some("a tag name cannot be empty")
+        } else if name.contains('=') {
+            Some("a tag name cannot contain '=' — it separates the name from the bit")
+        } else if name.contains('\n') || name.contains('\r') {
+            Some("a tag name cannot contain a line break — one entry is one line")
+        } else if name.trim() != name {
+            Some("a tag name cannot start or end with whitespace — it is trimmed when read")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(HipoError::InvalidTagName { name, reason });
+        }
         match self.entries.iter_mut().find(|(n, _)| *n == name) {
             Some(e) => e.1 = bit,
             None => self.entries.push((name, bit)),
         }
+        Ok(())
     }
 
     /// Whether the registry has no entries.
@@ -276,7 +316,10 @@ impl TagRegistry {
                 continue;
             }
             if let Ok(bit) = bit.trim().parse::<u32>() {
-                reg.insert(name, bit);
+                // Cannot fail: `name` is non-empty, trimmed, and free of `=`
+                // and line breaks by construction above. Stay tolerant anyway —
+                // this parser's contract is to skip what it cannot use.
+                let _ = reg.insert(name, bit);
             }
         }
         reg
@@ -394,7 +437,7 @@ mod tests {
 
     #[test]
     fn registry_from_names_and_lookups() {
-        let reg = TagRegistry::from_names(Cat::NAMES.iter().copied());
+        let reg = TagRegistry::from_names(Cat::NAMES.iter().copied()).unwrap();
         assert_eq!(reg.len(), 3);
         assert!(!reg.is_empty());
         assert_eq!(reg.position("Sidis"), Some(1));
@@ -414,15 +457,15 @@ mod tests {
     #[test]
     fn registry_insert_replaces_by_name() {
         let mut reg = TagRegistry::new();
-        reg.insert("dvcs", 0);
-        reg.insert("dvcs", 5); // same name → replace, no duplicate
+        reg.insert("dvcs", 0).unwrap();
+        reg.insert("dvcs", 5).unwrap(); // same name → replace, no duplicate
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.position("dvcs"), Some(5));
     }
 
     #[test]
     fn registry_text_round_trip() {
-        let reg = TagRegistry::from_names([("Dvcs", 0), ("Sidis", 1), ("Elastic", 2)]);
+        let reg = TagRegistry::from_names([("Dvcs", 0), ("Sidis", 1), ("Elastic", 2)]).unwrap();
         let text = reg.to_text();
         assert_eq!(text, "Dvcs=0\nSidis=1\nElastic=2\n");
         assert_eq!(TagRegistry::parse_text(&text), reg);

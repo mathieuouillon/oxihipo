@@ -80,6 +80,14 @@ pub enum HipoError {
     #[error("corrupt record at offset {offset:#x}: {reason}")]
     CorruptRecord { offset: u64, reason: &'static str },
 
+    /// A tag name that the on-disk `name=bit` text form cannot round-trip.
+    ///
+    /// Refusing it is the point: before this check, `has\nnewline` was written
+    /// and read back as `newline`, and `  padded  ` as `padded` — a different
+    /// name, under which every later lookup missed.
+    #[error("invalid tag name {name:?}: {reason}")]
+    InvalidTagName { name: String, reason: &'static str },
+
     #[error("event index {index} out of range: the chain has {total} events")]
     EventIndexOutOfRange { index: u64, total: u64 },
 

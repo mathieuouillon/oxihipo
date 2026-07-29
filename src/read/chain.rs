@@ -341,7 +341,20 @@ impl Chain {
     /// `filter`, `take`, `map`, and friends.
     ///
     /// See [`OwnedEvent`] for the per-event memory contract: no per-event
-    /// allocation; the record buffer is shared by `Arc` and recycled.
+    /// allocation; the record buffer is shared by `Arc` and recycled. This
+    /// holds on every codec — verified by `tests/no_alloc.rs`, which reads two
+    /// files with the same record count and 4× the events and checks the
+    /// allocation count does not move. What it costs per *record* differs:
+    /// `Lz4PerBank` and `Lz4PerColumn` parse a directory of per-bank tables,
+    /// so they allocate roughly an order of magnitude more per record than the
+    /// blob codecs — but still nothing per event.
+    ///
+    /// One caveat on the split codecs: they store banks separately, so there is
+    /// no event blob to hand back and the whole-event views
+    /// ([`OwnedEvent::bytes`], [`OwnedEvent::composite`], and `structures` on
+    /// `Lz4PerColumn`) must **synthesise** one — a single allocation per event,
+    /// cached, and only on first use. Bank access by name
+    /// ([`OwnedEvent::bank`], [`OwnedEvent::get`]) never goes through it.
     ///
     /// ```no_run
     /// use oxihipo::Chain;

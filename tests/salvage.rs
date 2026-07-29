@@ -216,3 +216,166 @@ fn salvage_agrees_with_a_normal_open_on_an_undamaged_file() {
         "the same dictionary should be found by scanning"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The sequential scan
+//
+// `build_index_by_scanning` runs on two paths: salvage always, and the normal
+// path whenever the trailer is missing *or does not parse*. The tests below
+// damage a file in ways that force each path through it.
+// ---------------------------------------------------------------------------
+
+const RECORD_HEADER_SIZE: usize = 56;
+const FILE_HEADER_SIZE: usize = 56;
+const ENDIAN_MAGIC: [u8; 4] = [0x00, 0x01, 0xda, 0xc0];
+
+/// Offsets of every record header, walking record lengths from the file header.
+/// Index 0 is the dictionary; data records follow; the trailer is last.
+fn record_offsets(bytes: &[u8]) -> Vec<usize> {
+    let mut v = Vec::new();
+    let mut i = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize * 4;
+    let _ = FILE_HEADER_SIZE;
+    while i + RECORD_HEADER_SIZE <= bytes.len() {
+        if bytes[i + 28..i + 32] != ENDIAN_MAGIC {
+            break;
+        }
+        let total = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize * 4;
+        if total < RECORD_HEADER_SIZE || i + total > bytes.len() {
+            break;
+        }
+        v.push(i);
+        i += total;
+    }
+    v
+}
+
+/// Corrupt the trailer's payload, leaving its record header intact. The reader
+/// then fails to build an index from it and falls back to the scan — which is
+/// the only way the *normal* path reaches that scan on a file that has a
+/// trailer at all.
+fn break_trailer(bytes: &mut [u8]) {
+    let tp = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+    for x in bytes[tp + RECORD_HEADER_SIZE..tp + RECORD_HEADER_SIZE + 16].iter_mut() {
+        *x = 0xFF;
+    }
+}
+
+/// A trailer is an ordinary one-event record holding the `file::index` bank —
+/// no header bit sets it apart. A scan that walks into one indexes it as data
+/// and invents an event, which is what happened on a file whose trailer was
+/// present but unparseable: 12 events came back as 13.
+#[test]
+fn a_scan_forced_by_an_unparseable_trailer_does_not_index_the_trailer() {
+    let good = tmp("scan_trailer_good.hipo");
+    write(&good, 12, 4, Compression::None);
+    assert_eq!(Chain::open(&good).unwrap().event_count(), 12);
+
+    let broken = tmp("scan_trailer_broken.hipo");
+    let mut bytes = std::fs::read(&good).unwrap();
+    break_trailer(&mut bytes);
+    std::fs::write(&broken, &bytes).unwrap();
+
+    let chain = Chain::open(&broken).unwrap();
+    assert_eq!(chain.event_count(), 12, "the trailer was indexed as data");
+    assert_eq!(pids(&chain), (0..12).collect::<Vec<_>>());
+}
+
+/// One damaged record header used to cost the whole file, salvage included —
+/// which defeats the point of having a salvage path. It now resynchronises and
+/// recovers the records on either side of the damage.
+#[test]
+fn salvage_resynchronises_past_a_damaged_record_header() {
+    let good = tmp("scan_resync_good.hipo");
+    write(&good, 12, 4, Compression::None);
+
+    let broken = tmp("scan_resync_broken.hipo");
+    let mut bytes = std::fs::read(&good).unwrap();
+    let offsets = record_offsets(&bytes);
+    // offsets[0] is the dictionary, so this is the second of three data records.
+    bytes[offsets[2] + 28] ^= 0xFF;
+    std::fs::write(&broken, &bytes).unwrap();
+
+    // The normal path is unaffected: it indexes from the intact trailer and
+    // never runs the scan, so the file opens and only the damaged record fails
+    // to read. Reporting that corruption rather than quietly returning fewer
+    // events is this library's contract.
+    let normal = Chain::open(&broken).unwrap();
+    assert_eq!(normal.event_count(), 12);
+    assert!(
+        normal.events().any(|e| e.is_err()),
+        "the damaged record should fail on read"
+    );
+
+    let chain = Chain::open_salvage(&broken).unwrap();
+    assert_eq!(
+        pids(&chain),
+        vec![0, 1, 2, 3, 8, 9, 10, 11],
+        "salvage should recover every record but the damaged one"
+    );
+}
+
+/// `event_count` is a header field and was taken on trust, so a corrupt one
+/// propagated straight into `Chain::event_count()`. The index array bounds it
+/// at four bytes per event — a header field too, so no decompression is needed.
+#[test]
+fn a_record_claiming_more_events_than_its_index_array_holds_is_rejected() {
+    let good = tmp("scan_count_good.hipo");
+    write(&good, 12, 4, Compression::None);
+
+    // Corrupt the first data record's count. Two copies: the normal path only
+    // reaches the scan when the trailer is unusable, while salvage always
+    // scans — and salvage identifies the trailer by its contents, so breaking
+    // those would leave it unable to tell the trailer from a data record.
+    let mut bytes = std::fs::read(&good).unwrap();
+    let offsets = record_offsets(&bytes);
+    let victim = offsets[1];
+    bytes[victim + 12..victim + 16].copy_from_slice(&1_000_000u32.to_le_bytes());
+
+    let for_salvage = tmp("scan_count_salvage.hipo");
+    std::fs::write(&for_salvage, &bytes).unwrap();
+
+    let for_normal = tmp("scan_count_broken.hipo");
+    break_trailer(&mut bytes);
+    std::fs::write(&for_normal, &bytes).unwrap();
+
+    let err = Chain::open(&for_normal).unwrap_err().to_string();
+    assert!(
+        err.contains("event_count exceeds"),
+        "expected the count to be rejected, got: {err}"
+    );
+
+    // Salvage drops the lying record and keeps the rest.
+    let chain = Chain::open_salvage(&for_salvage).unwrap();
+    assert_eq!(
+        pids(&chain),
+        vec![4, 5, 6, 7, 8, 9, 10, 11],
+        "salvage should skip only the record with the impossible count"
+    );
+}
+
+/// An intact file must be unaffected by all of the above: the scan is also the
+/// normal path for a file written without a trailer.
+#[test]
+fn the_scan_still_indexes_an_intact_file_exactly() {
+    for codec in [
+        Compression::None,
+        Compression::Lz4,
+        Compression::Lz4PerBank,
+        Compression::Lz4PerColumn,
+    ] {
+        let path = tmp(&format!("scan_intact_{codec:?}.hipo"));
+        write(&path, 12, 4, codec);
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Zero `trailer_position` so the reader scans instead of reading the
+        // trailer index, while the trailer record itself stays in the file.
+        bytes[40..48].copy_from_slice(&0u64.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let chain = Chain::open(&path).unwrap();
+        assert_eq!(
+            pids(&chain),
+            (0..12).collect::<Vec<_>>(),
+            "{codec:?}: scan of an intact file"
+        );
+    }
+}

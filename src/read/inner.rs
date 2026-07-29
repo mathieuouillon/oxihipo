@@ -128,7 +128,10 @@ impl FileInner {
             first + RecordHeader::parse(&hdr)?.total_bytes()
         };
 
-        let mut index = build_index_by_scanning(&shared, len, first_data, true)?;
+        // No trailer position to skip: salvage does not trust the file header
+        // (it may be the thing that is damaged), so it finds the trailer by what
+        // it holds instead — see the `holds_file_index` check below.
+        let mut index = build_index_by_scanning(&shared, len, first_data, 0, true)?;
 
         // Drop the trailer if the scan walked into it.
         //
@@ -205,10 +208,16 @@ impl FileInner {
         let index = if file_header.trailer_position != 0 {
             match build_index_from_trailer(&shared, len, &file_header, first_data_record_offset) {
                 Ok(idx) => idx,
-                Err(_) => build_index_by_scanning(&shared, len, first_data_record_offset, false)?,
+                Err(_) => build_index_by_scanning(
+                    &shared,
+                    len,
+                    first_data_record_offset,
+                    file_header.trailer_position,
+                    false,
+                )?,
             }
         } else {
-            build_index_by_scanning(&shared, len, first_data_record_offset, false)?
+            build_index_by_scanning(&shared, len, first_data_record_offset, 0, false)?
         };
 
         Ok(Self {
@@ -519,18 +528,50 @@ fn build_index_from_trailer(
     Ok(idx)
 }
 
+/// Walk the file record by record, building the event index.
+///
+/// `trailer_pos` is the file header's `trailer_position`, or 0 when there is
+/// none to skip. `salvage` selects the recovery policy: a salvage scan works
+/// around damage, a normal scan raises on it. The two are deliberately
+/// different — the library's contract on the normal path is to report
+/// corruption, not to quietly hand back a shorter file.
 fn build_index_by_scanning(
     file: &SharedFile,
     file_len: u64,
     first_data_record_offset: u64,
-    stop_at_truncated: bool,
+    trailer_pos: u64,
+    salvage: bool,
 ) -> Result<FileEventIndex> {
     let mut idx = FileEventIndex::new();
     let mut off = first_data_record_offset;
     let mut hdr = [0u8; RECORD_HEADER_SIZE];
     while off + RECORD_HEADER_SIZE as u64 <= file_len {
         read_at(file, off, &mut hdr)?;
-        let h = RecordHeader::parse(&hdr)?;
+        // A header that doesn't parse ends a normal scan with an error. Salvage
+        // instead resynchronises to the next thing that looks like a record and
+        // keeps going: one damaged header used to cost the *whole file*, this
+        // path included — which defeats the point of having a salvage path at
+        // all. Measured on a 12-event file with one corrupted magic word:
+        // `open` and `open_salvage` both failed outright; salvage now recovers
+        // the records on either side of the damage.
+        let h = match RecordHeader::parse(&hdr) {
+            Ok(h) => h,
+            Err(e) => {
+                if !salvage {
+                    return Err(e);
+                }
+                // Strictly forward (`off + 4`), so this cannot spin: the search
+                // walks the 4-byte grid and either lands past `off` or reports
+                // that nothing else in the file parses.
+                match find_first_record(file, file_len, off + 4) {
+                    Some(next) => {
+                        off = next;
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+        };
         let len = h.total_bytes();
         // A zero-length record can't be advanced past — treat it as the end
         // rather than looping forever on a corrupt header.
@@ -547,13 +588,46 @@ fn build_index_by_scanning(
         // truncated file into one that opened quietly with fewer events — the
         // binding's `test_truncated_file_raises` caught it, which is exactly
         // the silent loss that test exists to prevent.
-        if stop_at_truncated && off + len > file_len {
+        if salvage && off + len > file_len {
             break;
+        }
+        // `event_count` is attacker-controlled and was taken on trust, so a
+        // corrupt header propagated straight into `Chain::event_count()`:
+        // flipping one record's count to 1,000,000 made a 12-event file report
+        // 1,000,009 events, and the *first* `events()` item was an error. The
+        // index array bounds the real count at four bytes per event, and that
+        // is a header field — no decompression needed. Verified against real
+        // data before relying on it: across 1,951 records of an 8.5 GB CLAS12
+        // DST and a simulation file, `index_array_length` is exactly
+        // `event_count * 4`, and C++ hipo4's own golden file matches.
+        if u64::from(h.event_count) * 4 > u64::from(h.index_array_length) {
+            if !salvage {
+                return Err(HipoError::CorruptRecord {
+                    offset: off,
+                    reason: "record event_count exceeds what its index array can hold",
+                });
+            }
+            // Salvage drops the record rather than the file. `len` is sane
+            // (non-zero and within the file, checked above), so the walk can
+            // still step over it to whatever follows.
+            off = off.checked_add(len).ok_or(HipoError::CorruptRecord {
+                offset: off,
+                reason: "record length overflows file offset",
+            })?;
+            continue;
         }
         // An empty record is legal (e.g. a skim that kept nothing from a
         // batch); skip it and keep scanning. Breaking here silently truncated
         // every later record in a trailer-less file.
-        if h.event_count > 0 {
+        //
+        // The trailer is skipped by position. A trailer is an ordinary
+        // one-event record carrying the `file::index` bank — no header bit
+        // distinguishes it — so a scan that meets one indexes it as data and
+        // invents an event. The normal path reaches this whenever the trailer
+        // *exists but does not parse*, which the fallback below is for: on a
+        // 12-event file with a corrupted trailer index, `event_count()` came
+        // back as 13.
+        if h.event_count > 0 && off != trailer_pos {
             idx.push(off, len, h.event_count);
         }
         off = off.checked_add(len).ok_or(HipoError::CorruptRecord {

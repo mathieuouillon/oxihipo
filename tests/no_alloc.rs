@@ -64,7 +64,12 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static GLOBAL: CountingAlloc = CountingAlloc;
 
-fn build_fixture(path: &std::path::Path, events: i32, max_record_events: u32) {
+fn build_fixture_with(
+    path: &std::path::Path,
+    events: i32,
+    max_record_events: u32,
+    compression: oxihipo::Compression,
+) {
     let mut dict = Dict::new();
     dict.add(Schema::from_columns(
         "REC::Event",
@@ -77,6 +82,7 @@ fn build_fixture(path: &std::path::Path, events: i32, max_record_events: u32) {
     ));
     let mut w = Writer::create(path)
         .schemas(&dict)
+        .compression(compression)
         .max_record_events(max_record_events)
         .build()
         .unwrap();
@@ -95,6 +101,10 @@ fn build_fixture(path: &std::path::Path, events: i32, max_record_events: u32) {
         .unwrap();
     }
     w.finish().unwrap();
+}
+
+fn build_fixture(path: &std::path::Path, events: i32, max_record_events: u32) {
+    build_fixture_with(path, events, max_record_events, oxihipo::Compression::Lz4);
 }
 
 /// Run a closure with allocation counting enabled; returns the count.
@@ -185,4 +195,63 @@ fn iter_alloc_contract() {
         .col::<i64>("evno")
         .unwrap()[0];
     assert!((0..5000).contains(&evno));
+
+    // ---- Test 3: the same contract on the split codecs.
+    allocation_scales_with_records_not_events(dir.path());
+}
+
+/// The per-event allocation contract, on **every** codec.
+///
+/// `Chain::events` documents "no per-event allocation; the record buffer is
+/// shared by `Arc` and recycled". That was measured only on the blob codecs.
+/// `Lz4PerBank` and `Lz4PerColumn` store banks separately and hand out events
+/// that borrow from the shared record, so the claim should hold for them too —
+/// it did not: every by-bank event heap-allocated an empty `Arc<OnceLock>` for
+/// a synthetic blob it usually never built. 800 events cost 852 allocations.
+///
+/// Rather than count against a fixed budget (which would just re-encode
+/// whatever the numbers happen to be), this compares two files with the **same
+/// record count** and 4× the events. Per-record work cancels; anything that
+/// scales with events shows up as a 4× gap.
+///
+/// Called from `iter_alloc_contract` rather than being its own `#[test]`:
+/// `ALLOCS` is a single global counter, so two tests measuring concurrently
+/// attribute each other's allocations and both readings become meaningless.
+fn allocation_scales_with_records_not_events(dir: &std::path::Path) {
+    for codec in [
+        oxihipo::Compression::None,
+        oxihipo::Compression::Lz4,
+        oxihipo::Compression::Lz4PerBank,
+        oxihipo::Compression::Lz4PerColumn,
+    ] {
+        // Both files hold 4 records. Only the events per record differ.
+        let few = dir.join(format!("{codec:?}_few.hipo"));
+        let many = dir.join(format!("{codec:?}_many.hipo"));
+        build_fixture_with(&few, 800, 200, codec);
+        build_fixture_with(&many, 3200, 800, codec);
+
+        let measure = |path: &std::path::Path| -> usize {
+            let file = Chain::open(path).unwrap();
+            // Warm up: first-touch growth of the recycled buffers is per-file,
+            // not per-event, and would otherwise land inside the window.
+            for ev in file.events().map(Result::unwrap) {
+                std::hint::black_box(ev.bank("REC::Event").map(|b| b.get::<i64>("evno", 0)));
+            }
+            let file = Chain::open(path).unwrap();
+            count_allocs(|| {
+                for ev in file.events().map(Result::unwrap) {
+                    std::hint::black_box(ev.bank("REC::Event").map(|b| b.get::<i64>("evno", 0)));
+                }
+            })
+        };
+
+        let a = measure(&few);
+        let b = measure(&many);
+        println!("{codec:?}: 800 events -> {a} allocs, 3200 events -> {b} allocs (4 records each)");
+        assert!(
+            b <= a + 8,
+            "{codec:?}: allocations scale with events, not records: \
+             800 events cost {a}, 3200 cost {b}"
+        );
+    }
 }
