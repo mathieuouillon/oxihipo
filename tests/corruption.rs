@@ -248,6 +248,7 @@ fn empty_record_does_not_truncate_a_scan() {
         "scan truncated at the empty record: {} events",
         chain.event_count()
     );
+
 }
 
 /// A corrupted by-bank offset table must not panic.
@@ -324,4 +325,82 @@ fn a_corrupt_by_bank_offset_table_errors_rather_than_panicking() {
         "no mutation produced an openable file, so nothing was exercised"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty record reached by the **iterator** must be skipped, not indexed.
+///
+/// Distinct from `empty_record_does_not_truncate_a_scan` above in the one way
+/// that matters: that test blanks the trailer position to force the scan path,
+/// and the scan drops empty records from the index — so iteration never lands
+/// on one and the fixture cannot reach this bug. Here the trailer is left
+/// **intact**, so the record index still lists the empty record and
+/// `events()` walks straight onto it.
+///
+/// `next_result` refilled the current record with `if` rather than `while`.
+/// `advance_record` resets the event cursor to 0, so the guard was tested
+/// against the record being left and never against the one arrived at.
+/// Landing on an empty record fell through to `event_offsets[i + 1]` with
+/// `i == 0` against a one-element table:
+///
+/// ```text
+/// index out of bounds: the len is 1 but the index is 1
+/// src/read/iter.rs:321
+/// ```
+///
+/// A library may return an `Err` for damaged input; it may not panic, because
+/// its caller then has no way to handle the file at all. Found by a byte-
+/// mutation sweep — six single-byte mutations of a 2 KB file reached it, all of
+/// them the low byte of some record's event count.
+#[test]
+fn an_empty_record_is_skipped_by_the_iterator_not_indexed() {
+    // `None` and `Lz4` both decode through the `Bytes` path, which is the one
+    // that indexes an offsets table. The split codecs carry their event count
+    // separately and were never affected.
+    for (label, write) in [
+        (
+            "none",
+            write_small_none as fn(&std::path::Path, i32),
+        ),
+        ("lz4", write_small_lz4 as fn(&std::path::Path, i32)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty_iter.hipo");
+        write(&path, 6); // 6 records, 1 event each
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let heads = record_header_offsets(&bytes);
+        assert!(heads.len() >= 5, "{label}: need several data records");
+        // Zero the event count of a middle data record, leaving the trailer
+        // alone so the index still names the record.
+        let hdr = heads[3];
+        bytes[hdr + 12..hdr + 16].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let chain = Chain::open(&path).unwrap();
+        // Must not panic. Errors are acceptable; aborting the process is not.
+        let walked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            chain.events().filter(|r| r.is_ok()).count()
+        }));
+        let n = match walked {
+            Ok(n) => n,
+            Err(_) => panic!("{label}: iterating across an empty record panicked"),
+        };
+        assert!(
+            n > 0,
+            "{label}: the records either side of the empty one should still read"
+        );
+
+        // The parallel walker takes its own path over the record list and must
+        // agree rather than panicking or double-counting.
+        for threads in [1usize, 4] {
+            let stats = chain.for_each(threads, |_| {});
+            match stats {
+                Ok(s) => assert_eq!(
+                    s.events_yielded as usize, n,
+                    "{label}: for_each({threads}) disagreed with the iterator"
+                ),
+                Err(e) => panic!("{label}: for_each({threads}) errored: {e}"),
+            }
+        }
+    }
 }

@@ -293,8 +293,30 @@ impl EventIter {
             return None;
         }
         loop {
-            // Refill the current record if exhausted.
-            if self.next_event >= self.cur.event_count() {
+            // Refill the current record while exhausted — `while`, not `if`.
+            //
+            // `advance_record` resets `next_event` to 0, so with an `if` the
+            // guard was tested against the *old* record and never against the
+            // new one. Advancing onto a record holding **zero events** then fell
+            // straight through to `event_offsets[i + 1]` with `i == 0` against a
+            // one-element table:
+            //
+            //     index out of bounds: the len is 1 but the index is 1
+            //
+            // Found by a byte-mutation sweep: corrupting a record header so it
+            // decodes to zero events panicked the whole read path, where the
+            // caller should have got an `Err`. A library cannot panic on file
+            // content — its caller has no way to handle that.
+            //
+            // The empty record itself need not come from corruption.
+            // `Writer::flush_record` will not emit one, but the public
+            // `Writer::write_record` takes a prebuilt record and checks only
+            // that it is at least a header long, so a file holding one is not
+            // necessarily malformed.
+            //
+            // Looping re-tests after every advance and skips as many empty
+            // records as it meets before indexing anything.
+            while self.next_event >= self.cur.event_count() {
                 match self.advance_record() {
                     Ok(true) => {}
                     Ok(false) => {
