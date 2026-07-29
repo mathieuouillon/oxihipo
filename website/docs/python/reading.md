@@ -484,6 +484,20 @@ There is a module-level shorthand for one-off reads:
 `ox.composite("run5042.hipo", "RUN::scaler")`.
 :::
 
+:::warning Composite banks and the split codecs
+`Lz4PerBank` and `Lz4PerColumn` store bank payloads separately and discard the
+structure headers that mark a bank as composite. Before **0.7.0** they had
+nowhere to record that, so `composite()` returned `None` on any file written
+with either codec.
+
+0.7.0 fixes this for newly written files. It cannot fix files already written:
+if you converted with 0.6.0 or earlier, the marker was never on disk and
+`composite()` still returns `None`. Re-convert from the original.
+
+The four stock codecs (`none`, `lz4`, `lz4best`, `gzip`) were never affected —
+see [Format versions](../performance/compression.md#format-versions-and-cross-version-compatibility).
+:::
+
 ## Selecting and writing
 
 ```python

@@ -273,6 +273,57 @@ Two costs to weigh before converting a production sample:
   built on it (coatjava, `clas12root`). Convert a *working copy*, keep the
   original, or stay on `Lz4` if colleagues need it.
 
+## Format versions and cross-version compatibility
+
+Both split codecs carry an **extension-format-version byte** at the front of the
+record payload, and both were bumped in **0.7.0**:
+
+| Codec | Wire tag | ≤ 0.6.0 | ≥ 0.7.0 |
+|---|---|---|---|
+| `Lz4PerBank` | 6 | version 2 | **version 3** |
+| `Lz4PerColumn` | 7 | version 1 | **version 2** |
+
+The bump adds one `header_size` byte per bank at the **end** of the record
+directory, so every offset before it is unchanged. What that means in practice:
+
+- **0.7.0 reads everything older versions wrote.** Both directions of the four
+  stock codecs, and both older split-codec versions.
+- **Older readers refuse the new split files**, with `Lz4PerBank: unsupported
+  extension-format version`. It is a clean error on the first event read — never
+  wrong data — but note that `Chain::open` still succeeds and reports an event
+  count, because the version lives in the record payload rather than the file
+  header.
+- **The stock codecs are untouched.** `None`, `Lz4`, `Lz4Best` and `Gzip` write
+  *byte-identical* files at 0.6.0 and 0.7.0 — same SHA-256 for the same input —
+  which is why nothing changed for C++ `hipo4` or Java. They never understood
+  tags 6 and 7, and the bytes of the tags they do understand did not move.
+
+### Composite banks
+
+A [composite bank](../python/reading.md#composite-banks) carries an inline format
+string, and the only thing marking it as composite is the top byte of its
+structure length word. The split codecs take a record apart and store bank
+payloads separately, discarding those structure headers — and before 0.7.0 they
+had nowhere to put that byte, so it was rebuilt as zero. A composite bank came
+back looking like an ordinary one and `composite()` returned `None`.
+
+That is what the new `header_size` table fixes. It applies to **newly written
+files only**:
+
+:::warning Composite banks in existing split-codec files cannot be recovered
+If you converted a file to `Lz4PerBank` or `Lz4PerColumn` with oxihipo 0.6.0 or
+earlier and it contained composite banks, the marker was never written to disk.
+Reading it with 0.7.0 still reports `header_size = 0` and `composite()` still
+returns `None` — measured, not assumed. The payload bytes are intact but nothing
+identifies them as composite.
+
+Re-convert from the original file. This is one more reason to keep it.
+:::
+
+Neither of the two real CLAS12 files this project tests against (an 8.5 GB DST
+and a simulation file, 71 and 106 distinct banks over 2,000 events) carries a
+composite bank, so ordinary reconstruction output was never affected.
+
 ## Converting existing files
 
 The `recook_by_bank` example re-emits an existing file as `Lz4PerBank`, for A/B

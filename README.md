@@ -410,6 +410,16 @@ only what an analysis touches:
 Both carry Rust-only wire tags the C++ `hipo4` reader can't read (the stock
 `None` / `Lz4` / `Lz4Best` / `Gzip` codecs stay compatible).
 
+Their on-disk format version was bumped in **0.7.0** (`Lz4PerBank` 2 → 3,
+`Lz4PerColumn` 1 → 2) so that composite banks keep the byte that marks them
+composite. 0.7.0 reads everything older versions wrote; older readers refuse the
+new split files with a clean `unsupported extension-format version` rather than
+misreading them. The four stock codecs are byte-identical across the change, so
+C++ `hipo4` and Java are unaffected. Composite banks already written to a
+split-codec file by 0.6.0 or earlier cannot be recovered — re-convert from the
+original. See
+[Format versions](https://mathieuouillon.github.io/oxihipo/docs/performance/compression#format-versions-and-cross-version-compatibility).
+
 Every format, on 50k events of a real CLAS12 file (274 banks; Apple M4 Pro,
 single thread, warm cache). `Ratio` is file size vs `None`; `sel`/`all` are the
 ms to read one bank / all 274:

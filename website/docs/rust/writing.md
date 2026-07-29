@@ -104,6 +104,19 @@ Python. The registry is additive (readers that don't know it skip it) and `skim`
 copies it through, so a tagged DST stays self-describing. Writing no registry
 leaves the output byte-for-byte as before.
 
+:::note Which tag names are legal
+The registry is stored as one `name=bit` line per entry, so a name that cannot
+survive that round trip is **refused** rather than written and silently changed.
+Since 0.7.0 `build()` fails if any name is empty, contains `=` or a line break,
+or has leading/trailing whitespace.
+
+Before that check existed, such a name came back as something else — `"a\nb"`
+read back as `"b"`, and `"  padded  "` as `"padded"` — under which every later
+`mask()` lookup quietly missed. `TagRegistry::insert` and `TagRegistry::from_names`
+return `Result` for the same reason; `WriterBuilder::tag_names` keeps its
+signature and surfaces the error from `build()`.
+:::
+
 ### Writing tagged DSTs
 
 To *produce* a tagged file — classify each event and stamp the result — use
