@@ -942,7 +942,10 @@ impl PyWriter {
                             cd.set_at(&mut bb, cname, row as u32, i, *inner)?;
                         }
                     }
-                    eb.add(bb);
+                    // Propagates HipoError::BankTooLarge rather than dropping
+                    // it: a bank past the 24-bit size field used to be written
+                    // truncated, and Python must see that as an exception.
+                    eb.add(bb)?;
                 }
                 writer.append_raw(&eb.finish())?;
             }
