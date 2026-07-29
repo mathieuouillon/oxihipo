@@ -490,9 +490,10 @@ structure headers that mark a bank as composite. Before **0.7.0** they had
 nowhere to record that, so `composite()` returned `None` on any file written
 with either codec.
 
-0.7.0 fixes this for newly written files. It cannot fix files already written:
-if you converted with 0.6.0 or earlier, the marker was never on disk and
-`composite()` still returns `None`. Re-convert from the original.
+0.7.0 fixed this for newly written files (0.7.1 keeps the fix while restoring
+the on-disk version the C++ and Java readers expect). It cannot fix files
+already written: if you converted with 0.6.0 or earlier, the marker was never on
+disk and `composite()` still returns `None`. Re-convert from the original.
 
 The four stock codecs (`none`, `lz4`, `lz4best`, `gzip`) were never affected —
 see [Format versions](../performance/compression.md#format-versions-and-cross-version-compatibility).

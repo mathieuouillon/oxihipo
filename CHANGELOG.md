@@ -7,7 +7,52 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+A single-purpose release: **undo 0.7.0's split-codec format-version bump**,
+which broke the C++ and Java implementations of those codecs. The composite fix
+0.7.0 shipped is kept in full.
+
+### Fixed
+
+- **`Lz4PerBank` and `Lz4PerColumn` files written by 0.7.0 are unreadable by
+  `hipo-cpp` and `hipo-java`.** 0.7.0 raised the on-disk
+  `ext_format_version` from 2 to 3 (by-bank) and 1 to 2 (by-column) when it
+  appended the composite `header_size` table. Those version numbers turn out to
+  be a **cross-implementation contract**: the
+  [`hipo-cpp`](https://code.jlab.org/hallb/clas12/hipo-cpp) and
+  [`hipo-java`](https://code.jlab.org/hallb/clas12/hipo-java)
+  `feature/bybank-bycolumn-compression` branches document and implement exactly
+  versions 2 and 1. Measured on a JLab farm node against both:
+
+  | file | oxihipo | `hipo-java` | `hipo-cpp` |
+  |---|---|---|---|
+  | by-bank / by-column @ 0.6.0 | ✅ | ✅ | ✅ |
+  | by-bank / by-column @ 0.7.0 | ✅ | ❌ `failed to decode ByBank record section` | ❌ **segfault** |
+  | by-bank / by-column @ 0.7.1 | ✅ | ✅ | ✅ |
+
+  All three now produce byte-identical checksums on the same files, array
+  (`T#N`) columns included.
+
+  **The bump was never necessary.** The `header_size` table is appended after
+  every other directory table, so a reader that predates it never looks that
+  far — proven by patching only the version byte back on a 0.7.0 file, after
+  which both other implementations read it perfectly. The library now detects
+  the table by **directory length** instead of by the version byte, which is
+  what lets the version stay fixed while the format grows.
+
+  0.7.1 still reads the version-3/2 files 0.7.0 wrote, so nothing already
+  written is lost. Rewrite them with 0.7.1 if you need to share them.
+
+### Added
+
+- `tests/composite_codecs.rs` asserts the on-disk `ext_format_version` is 2
+  (by-bank) and 1 (by-column), reading the byte back off the file. The contract
+  is with other codebases, so it needed a test that fails if it drifts again.
+
+### Documentation
+
+- The claim that the split codecs are readable only by this library was wrong
+  and is corrected everywhere it appeared. The released C++ `hipo4` and Java
+  readers do not know wire tags 6 and 7, but the branches above do.
 
 ## [0.7.0] - 2026-07-29
 

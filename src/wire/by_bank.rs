@@ -87,10 +87,10 @@ struct BankDescriptor {
 /// `4 * num_banks * event_count` size matrix is computed with checked
 /// arithmetic to avoid a `usize` wrap that could bypass a length gate.
 ///
-/// `ext_version` 3 appends one `header_size` byte per bank after the per-event
-/// size table; version 2 has no such tail. The length is exact, so it has to
-/// know which layout it is measuring.
-fn directory_body_len(num_banks: usize, event_count: u32, ext_version: u8) -> Result<usize> {
+/// This is the **base** length, without the optional `header_size` tail. A
+/// record that carries the tail is exactly `num_banks` bytes longer, and the
+/// tail begins right here — so this doubles as its offset.
+fn directory_body_len(num_banks: usize, event_count: u32) -> Result<usize> {
     let nb = num_banks as u64;
     let ec = event_count as u64;
     let bpr = (num_banks.div_ceil(8)) as u64;
@@ -101,13 +101,11 @@ fn directory_body_len(num_banks: usize, event_count: u32, ext_version: u8) -> Re
         let tags = 4u64.checked_mul(ec)?;
         let presence = ec.checked_mul(bpr)?;
         let sizes = 4u64.checked_mul(nb)?.checked_mul(ec)?;
-        let header_sizes = if ext_version >= 3 { nb } else { 0 };
         desc.checked_add(comp)?
             .checked_add(decomp)?
             .checked_add(tags)?
             .checked_add(presence)?
-            .checked_add(sizes)?
-            .checked_add(header_sizes)
+            .checked_add(sizes)
     })()
     .ok_or(HipoError::CorruptRecord {
         offset: 0,
@@ -224,7 +222,14 @@ impl ByBankRecord {
         // The declared decompressed directory length must match the layout
         // implied by the bank/event counts — reject before inflating into a
         // buffer of that size.
-        if dir_decomp_len != directory_body_len(num_banks, event_count, ext_version)? {
+        // Accept the directory with or without the composite `header_size`
+        // tail. The tail is what the version byte used to announce; keying off
+        // the length instead is what lets the version stay 2, so the C++ and
+        // Java readers — which implement version 2 and validate nothing beyond
+        // it — keep working. Verified: they read a tail-carrying record and
+        // produce byte-identical results.
+        let base_len = directory_body_len(num_banks, event_count)?;
+        if dir_decomp_len != base_len && dir_decomp_len != base_len + num_banks {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "Lz4PerBank: directory size inconsistent with bank/event counts",
@@ -252,7 +257,6 @@ impl ByBankRecord {
             event_count,
             &dir,
             streams_off,
-            ext_version,
         )
     }
 
@@ -269,9 +273,8 @@ impl ByBankRecord {
         event_count: u32,
         dir: &[u8],
         streams_off: usize,
-        ext_version: u8,
     ) -> Result<Arc<Self>> {
-        let dir_body_len = directory_body_len(num_banks, event_count, ext_version)?;
+        let dir_body_len = directory_body_len(num_banks, event_count)?;
         if dir.len() < dir_body_len {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
@@ -286,9 +289,13 @@ impl ByBankRecord {
         let presence_bytes = event_count as usize * bytes_per_row;
         let event_bank_sizes_off = presence_off + presence_bytes;
 
-        // descriptors, plus the v3 `header_size` tail if this record has one.
+        // descriptors, plus the composite `header_size` tail if this record
+        // carries one. Detected by length, not by the version byte: the tail is
+        // appended after every other table, so a reader that does not know
+        // about it simply never looks that far — which is exactly how the C++
+        // and Java implementations keep reading these records.
         let header_sizes_off = event_bank_sizes_off + 4 * num_banks * event_count as usize;
-        let has_header_sizes = ext_version >= 3 && dir.len() >= header_sizes_off + num_banks;
+        let has_header_sizes = dir.len() >= header_sizes_off + num_banks;
         let mut descriptors = Vec::with_capacity(num_banks);
         for b in 0..num_banks {
             let off = b * 4;

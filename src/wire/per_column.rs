@@ -232,7 +232,6 @@ impl PerColumnRecord {
             event_count,
             &dir,
             streams_off,
-            ext_version,
         )
     }
 
@@ -246,7 +245,6 @@ impl PerColumnRecord {
         event_count: u32,
         dir: &[u8],
         streams_off: usize,
-        ext_version: u8,
     ) -> Result<Arc<Self>> {
         let fixed_len = directory_fixed_len(num_banks, event_count)?;
         if dir.len() < fixed_len {
@@ -325,11 +323,15 @@ impl PerColumnRecord {
             });
         }
 
-        // v2 tail: one composite `header_size` per bank, after the stream table.
-        // Read here rather than with the descriptors because its offset depends
-        // on the stream count, which `num_cols` only reveals above.
+        // Optional tail: one composite `header_size` per bank, after the stream
+        // table. Read here rather than with the descriptors because its offset
+        // depends on the stream count, which `num_cols` only reveals above.
+        //
+        // Detected by length, not by the version byte, so the version can stay
+        // 1 and the C++ and Java readers keep working — they stop at the stream
+        // table and never look at the tail.
         let header_sizes_off = stream_sizes_off + stream_table_len;
-        if ext_version >= 2 && dir.len() >= header_sizes_off + num_banks {
+        if dir.len() >= header_sizes_off + num_banks {
             for (b, d) in descriptors.iter_mut().enumerate() {
                 d.header_size = dir[header_sizes_off + b];
             }

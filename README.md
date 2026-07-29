@@ -410,14 +410,15 @@ only what an analysis touches:
 Both carry Rust-only wire tags the C++ `hipo4` reader can't read (the stock
 `None` / `Lz4` / `Lz4Best` / `Gzip` codecs stay compatible).
 
-Their on-disk format version was bumped in **0.7.0** (`Lz4PerBank` 2 → 3,
-`Lz4PerColumn` 1 → 2) so that composite banks keep the byte that marks them
-composite. 0.7.0 reads everything older versions wrote; older readers refuse the
-new split files with a clean `unsupported extension-format version` rather than
-misreading them. The four stock codecs are byte-identical across the change, so
-C++ `hipo4` and Java are unaffected. Composite banks already written to a
-split-codec file by 0.6.0 or earlier cannot be recovered — re-convert from the
-original. See
+The released C++ `hipo4` and Java readers do not know tags 6 and 7, but the
+`feature/bybank-bycolumn-compression` branches of
+[`hipo-cpp`](https://code.jlab.org/hallb/clas12/hipo-cpp) and
+[`hipo-java`](https://code.jlab.org/hallb/clas12/hipo-java) implement them, and
+all three libraries produce identical checksums on the same files. Their
+on-disk `ext_format_version` — 2 for by-bank, 1 for by-column — is therefore a
+cross-implementation contract. **0.7.0 bumped it and broke both; 0.7.1 puts it
+back.** Composite banks already written to a split-codec file by 0.6.0 or
+earlier cannot be recovered — re-convert from the original. See
 [Format versions](https://mathieuouillon.github.io/oxihipo/docs/performance/compression#format-versions-and-cross-version-compatibility).
 
 Every format, on 50k events of a real CLAS12 file (274 banks; Apple M4 Pro,

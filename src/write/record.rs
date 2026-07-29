@@ -453,7 +453,7 @@ fn build_by_bank_record_bytes(
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
-    const EXT_FORMAT_VERSION: u8 = 3;
+    const EXT_FORMAT_VERSION: u8 = 2;
 
     let ByBankParts {
         num_banks,
@@ -630,7 +630,7 @@ fn build_per_column_record_bytes(
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
-    const EXT_FORMAT_VERSION: u8 = 2;
+    const EXT_FORMAT_VERSION: u8 = 1;
     let event_count = events.len() as u32;
     let e_count = events.len();
 

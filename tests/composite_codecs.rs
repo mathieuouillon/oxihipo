@@ -191,3 +191,57 @@ fn composite_values_decode_under_every_codec() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The split codecs' on-disk `ext_format_version` must stay **2** (by-bank) and
+/// **1** (by-column).
+///
+/// The composite `header_size` table is appended after every other directory
+/// table, so a reader that predates it never looks that far and is unaffected.
+/// 0.7.0 bumped the versions anyway, and that broke the C++ and Java
+/// implementations of these codecs — `hipo-cpp` segfaulted and `hipo-java`
+/// threw `failed to decode ByBank record section`, both on files whose *data*
+/// they parse perfectly once the version byte is put back. Measured against
+/// `hipo-cpp`/`hipo-java` `feature/bybank-bycolumn-compression`, which document
+/// exactly these two version numbers.
+///
+/// So the version byte is a compatibility contract with those readers, not a
+/// private detail. The library detects the tail by directory length instead.
+#[test]
+fn split_codec_format_versions_are_unchanged() {
+    let dir = scratch("oxihipo_composite_codecs_ver");
+
+    // (codec, wire compression tag, required ext_format_version)
+    for (codec, tag, want) in [(Compression::Lz4PerBank, 6u8, 2u8), (Compression::Lz4PerColumn, 7, 1)] {
+        let path = dir.join(format!("{codec:?}.hipo"));
+        write_file(&path, codec);
+        let bytes = std::fs::read(&path).unwrap();
+
+        // Walk records from the file header to the first split-codec record.
+        let mut off = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize * 4;
+        let mut found = None;
+        while off + 56 <= bytes.len() {
+            if bytes[off + 28..off + 32] != [0x00, 0x01, 0xda, 0xc0] {
+                break;
+            }
+            let comp = u32::from_le_bytes(bytes[off + 36..off + 40].try_into().unwrap());
+            if ((comp >> 28) & 0xF) as u8 == tag {
+                found = Some(bytes[off + 56]); // first payload byte = ext_format_version
+                break;
+            }
+            let rl = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize * 4;
+            if rl == 0 {
+                break;
+            }
+            off += rl;
+        }
+
+        assert_eq!(
+            found,
+            Some(want),
+            "{codec:?}: ext_format_version must stay {want} — the C++ and Java \
+             readers implement that version and break on anything else"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
