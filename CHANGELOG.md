@@ -7,6 +7,10 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.0] - 2026-07-29
+
 ### Breaking
 
 - **`TagRegistry::insert` and `TagRegistry::from_names` return `Result`.** A tag
@@ -959,7 +963,8 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.1...v0.5.2
