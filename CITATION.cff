@@ -13,7 +13,7 @@ authors:
 repository-code: "https://github.com/mathieuouillon/oxihipo"
 url: "https://mathieuouillon.github.io/oxihipo/"
 license: MIT
-version: 0.7.0
+version: 0.7.1
 keywords:
   - HIPO
   - CLAS12
