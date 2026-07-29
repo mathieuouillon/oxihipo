@@ -7,6 +7,10 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.6.0] - 2026-07-29
+
 A correctness release. Each entry is something that was **silently wrong** — the
 library returned success and stored the wrong bytes, or aborted the process where
 it should have returned an error — rather than something that failed visibly.
@@ -786,7 +790,8 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.0...v0.5.1

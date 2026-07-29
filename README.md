@@ -1,7 +1,7 @@
 # oxihipo
 
 [![Documentation](https://img.shields.io/badge/📖_docs-mathieuouillon.github.io%2Foxihipo-b5410b)](https://mathieuouillon.github.io/oxihipo/)
-[![PyPI](https://img.shields.io/badge/pypi-v0.5.3-006dad)](https://pypi.org/project/oxihipo/)
+[![PyPI](https://img.shields.io/badge/pypi-v0.6.0-006dad)](https://pypi.org/project/oxihipo/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776ab)](https://pypi.org/project/oxihipo/)
 [![CI](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/ci.yml)
 [![docs](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml/badge.svg)](https://github.com/mathieuouillon/oxihipo/actions/workflows/docs.yml)

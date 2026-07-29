@@ -248,7 +248,6 @@ fn empty_record_does_not_truncate_a_scan() {
         "scan truncated at the empty record: {} events",
         chain.event_count()
     );
-
 }
 
 /// A corrupted by-bank offset table must not panic.
@@ -357,10 +356,7 @@ fn an_empty_record_is_skipped_by_the_iterator_not_indexed() {
     // that indexes an offsets table. The split codecs carry their event count
     // separately and were never affected.
     for (label, write) in [
-        (
-            "none",
-            write_small_none as fn(&std::path::Path, i32),
-        ),
+        ("none", write_small_none as fn(&std::path::Path, i32)),
         ("lz4", write_small_lz4 as fn(&std::path::Path, i32)),
     ] {
         let dir = tempfile::tempdir().unwrap();
