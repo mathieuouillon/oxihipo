@@ -211,7 +211,10 @@ fn split_codec_format_versions_are_unchanged() {
     let dir = scratch("oxihipo_composite_codecs_ver");
 
     // (codec, wire compression tag, required ext_format_version)
-    for (codec, tag, want) in [(Compression::Lz4PerBank, 6u8, 2u8), (Compression::Lz4PerColumn, 7, 1)] {
+    for (codec, tag, want) in [
+        (Compression::Lz4PerBank, 6u8, 2u8),
+        (Compression::Lz4PerColumn, 7, 1),
+    ] {
         let path = dir.join(format!("{codec:?}.hipo"));
         write_file(&path, codec);
         let bytes = std::fs::read(&path).unwrap();
