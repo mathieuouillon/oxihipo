@@ -320,3 +320,91 @@ fn chain_open_rejects_malformed_glob() {
     let err = Chain::open("some/dir/[bad.hipo").unwrap_err();
     assert!(matches!(err, oxihipo::HipoError::InvalidGlob { .. }));
 }
+
+/// A required bank that one chain file does not declare must reject that file's
+/// events, not pass them.
+///
+/// `Filter::bind` resolves required names against **each file's own**
+/// dictionary. An unresolvable name contributed no id, and a filter with no ids
+/// is exactly what "require nothing" looks like — so the clause was silently
+/// dropped for that file.
+///
+/// `Chain::open` accepts the chain, because a bank one file lacks is a subset
+/// rather than a layout conflict, and `with_filter` accepts the name, because
+/// the chain's dictionary does declare it. So nothing upstream catches it, and
+/// the two read paths disagreed: `events()` returned **15** where `for_each`
+/// returned **6**, on the same chain with the same filter.
+#[test]
+fn a_required_bank_missing_from_one_file_rejects_that_file() {
+    use oxihipo::{Compression, Filter};
+
+    fn write(p: &std::path::Path, with_extra: bool, n: i32) {
+        let mut d = Dict::new();
+        d.add(Schema::from_columns(
+            "A::b",
+            300,
+            1,
+            [("x".into(), DataType::Int, 1)],
+        ));
+        if with_extra {
+            d.add(Schema::from_columns(
+                "Extra::c",
+                301,
+                1,
+                [("y".into(), DataType::Int, 1)],
+            ));
+        }
+        let mut w = Writer::create(p)
+            .schemas(&d)
+            .compression(Compression::Lz4)
+            .max_record_events(3)
+            .build()
+            .unwrap();
+        for i in 0..n {
+            w.event(|ev| {
+                ev.bank("A::b", |b| {
+                    b.row(|r| {
+                        r.set("x", i)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                if with_extra {
+                    ev.bank("Extra::c", |b| {
+                        b.row(|r| {
+                            r.set("y", i)?;
+                            Ok(())
+                        })?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("a_has.hipo"), true, 6);
+    write(&dir.path().join("b_lacks.hipo"), false, 9);
+
+    let glob = dir.path().join("*.hipo");
+    let chain = Chain::open(glob.to_str().unwrap()).expect("a missing bank is not a conflict");
+    assert_eq!(chain.event_count(), 15, "both files should be in the chain");
+
+    let filtered = chain
+        .with_filter(Filter::require(["Extra::c"]))
+        .expect("the chain's dictionary declares Extra::c");
+
+    let via_iter = filtered.events().filter(|e| e.is_ok()).count() as u64;
+    let via_for_each = filtered.for_each(1, |_| {}).unwrap().events_yielded;
+    let via_parallel = filtered.for_each(4, |_| {}).unwrap().events_yielded;
+
+    assert_eq!(via_iter, 6, "only a_has.hipo's events carry Extra::c");
+    assert_eq!(
+        via_iter, via_for_each,
+        "the sequential and parallel readers must agree under a filter"
+    );
+    assert_eq!(via_for_each, via_parallel, "thread count must not matter");
+}

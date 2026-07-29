@@ -25,6 +25,11 @@ use crate::schema::Dict;
 pub struct Filter {
     require_names: Vec<String>,
     require_ids: Vec<(u16, u8)>,
+    /// A required bank is absent from the dictionary this filter is bound to,
+    /// so nothing in that file can satisfy it. Tracked because the ids alone
+    /// cannot say it: an unresolvable name simply contributes no id, which is
+    /// indistinguishable from "no banks required" and let every event pass.
+    unsatisfiable: bool,
     record_tags: Vec<u64>,
     event_tags: Vec<u32>,
     event_tag_mask: u32,
@@ -147,11 +152,26 @@ impl Filter {
 
     /// Resolve bank names against `dict`. Names not in the dict are
     /// silently dropped — they can't appear in events anyway.
+    /// Resolve the required bank names against one file's dictionary.
+    ///
+    /// A name the dictionary does not declare makes the filter **unsatisfiable**
+    /// for that file: no event in it can carry a bank the file cannot describe,
+    /// so every event must be rejected.
+    ///
+    /// Recording that explicitly is the point. An unresolvable name contributes
+    /// no id, and a filter with no ids is exactly what "require nothing" looks
+    /// like — so the clause was silently dropped. On a chain whose first file
+    /// declares a bank and whose second does not, `Chain::open` accepts it
+    /// (a missing bank is not a layout conflict) and `events()` then returned
+    /// **15** events where `for_each` returned **6**, for the same chain and the
+    /// same filter.
     pub(crate) fn bind(&mut self, dict: &Dict) {
         self.require_ids.clear();
+        self.unsatisfiable = false;
         for name in &self.require_names {
-            if let Some(s) = dict.get(name) {
-                self.require_ids.push((s.group(), s.item()));
+            match dict.get(name) {
+                Some(s) => self.require_ids.push((s.group(), s.item())),
+                None => self.unsatisfiable = true,
             }
         }
     }
@@ -159,6 +179,9 @@ impl Filter {
     /// True if the event carries every required bank and its tag matches.
     #[inline]
     pub(crate) fn check(&self, event: &Event<'_>) -> bool {
+        if self.unsatisfiable {
+            return false;
+        }
         if self.event_tag_active() && !self.tag_matches(event.tag()) {
             return false;
         }
@@ -178,6 +201,9 @@ impl Filter {
         record: &crate::wire::by_bank::ByBankRecord,
         event_idx: u32,
     ) -> bool {
+        if self.unsatisfiable {
+            return false;
+        }
         if self.event_tag_active() && !self.tag_matches(record.event_tag(event_idx)) {
             return false;
         }
@@ -200,6 +226,9 @@ impl Filter {
         record: &crate::wire::per_column::PerColumnRecord,
         event_idx: u32,
     ) -> bool {
+        if self.unsatisfiable {
+            return false;
+        }
         if self.event_tag_active() && !self.tag_matches(record.event_tag(event_idx)) {
             return false;
         }
