@@ -38,6 +38,13 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   above, plus carrying the byte through the by-bank structure iterator and both
   event synthesisers.
 
+  Validated on real data as well as fixtures: 2,000 events of an 8.5 GB CLAS12
+  DST (71 distinct banks) and of a simulation file (106 banks) were rewritten
+  through all four codecs and compared bank for bank — every `header_size` and
+  payload identical to the source. Neither file carries a composite bank, so
+  this bug was not corrupting CLAS12 reconstruction output; it was corrupting
+  composites, which the format allows anywhere.
+
 - **`OwnedEvent::composite` returned `None` on every split-codec event.** It
   delegated to `EventCtx::composite`, which needs original structure bytes and
   documents itself as returning `None` for by-bank backends — advising callers
