@@ -368,33 +368,42 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
             let bound = lz4_flex::block::get_maximum_output_size(src.len());
 
             dst.reserve(bound);
+            // Mirrors `decompress` above: the spare capacity stays
+            // `&mut [MaybeUninit<u8>]`, and the backend gets a raw pointer +
+            // length. No `&mut [u8]` is fabricated over uninitialized memory
+            // for the FFI backend (the default build). Only the pure-Rust
+            // `lz4_flex` backend needs a slice, and it is confined to that
+            // branch. `set_len` below commits only the bytes produced.
             let spare = dst.spare_capacity_mut();
-            let spare: &mut [u8] = unsafe {
-                std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, spare.len())
-            };
+            let spare_len = spare.len();
+            let dst_ptr = spare.as_mut_ptr() as *mut u8;
 
             #[cfg(feature = "lz4-c")]
             let n = {
-                // SAFETY: `src` / `spare` are `&[u8]` / `&mut [u8]` we own;
-                // bound was queried from LZ4_compressBound. Compression
-                // never reads `spare`.
+                // SAFETY: `src` is a `&[u8]` we own; `dst_ptr`/`spare_len`
+                // describe reserved capacity we own, and `spare_len >= bound`
+                // as queried from LZ4_compressBound. Both entry points write
+                // at most the destination capacity they are handed, return
+                // <= 0 rather than overflowing, and never read the
+                // destination — so no uninitialized byte is ever read and no
+                // reference over uninit memory exists.
                 let n = unsafe {
                     if matches!(kind, CompressionType::Lz4Best) {
                         // Level 9 ≈ `LZ4HC_CLEVEL_OPT_MIN`, matching what
                         // CLAS12 / `hipo4` use.
                         lz4_sys::LZ4_compress_HC(
                             src.as_ptr() as *const core::ffi::c_char,
-                            spare.as_mut_ptr() as *mut core::ffi::c_char,
+                            dst_ptr as *mut core::ffi::c_char,
                             src.len() as i32,
-                            spare.len() as i32,
+                            spare_len as i32,
                             9,
                         )
                     } else {
                         lz4_sys::LZ4_compress_default(
                             src.as_ptr() as *const core::ffi::c_char,
-                            spare.as_mut_ptr() as *mut core::ffi::c_char,
+                            dst_ptr as *mut core::ffi::c_char,
                             src.len() as i32,
-                            spare.len() as i32,
+                            spare_len as i32,
                         )
                     }
                 };
@@ -404,9 +413,31 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
                 n as usize
             };
             #[cfg(not(feature = "lz4-c"))]
-            let n = lz4_flex::block::compress_into(src, spare)
-                .map_err(|_| HipoError::Compression("lz4 compress failed"))?;
+            let n = {
+                // SAFETY: `dst_ptr`/`spare_len` describe the reserved spare
+                // capacity we own; the fabricated `&mut [u8]` is confined to
+                // this call and never escapes. `lz4_flex` documents
+                // `SliceSink` — what `compress_into` wraps the slice in — as
+                // targeting "preallocated and possibly uninitialized" space.
+                // Its encoder is write-only into that space: every store is a
+                // `ptr::write` / `copy_nonoverlapping` sourced from `input`,
+                // and the one output-reading `Sink` method (`byte_at`) is
+                // called solely from the *decoder* (`decompress_safe.rs`). So
+                // `[0, n)` is fully initialized on return and no uninitialized
+                // value is ever read. (`safe-encode` is deliberately off — see
+                // Cargo.toml — but that path is write-only too, and would
+                // merely swap the raw stores for indexed ones.)
+                let target: &mut [u8] =
+                    unsafe { std::slice::from_raw_parts_mut(dst_ptr, spare_len) };
+                lz4_flex::block::compress_into(src, target)
+                    .map_err(|_| HipoError::Compression("lz4 compress failed"))?
+            };
 
+            // SAFETY: the backend wrote `n` valid u8s at `dst_ptr`, i.e. into
+            // `dst[start..start + n]`, and `n <= spare_len` because that is the
+            // capacity it was handed (both backends bound their output to it
+            // and signal failure rather than overrun). So `start + n` bytes are
+            // initialized and within the allocation reserved above.
             unsafe { dst.set_len(start + n) };
         }
         CompressionType::Gzip => {
