@@ -203,6 +203,19 @@ impl PerColumnRecord {
                 reason: "Lz4PerColumn: directory truncated",
             });
         }
+        // Bound the declared decompressed length against the compressed bytes
+        // we actually hold, *first*. The layout check below is only a *lower*
+        // bound, so on its own anything up to `u32::MAX` reaches the
+        // `with_capacity` further down. `decompress` applies this same ceiling,
+        // but one line too late to stop the reservation.
+        if dir_decomp_len
+            > crate::compress::max_plausible_decompressed(CompressionType::Lz4, dir_comp_len)
+        {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4PerColumn: directory size implausibly large for compressed input",
+            });
+        }
         // The directory's fixed part must at least fit; the per-stream size
         // table is validated after we know `num_cols`.
         if dir_decomp_len < directory_fixed_len(num_banks, event_count)? {

@@ -400,3 +400,145 @@ fn an_empty_record_is_skipped_by_the_iterator_not_indexed() {
         }
     }
 }
+
+/// A file-controlled `directory_decompressed_len` must be bounded against the
+/// compressed bytes that back it, **before** the `Vec::with_capacity` that
+/// reserves it.
+///
+/// Both split-codec parsers read a 32-bit decompressed length out of the
+/// record section and reserve it. `decompress` has an amplification ceiling
+/// (LZ4 expands at most ~255x; the guard allows 1056x) but it runs *inside*
+/// the call, i.e. one line after the reservation has already happened. The
+/// original code therefore produced the right error for the wrong reason: a
+/// 24-byte section declaring `dir_decomp_len = 3_000_000_000` returned
+/// `CorruptRecord { reason: "decompressed size implausibly large..." }` only
+/// after `Vec::with_capacity(3_000_000_000)` had run.
+///
+/// On 64-bit with overcommit that is a transient virtual reservation rather
+/// than an OOM, which is why it stayed invisible. It is real under
+/// `vm.overcommit_memory=2`, on 32-bit targets, and multiplied by worker count
+/// in the parallel record paths — and `panic = "abort"` in release makes an
+/// allocation failure uncatchable.
+///
+/// The per-codec layout checks do not cover this on their own: per-column only
+/// *lower*-bounds the length, and by-bank's equality test is against a
+/// `base_len` computed from the same file-supplied `num_banks`/`event_count`,
+/// so it is tunable rather than fixed.
+fn hostile_dir_decomp_len(
+    compression: Compression,
+    expect_reason: &str,
+    // Given (num_banks, event_count, dir_comp_len) as written, return the
+    // (num_banks, dir_decomp_len) to patch in. By-bank has to move both, so
+    // its `base_len` equality check still passes and the reservation is
+    // genuinely reachable; per-column only lower-bounds the length, so a
+    // single field is enough.
+    patch: fn(u32, u32) -> (u32, u32),
+) {
+    use oxihipo::{DataType, Schema as Sch};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.hipo");
+
+    let mut d = Dict::new();
+    d.add(Sch::from_columns(
+        "A::b",
+        900,
+        1,
+        [("v".into(), DataType::Float, 1)],
+    ));
+    let mut w = Writer::create(&path)
+        .schemas(&d)
+        .compression(compression)
+        .build()
+        .unwrap();
+    for e in 0..8i32 {
+        w.event(|ev| {
+            ev.bank("A::b", |b| {
+                b.row(|c| c.set("v", e as f32).map(|_| ()))?;
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+
+    // The record section follows the 56-byte record header. Its layout is
+    // num_banks @ +4, event_count @ +8, dir_comp_len @ +12, dir_decomp_len @
+    // +16 — no LZ4 stream of `dir_comp_len` bytes could produce the value we
+    // write there.
+    const RH_LEN: usize = 56;
+    let good = std::fs::read(&path).unwrap();
+    let headers = record_header_offsets(&good);
+
+    let mut patched_any = false;
+    for &hdr in &headers {
+        let sec = hdr + RH_LEN;
+        if sec + 20 > good.len() {
+            continue;
+        }
+        let nb = u32::from_le_bytes(good[sec + 4..sec + 8].try_into().unwrap());
+        let ec = u32::from_le_bytes(good[sec + 8..sec + 12].try_into().unwrap());
+        let dir_comp = u32::from_le_bytes(good[sec + 12..sec + 16].try_into().unwrap());
+        // Identify a real data section: our one bank, our event count, and a
+        // non-empty compressed directory.
+        if nb != 1 || ec != 8 || dir_comp == 0 || dir_comp as usize > good.len() {
+            continue;
+        }
+        let (new_nb, new_decomp) = patch(nb, ec);
+        let mut bytes = good.clone();
+        bytes[sec + 4..sec + 8].copy_from_slice(&new_nb.to_le_bytes());
+        bytes[sec + 16..sec + 20].copy_from_slice(&new_decomp.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        patched_any = true;
+
+        let chain = Chain::open(&path).expect("header still parses; the section is the damage");
+        let err = chain
+            .events()
+            .find_map(Result::err)
+            .expect("a 3 GB directory must not decode successfully");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(expect_reason),
+            "expected the pre-reservation guard to fire, got: {msg}"
+        );
+        break;
+    }
+    assert!(
+        patched_any,
+        "no data section was located, so nothing was exercised"
+    );
+}
+
+#[test]
+fn by_bank_rejects_a_hostile_directory_length_before_reserving() {
+    // By-bank demands `dir_decomp_len == base_len` (or `+ num_banks`), which
+    // reads as a tight check — but `base_len` is computed from the same
+    // file-supplied `num_banks`/`event_count`. Raising `num_banks` to 66.7M
+    // makes a 3 GB directory perfectly "consistent", so the layout check waves
+    // it through and only the amplification bound stops the reservation.
+    // (Without the bound this fixture reaches `Vec::with_capacity(3_000_000_008)`.)
+    hostile_dir_decomp_len(
+        Compression::Lz4PerBank,
+        "Lz4PerBank: directory size implausibly large for compressed input",
+        |_nb, ec| {
+            let nb: u64 = 66_666_666;
+            let ec = ec as u64;
+            let bpr = nb.div_ceil(8);
+            let base = 4 * nb + 4 * nb + 4 * nb + 4 * ec + ec * bpr + 4 * nb * ec;
+            assert_eq!(base, 3_000_000_008, "fixture arithmetic drifted");
+            (nb as u32, base as u32)
+        },
+    );
+}
+
+#[test]
+fn per_column_rejects_a_hostile_directory_length_before_reserving() {
+    // Per-column only *lower*-bounds the length, so anything up to u32::MAX
+    // passes the layout check on its own — one field is enough.
+    hostile_dir_decomp_len(
+        Compression::Lz4PerColumn,
+        "Lz4PerColumn: directory size implausibly large for compressed input",
+        |nb, _ec| (nb, 3_000_000_000),
+    );
+}

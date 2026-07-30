@@ -219,6 +219,21 @@ impl ByBankRecord {
                 reason: "Lz4PerBank: directory truncated",
             });
         }
+        // Bound the declared decompressed length against the compressed bytes
+        // we actually hold, *first*. The layout check below looks tighter — it
+        // demands equality — but `base_len` is itself a function of the
+        // file-supplied `num_banks`/`event_count`, so the pair can be tuned to
+        // make ~4 GiB "consistent" and reach the `with_capacity` further down.
+        // `decompress` applies this same ceiling, but one line too late to stop
+        // the reservation.
+        if dir_decomp_len
+            > crate::compress::max_plausible_decompressed(CompressionType::Lz4, dir_comp_len)
+        {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4PerBank: directory size implausibly large for compressed input",
+            });
+        }
         // The declared decompressed directory length must match the layout
         // implied by the bank/event counts — reject before inflating into a
         // buffer of that size.

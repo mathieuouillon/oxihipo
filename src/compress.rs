@@ -60,6 +60,25 @@ unsafe extern "C" {}
 /// trip on real files. 64 KiB is well over any observed delta.
 const DECOMPRESS_SLACK: usize = 64 * 1024;
 
+/// The largest decompressed size worth believing from `comp_len` compressed
+/// bytes. LZ4 expands at most ~255x and DEFLATE ~1032x; the generous 1056x
+/// ceiling never rejects a valid stream. `None` cannot produce more than its
+/// input.
+///
+/// Callers that reserve *before* handing the buffer to [`decompress`] must
+/// apply this themselves — `decompress` checking it is too late if a
+/// `Vec::with_capacity` from a file-controlled length has already run. The
+/// split-codec directory parsers are exactly that case, which is why this is
+/// a named function rather than an expression inline below.
+pub(crate) fn max_plausible_decompressed(kind: CompressionType, comp_len: usize) -> usize {
+    match kind {
+        CompressionType::None => comp_len,
+        _ => comp_len
+            .saturating_mul(1056)
+            .saturating_add(DECOMPRESS_SLACK),
+    }
+}
+
 /// Decompress `src` into `dst`. `dst.capacity()` must be at least the
 /// expected decompressed length plus the per-record slack. On success
 /// `dst.len()` reflects the bytes produced.
@@ -72,17 +91,8 @@ pub fn decompress(
     dst.clear();
     // Reject an implausibly large decompressed size *before* reserving, so a
     // tiny record whose header claims a huge `data_length` can't force a
-    // multi-GB allocation (a cheap amplification DoS on untrusted input). LZ4
-    // expands at most ~255x and DEFLATE ~1032x; the generous 1056x ceiling
-    // never rejects a valid stream. `None` can't produce more than its input.
-    let max_plausible = match kind {
-        CompressionType::None => src.len(),
-        _ => src
-            .len()
-            .saturating_mul(1056)
-            .saturating_add(DECOMPRESS_SLACK),
-    };
-    if expected > max_plausible {
+    // multi-GB allocation (a cheap amplification DoS on untrusted input).
+    if expected > max_plausible_decompressed(kind, src.len()) {
         return Err(HipoError::CorruptRecord {
             offset: 0,
             reason: "decompressed size implausibly large for compressed input",
