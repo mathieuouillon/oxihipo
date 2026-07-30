@@ -173,6 +173,140 @@ fn bench_columns(c: &mut Criterion) {
     g.finish();
 }
 
+/// The same column read three ways on a bank whose row is **not** a multiple
+/// of 4 bytes — the layout every real CLAS12 `REC::Particle` has.
+///
+/// This exists because the rest of this file cannot see the difference. The
+/// shared fixture's `REC::Particle` is `pid/I, px/F, py/F, pz/F, cov/F#3`:
+/// every column 4 bytes wide, so every column offset is 4-aligned and
+/// `Bank::col`'s zero-copy fast path always hits. Add a `Byte` and a `Short`
+/// — as the real schema has — and the row becomes 43 bytes, most columns land
+/// off a 4-byte boundary, and `col`/`read` fall back to copying the column
+/// into a fresh `Vec` on nearly every bank of every event.
+///
+/// `iter` and `read_into` are the allocation-free paths. Measuring all three
+/// side by side is what keeps that honest: if `read` ever regresses, or if
+/// `iter` ever starts allocating, the gap between these three lines moves.
+fn bench_mixed_width_columns(c: &mut Criterion) {
+    let dir = std::env::temp_dir().join("oxihipo_bench_mixed");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mixed.hipo");
+    if !path.is_file() {
+        write_mixed_fixture(&path);
+    }
+    let chain = Chain::open(&path).unwrap();
+    let schema = chain.schemas().get("REC::Particle").unwrap();
+    let px = schema.handle::<f32>("px").unwrap();
+
+    let mut g = c.benchmark_group("mixed_width_column");
+    g.throughput(criterion::Throughput::Elements(chain.event_count()));
+
+    // Allocates a Vec<f32> per bank per event on this layout.
+    g.bench_function("read(handle)", |b| {
+        b.iter(|| {
+            let mut acc = 0.0f32;
+            for ev in chain.events() {
+                let ev = ev.unwrap();
+                if let Some(bank) = ev.bank("REC::Particle") {
+                    for v in &*bank.read(px) {
+                        acc += *v;
+                    }
+                }
+            }
+            black_box(acc)
+        })
+    });
+
+    // Reads in place; no allocation.
+    g.bench_function("iter(handle)", |b| {
+        b.iter(|| {
+            let mut acc = 0.0f32;
+            for ev in chain.events() {
+                let ev = ev.unwrap();
+                if let Some(bank) = ev.bank("REC::Particle") {
+                    acc += bank.iter(px).sum::<f32>();
+                }
+            }
+            black_box(acc)
+        })
+    });
+
+    // One bulk copy into a buffer hoisted out of the loop.
+    g.bench_function("read_into(handle)", |b| {
+        b.iter(|| {
+            let mut acc = 0.0f32;
+            let mut buf: Vec<f32> = Vec::new();
+            for ev in chain.events() {
+                let ev = ev.unwrap();
+                if let Some(bank) = ev.bank("REC::Particle") {
+                    bank.read_into(px, &mut buf);
+                    for v in &buf {
+                        acc += *v;
+                    }
+                }
+            }
+            black_box(acc)
+        })
+    });
+    g.finish();
+}
+
+/// A fixture with the real 43-byte `REC::Particle` row.
+fn write_mixed_fixture(path: &Path) {
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        31,
+        [
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
+            ("py".into(), DataType::Float, 1),
+            ("pz".into(), DataType::Float, 1),
+            ("vx".into(), DataType::Float, 1),
+            ("vy".into(), DataType::Float, 1),
+            ("vz".into(), DataType::Float, 1),
+            ("vt".into(), DataType::Float, 1),
+            ("charge".into(), DataType::Byte, 1),
+            ("beta".into(), DataType::Float, 1),
+            ("chi2pid".into(), DataType::Float, 1),
+            ("status".into(), DataType::Short, 1),
+        ],
+    ));
+    let mut w = Writer::create(path)
+        .schemas(&d)
+        .compression(Compression::Lz4)
+        .build()
+        .unwrap();
+    for e in 0..200_000i32 {
+        w.event(|ev| {
+            ev.bank("REC::Particle", |b| {
+                for r in 0..(1 + (e % 5)) {
+                    b.row(|w| {
+                        w.set("pid", 11i32)?;
+                        w.set("px", 0.5_f32 + r as f32)?;
+                        w.set("py", -0.2_f32)?;
+                        w.set("pz", 2.0_f32)?;
+                        w.set("vx", 0.0_f32)?;
+                        w.set("vy", 0.0_f32)?;
+                        w.set("vz", -3.0_f32)?;
+                        w.set("vt", 0.0_f32)?;
+                        w.set("charge", -1i8)?;
+                        w.set("beta", 0.99_f32)?;
+                        w.set("chi2pid", 1.5_f32)?;
+                        w.set("status", -2000i16)?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+}
+
 /// Random access over scattered indices — a different decode route (one record
 /// per call for the classic formats, lazy per-bank for the extensions).
 fn bench_random_access(c: &mut Criterion) {
@@ -265,6 +399,7 @@ criterion_group!(
     benches,
     bench_scan,
     bench_columns,
+    bench_mixed_width_columns,
     bench_random_access,
     bench_read_columns_at,
     bench_open,

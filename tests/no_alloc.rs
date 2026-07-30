@@ -255,3 +255,203 @@ fn allocation_scales_with_records_not_events(dir: &std::path::Path) {
         );
     }
 }
+
+/// A bank whose row is **not** a multiple of 4 bytes, like every real CLAS12
+/// `REC::Particle`: `charge/B` and `status/S` sit between the floats, giving
+/// row_size 43.
+///
+/// This matters because HIPO packs rows with no padding, so a bank's column
+/// offsets inherit the row width. A schema built only from 4-byte columns —
+/// which is what the rest of this file and `benches/read.rs` use — keeps every
+/// column 4-aligned by construction, and so can never exercise the unaligned
+/// path in `Bank::col`. Real files do, on most banks.
+fn build_mixed_fixture(path: &std::path::Path, events: i32) {
+    let mut dict = Dict::new();
+    dict.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        31,
+        [
+            ("pid".into(), DataType::Int, 1),       //  4
+            ("px".into(), DataType::Float, 1),      //  4
+            ("py".into(), DataType::Float, 1),      //  4
+            ("pz".into(), DataType::Float, 1),      //  4
+            ("vx".into(), DataType::Float, 1),      //  4
+            ("vy".into(), DataType::Float, 1),      //  4
+            ("vz".into(), DataType::Float, 1),      //  4
+            ("vt".into(), DataType::Float, 1),      //  4
+            ("charge".into(), DataType::Byte, 1),   //  1  <- breaks 4-alignment
+            ("beta".into(), DataType::Float, 1),    //  4
+            ("chi2pid".into(), DataType::Float, 1), //  4
+            ("status".into(), DataType::Short, 1),  //  2
+        ], // = 43
+    ));
+    let mut w = Writer::create(path)
+        .schemas(&dict)
+        .compression(oxihipo::Compression::Lz4)
+        .max_record_events(200)
+        .build()
+        .unwrap();
+    for e in 0..events {
+        w.event(|ev| {
+            ev.bank("REC::Particle", |b| {
+                // A few rows per event, as a real DST has.
+                for r in 0..(1 + (e % 4)) {
+                    b.row(|w| {
+                        w.set("pid", 11i32)?;
+                        w.set("px", 0.5_f32 + r as f32)?;
+                        w.set("py", -0.2_f32)?;
+                        w.set("pz", 2.0_f32)?;
+                        w.set("vx", 0.0_f32)?;
+                        w.set("vy", 0.0_f32)?;
+                        w.set("vz", -3.0_f32)?;
+                        w.set("vt", 0.0_f32)?;
+                        w.set("charge", -1i8)?;
+                        w.set("beta", 0.99_f32)?;
+                        w.set("chi2pid", 1.5_f32)?;
+                        w.set("status", -2000i16)?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+}
+
+/// The allocation-free column accessors must stay allocation-free on a bank
+/// whose rows are not a multiple of the column width.
+///
+/// `Bank::col` / `Bank::read` return a slice, so on a misaligned column they
+/// have no choice but to copy into an owned `Vec` — and a column is misaligned
+/// whenever the row width is not a multiple of `size_of::<T>()`, which is most
+/// real CLAS12 banks (`REC::Particle` is 43 bytes). `Bank::iter` and
+/// `Bank::read_into` exist precisely so that a full-column pass need not pay
+/// that, and this pins both.
+///
+/// The pre-existing alloc contract in this file could not have caught the
+/// regression these guard against: its window only drives `iter.next()`, and
+/// its fixture is `evno/L, beamE/F` — row 12, so every column is 4-aligned by
+/// construction and the fallback is unreachable.
+#[test]
+fn column_iter_and_read_into_are_alloc_free_on_a_mixed_width_bank() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mixed.hipo");
+    build_mixed_fixture(&path, 2000);
+
+    let file = Chain::open(&path).unwrap();
+    let schema = file.schemas().get("REC::Particle").unwrap();
+    let px = schema.handle::<f32>("px").unwrap();
+    let pz = schema.handle::<f32>("pz").unwrap();
+
+    // Warm up so the window measures column access, not buffer growth.
+    let mut warm = 0usize;
+    for ev in file.events().map(Result::unwrap).take(400) {
+        if let Some(b) = ev.bank("REC::Particle") {
+            warm += b.iter(px).count();
+        }
+    }
+    assert!(warm > 0, "fixture produced no rows");
+
+    // ---- `iter`: no allocation at all.
+    let mut sum = 0.0f64;
+    let allocs = count_allocs(|| {
+        for ev in file.events().map(Result::unwrap) {
+            let Some(b) = ev.bank("REC::Particle") else {
+                continue;
+            };
+            sum += b.iter(px).map(f64::from).sum::<f64>();
+            sum += b.iter(pz).map(f64::from).sum::<f64>();
+        }
+    });
+    assert!(sum != 0.0, "columns read as all-zero — fixture is wrong");
+    assert!(
+        allocs <= 32,
+        "Bank::iter allocated {allocs} times over the scan; it must read in          place. See ColumnIter in src/event/bank.rs."
+    );
+
+    // ---- `read_into` with a hoisted buffer: one allocation, not one per event.
+    let mut buf: Vec<f32> = Vec::new();
+    let file2 = Chain::open(&path).unwrap();
+    for ev in file2.events().map(Result::unwrap).take(400) {
+        if let Some(b) = ev.bank("REC::Particle") {
+            b.read_into(px, &mut buf); // warm the buffer to steady size
+        }
+    }
+    let mut rows = 0usize;
+    let allocs = count_allocs(|| {
+        for ev in file2.events().map(Result::unwrap) {
+            let Some(b) = ev.bank("REC::Particle") else {
+                continue;
+            };
+            rows += b.read_into(px, &mut buf);
+        }
+    });
+    assert!(rows > 0);
+    assert!(
+        allocs <= 32,
+        "Bank::read_into allocated {allocs} times with a hoisted buffer; it          must reuse the caller's capacity"
+    );
+}
+
+/// `iter` and `read_into` must agree with `col`, on both alignments.
+///
+/// They take different paths — element-wise, bulk memcpy, and the borrowed
+/// fast path — so a divergence would be silent wrong numbers rather than a
+/// crash. The mixed-width fixture exercises the misaligned path; a 4-aligned
+/// bank would only ever prove the easy one.
+#[test]
+fn the_three_column_accessors_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("agree.hipo");
+    build_mixed_fixture(&path, 200);
+
+    let file = Chain::open(&path).unwrap();
+    let schema = file.schemas().get("REC::Particle").unwrap();
+    let px = schema.handle::<f32>("px").unwrap();
+
+    let mut buf = Vec::new();
+    let mut checked = 0usize;
+    for ev in file.events().map(Result::unwrap) {
+        let Some(b) = ev.bank("REC::Particle") else {
+            continue;
+        };
+        let via_col: Vec<f32> = b.col::<f32>("px").unwrap().to_vec();
+        let via_iter: Vec<f32> = b.iter(px).collect();
+        b.read_into(px, &mut buf);
+
+        assert_eq!(via_col, via_iter, "iter disagrees with col");
+        assert_eq!(via_col, buf, "read_into disagrees with col");
+        assert!(!via_col.is_empty());
+        checked += via_col.len();
+    }
+    assert!(checked > 100, "only checked {checked} cells");
+}
+
+/// `iter` is an `ExactSizeIterator` and a `DoubleEndedIterator`; both must
+/// agree with the row count rather than with the byte length.
+#[test]
+fn column_iter_length_and_reverse() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rev.hipo");
+    build_mixed_fixture(&path, 40);
+
+    let file = Chain::open(&path).unwrap();
+    let schema = file.schemas().get("REC::Particle").unwrap();
+    let px = schema.handle::<f32>("px").unwrap();
+
+    for ev in file.events().map(Result::unwrap) {
+        let Some(b) = ev.bank("REC::Particle") else {
+            continue;
+        };
+        let n = b.rows() as usize;
+        assert_eq!(b.iter(px).len(), n);
+        let fwd: Vec<f32> = b.iter(px).collect();
+        let mut rev: Vec<f32> = b.iter(px).rev().collect();
+        rev.reverse();
+        assert_eq!(fwd, rev, "reverse iteration disagrees");
+    }
+}

@@ -17,7 +17,7 @@ pub(crate) mod event;
 pub(crate) mod owned;
 pub(crate) mod row_typed;
 
-pub use bank::Bank;
+pub use bank::{Bank, ColumnIter};
 pub use build::{BankBuilder, EventBuilder};
 pub use composite::{Composite, CompositeField, CompositeFormat};
 pub use ctx::EventCtx;
