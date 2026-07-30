@@ -177,9 +177,14 @@ macro_rules! or_break {
 ///
 /// The generated fields inherit the struct's visibility. Supply your own
 /// `#[derive(...)]` (typically `Clone, Copy, Debug` — add `Default` if you
-/// construct the struct yourself). Up to **12 columns** per struct (the
-/// Rust tuple-arity limit on the internal handle cache); split a wider
-/// bank into two row structs.
+/// construct the struct yourself).
+///
+/// There is **no column limit**. The internal handle cache is a tuple, which
+/// used to cap this at 12 columns because [`BankRow::Handles`] was bound by
+/// `Debug` and std stops implementing `Debug` for tuples past 12 elements —
+/// enough for `REC::Particle` by exactly one column, and for none of the 16
+/// wider CLAS12 banks. The bound is gone; `REC::Calorimeter`'s 28 columns
+/// map to one struct.
 #[macro_export]
 macro_rules! bank_row {
     (

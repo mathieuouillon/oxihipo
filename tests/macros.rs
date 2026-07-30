@@ -247,3 +247,130 @@ fn or_continue_in_nested_loops_targets_inner() {
     // outer=0: skip None → 0, 100; outer=1: 1, 101; outer=2: 2, 102.
     assert_eq!(visited, vec![0, 100, 1, 101, 2, 102]);
 }
+
+// A real 28-column CLAS12 bank. `Handles` is a tuple of one `ColumnHandle`
+// per field, and std only implements `Debug` for tuples up to 12 elements —
+// so a `Copy + Debug` bound on `BankRow::Handles` caps `bank_row!` at 12
+// columns. `REC::Particle` has exactly 12 and fits by one; 16 of the 30
+// CLAS12 bank definitions do not. `Copy` itself is not the constraint —
+// rustc has a builtin `Copy` impl at every arity.
+oxihipo::bank_row! {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct RecCalorimeter for "REC::Calorimeter" @ (332, 1) {
+        index:    i16 => "index",
+        pindex:   i16 => "pindex",
+        detector: i8  => "detector",
+        sector:   i8  => "sector",
+        layer:    i8  => "layer",
+        energy:   f32 => "energy",
+        time:     f32 => "time",
+        path:     f32 => "path",
+        chi2:     f32 => "chi2",
+        x:        f32 => "x",
+        y:        f32 => "y",
+        z:        f32 => "z",
+        hx:       f32 => "hx",
+        hy:       f32 => "hy",
+        hz:       f32 => "hz",
+        lu:       f32 => "lu",
+        lv:       f32 => "lv",
+        lw:       f32 => "lw",
+        du:       f32 => "du",
+        dv:       f32 => "dv",
+        dw:       f32 => "dw",
+        m2u:      f32 => "m2u",
+        m2v:      f32 => "m2v",
+        m2w:      f32 => "m2w",
+        m3u:      f32 => "m3u",
+        m3v:      f32 => "m3v",
+        m3w:      f32 => "m3w",
+        status:   i16 => "status",
+    }
+}
+
+#[test]
+fn bank_row_handles_more_than_twelve_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cal.hipo");
+
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Calorimeter",
+        332,
+        1,
+        [
+            ("index".into(), DataType::Short, 1),
+            ("pindex".into(), DataType::Short, 1),
+            ("detector".into(), DataType::Byte, 1),
+            ("sector".into(), DataType::Byte, 1),
+            ("layer".into(), DataType::Byte, 1),
+            ("energy".into(), DataType::Float, 1),
+            ("time".into(), DataType::Float, 1),
+            ("path".into(), DataType::Float, 1),
+            ("chi2".into(), DataType::Float, 1),
+            ("x".into(), DataType::Float, 1),
+            ("y".into(), DataType::Float, 1),
+            ("z".into(), DataType::Float, 1),
+            ("hx".into(), DataType::Float, 1),
+            ("hy".into(), DataType::Float, 1),
+            ("hz".into(), DataType::Float, 1),
+            ("lu".into(), DataType::Float, 1),
+            ("lv".into(), DataType::Float, 1),
+            ("lw".into(), DataType::Float, 1),
+            ("du".into(), DataType::Float, 1),
+            ("dv".into(), DataType::Float, 1),
+            ("dw".into(), DataType::Float, 1),
+            ("m2u".into(), DataType::Float, 1),
+            ("m2v".into(), DataType::Float, 1),
+            ("m2w".into(), DataType::Float, 1),
+            ("m3u".into(), DataType::Float, 1),
+            ("m3v".into(), DataType::Float, 1),
+            ("m3w".into(), DataType::Float, 1),
+            ("status".into(), DataType::Short, 1),
+        ],
+    ));
+
+    {
+        let mut w = Writer::create(&path).schemas(&d).build().unwrap();
+        for i in 0..4i32 {
+            w.event(|ev| {
+                ev.bank("REC::Calorimeter", |b| {
+                    b.row(|r| {
+                        r.set("index", i as i16)?;
+                        r.set("pindex", (i * 2) as i16)?;
+                        r.set("detector", 7i8)?;
+                        r.set("sector", (i % 6 + 1) as i8)?;
+                        r.set("layer", 1i8)?;
+                        r.set("energy", 0.5 * i as f32)?;
+                        r.set("m3w", 9.5_f32)?;
+                        r.set("status", -1i16)?;
+                        Ok(())
+                    })?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    let chain = Chain::open(&path).unwrap();
+    let mut seen = 0;
+    for ev in chain.events().map(Result::unwrap) {
+        for row in ev.rows::<RecCalorimeter>() {
+            // Columns past the 12th must decode, not silently default —
+            // that is the whole point of lifting the cap.
+            assert_eq!(row.index, seen as i16);
+            assert_eq!(row.pindex, (seen * 2) as i16);
+            assert_eq!(row.detector, 7);
+            assert_eq!(row.energy, 0.5 * seen as f32);
+            assert_eq!(row.m3w, 9.5);
+            assert_eq!(row.status, -1);
+            // Untouched columns default to zero, as elsewhere.
+            assert_eq!(row.lu, 0.0);
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 4);
+}

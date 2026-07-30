@@ -51,7 +51,16 @@ pub trait BankRow: Sized {
     /// Pre-resolved column handles for `Self`'s fields. Built once per
     /// bank instance by [`Self::resolve_handles`]; reused per row by
     /// [`Self::from_row_with_handles`].
-    type Handles: Copy + std::fmt::Debug;
+    ///
+    /// Deliberately **not** bound by `Debug`. `bank_row!` emits this as a
+    /// tuple of one [`ColumnHandle`](crate::schema::ColumnHandle) per field,
+    /// and std implements `Debug` for tuples only up to 12 elements — so a
+    /// `Debug` bound here is a hard 12-column cap on the macro. That is not
+    /// theoretical: `REC::Particle` has exactly 12 and fits by one, while 16
+    /// of the 30 CLAS12 bank definitions do not (`REC::Calorimeter` 28,
+    /// `REC::CovMat` 23, `REC::VertDoca` 18, `REC::Scintillator` 17). `Copy`
+    /// is safe to keep — rustc has a builtin `Copy` impl at every arity.
+    type Handles: Copy;
 
     /// Resolve every field's column handle against the bank's schema.
     /// Called once per [`EventCtx::rows`](crate::event::EventCtx::rows)
@@ -83,7 +92,6 @@ pub trait BankRow: Sized {
 /// `rows_for_*` accessors; holds the borrowed [`Bank`] and a one-shot
 /// [`BankRow::Handles`], reused across every row of one accessor call so
 /// each row read becomes a pointer-cast through the cached handles.
-#[derive(Debug)]
 pub struct BankView<'a, T: BankRow> {
     bank: Bank<'a>,
     handles: T::Handles,
@@ -93,6 +101,20 @@ pub struct BankView<'a, T: BankRow> {
     pindex_index: std::cell::OnceCell<Option<PindexIndex>>,
     /// Same for the `index` column.
     index_index: std::cell::OnceCell<Option<PindexIndex>>,
+}
+
+/// Hand-written rather than derived: `T::Handles` is no longer `Debug` (see
+/// [`BankRow::Handles`]), and a derive would additionally demand `T: Debug`,
+/// which the row struct need not be. The handles are resolved column indices
+/// — nothing a reader of this output wants — so they are elided.
+impl<T: BankRow> std::fmt::Debug for BankView<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BankView")
+            .field("bank", &self.bank)
+            .field("row_type", &T::NAME)
+            .field("handles", &format_args!("<{} resolved>", T::NAME))
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a, T: BankRow> BankView<'a, T> {
