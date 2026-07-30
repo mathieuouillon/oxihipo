@@ -37,7 +37,13 @@ stored baseline; these do not.
 | `bench_decoders` | raw record decode, no bank materialization |
 | `bench_read_compression` | one dataset re-encoded into every format, then read |
 | `bench_event_tags` | the per-event tag read paths |
-| `bench_par` | single-threaded vs parallel scan |
+| `bench_par` | `for_each` (shared atomic) vs `par_fold` (per-worker accumulator), each sequential and parallel |
+| `gen_synthetic` | writes a file of very cheap events, so `bench_par` measures API overhead rather than decode cost |
+
+`bench_par` interleaves its four variants one rep at a time rather than
+running each to completion in turn — measuring them in blocks lets drift over
+the run land on whichever went last, which is enough on its own to invent a
+5% difference between two variants that are actually equal.
 
 ## Layout diagnostics
 

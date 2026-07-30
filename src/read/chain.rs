@@ -931,7 +931,7 @@ impl Chain {
                     None,
                     &mut record,
                     &mut read_buf,
-                    &f,
+                    &mut &f,
                     &events_in,
                     &events_yielded,
                 )?;
@@ -954,7 +954,7 @@ impl Chain {
                             None,
                             record,
                             read_buf,
-                            &f,
+                            &mut &f,
                             &events_in,
                             &events_yielded,
                         )
@@ -978,6 +978,227 @@ impl Chain {
             files: self.files.len(),
             elapsed: start.elapsed(),
         })
+    }
+
+    /// Fold every event into a **per-worker accumulator**, then combine.
+    ///
+    /// [`for_each`](Self::for_each) hands back only [`ChainStats`], so anything
+    /// you want to *collect* has to travel through a shared `AtomicU64` or
+    /// `Mutex`. `par_fold` gives every worker its own `T` from `id`, folds into
+    /// it with no synchronisation whatsoever, and joins the per-worker values
+    /// with `reduce`.
+    ///
+    /// **How much that buys depends entirely on how expensive your events
+    /// are**, and it is worth knowing which regime you are in. Summing
+    /// `REC::Particle` row counts on 12 threads, via `examples/bench_par.rs`:
+    ///
+    /// | input | `for_each` 1→n | `par_fold` 1→n | `par_fold(n)` vs `for_each(n)` |
+    /// |---|---|---|---|
+    /// | 4M cheap events, `Lz4` | **0.32x** | 7.98x | **24.9x** |
+    /// | 4M cheap events, `Lz4PerColumn` | **0.64x** | 3.78x | **6.1x** |
+    /// | 599k-event CLAS12 DST, `Lz4` | 3.27x | 3.35x | 0.92–1.06x |
+    ///
+    /// When per-event work is small the shared cache line is the *entire* cost
+    /// — note that `for_each` across threads is three times **slower** than on
+    /// one, and `par_fold` is what makes such a workload scale at all. When the
+    /// decode dominates, as on a real DST with 47 banks, `for_each` already
+    /// scales and the two land within run-to-run noise of each other.
+    /// `par_fold` is not slower there; it simply is not where the win is.
+    ///
+    /// `threads` selects the mode exactly as in [`for_each`](Self::for_each):
+    /// `1` is sequential in input order on the calling thread (one accumulator,
+    /// `reduce` is never called), `0` is rayon's process-wide pool, `n > 1` is
+    /// exactly `n` workers.
+    ///
+    /// `reduce` must be **associative**; it is applied to per-worker partials in
+    /// an unspecified order, so a non-associative combiner gives run-dependent
+    /// answers. `id` must return the identity for it — rayon calls `id` once per
+    /// work chunk, not once per thread, so `reduce(id(), x)` has to equal `x`.
+    ///
+    /// If you are on one thread and want to keep a non-`Send` accumulator such
+    /// as a `Cell` or an `Rc`, use [`fold`](Self::fold) instead — it asks for
+    /// neither `Send` nor `Sync`.
+    ///
+    /// ```no_run
+    /// use oxihipo::Chain;
+    ///
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("rec.hipo")?;
+    /// let (rows, stats) = chain.par_fold(
+    ///     0,                                   // threads: all cores
+    ///     || 0u64,                             // per-worker accumulator
+    ///     |acc, ev| {                          // fold — no atomics needed
+    ///         if let Some(b) = ev.bank("REC::Particle") {
+    ///             *acc += b.rows() as u64;
+    ///         }
+    ///     },
+    ///     |a, b| a + b,                        // combine
+    /// )?;
+    /// println!("{rows} rows over {} events", stats.events_yielded);
+    /// # Ok(()) }
+    /// ```
+    pub fn par_fold<T, ID, F, R>(
+        &self,
+        threads: usize,
+        id: ID,
+        fold: F,
+        reduce: R,
+    ) -> Result<(T, ChainStats)>
+    where
+        T: Send,
+        ID: Fn() -> T + Send + Sync,
+        F: for<'a> Fn(&mut T, &EventCtx<'a>) + Send + Sync,
+        R: Fn(T, T) -> T + Send + Sync,
+    {
+        let tasks = self.build_tasks();
+        let filter = self.filter.as_ref();
+        let filter_active = filter.is_some_and(|f| f.is_active());
+        let events_in = AtomicU64::new(0);
+        let events_yielded = AtomicU64::new(0);
+        let start = Instant::now();
+        let files = &self.files;
+
+        let acc = if threads == 1 {
+            // One accumulator, input order, no `reduce` — the same shape as
+            // `for_each`'s sequential branch, scratch buffers reused across
+            // records.
+            let mut record = Record::new();
+            let mut read_buf = Vec::new();
+            let mut acc = id();
+            for &(fi, ri) in &tasks {
+                let mut visit = |ev: &EventCtx<'_>| fold(&mut acc, ev);
+                process_record(
+                    &files[fi],
+                    ri,
+                    filter,
+                    filter_active,
+                    None,
+                    &mut record,
+                    &mut read_buf,
+                    &mut visit,
+                    &events_in,
+                    &events_yielded,
+                )?;
+            }
+            acc
+        } else {
+            // The accumulator rides along with the per-chunk scratch buffers,
+            // so it needs no extra split and touches no shared cache line.
+            let run = || -> Result<T> {
+                tasks
+                    .par_iter()
+                    .try_fold(
+                        || (Record::new(), Vec::new(), id()),
+                        |(mut record, mut read_buf, mut acc), &(fi, ri)| {
+                            // Scoped so `acc` is free to move into the tuple
+                            // once `visit`'s borrow of it ends.
+                            {
+                                let mut visit = |ev: &EventCtx<'_>| fold(&mut acc, ev);
+                                process_record(
+                                    &files[fi],
+                                    ri,
+                                    filter,
+                                    filter_active,
+                                    None,
+                                    &mut record,
+                                    &mut read_buf,
+                                    &mut visit,
+                                    &events_in,
+                                    &events_yielded,
+                                )?;
+                            }
+                            Ok((record, read_buf, acc))
+                        },
+                    )
+                    .map(|r: Result<_>| r.map(|(_, _, acc)| acc))
+                    .try_reduce(&id, |a, b| Ok(reduce(a, b)))
+            };
+            if threads == 0 {
+                run()?
+            } else {
+                build_pool(threads)?.install(run)?
+            }
+        };
+
+        Ok((
+            acc,
+            ChainStats {
+                events_in: events_in.load(Ordering::Relaxed),
+                events_yielded: events_yielded.load(Ordering::Relaxed),
+                records: tasks.len() as u64,
+                files: self.files.len(),
+                elapsed: start.elapsed(),
+            },
+        ))
+    }
+
+    /// Sequential [`par_fold`](Self::par_fold): one accumulator, input order,
+    /// on the calling thread.
+    ///
+    /// The point of having it separately is the bounds it *doesn't* ask for.
+    /// Every parallel entry point requires `Send + Sync` on the closure even
+    /// when `threads == 1`, which the docs describe as running with no rayon
+    /// pool and no thread spawn — so a `Cell<u64>` or `Rc<_>` accumulator fails
+    /// to compile on a path that never crosses a thread. `fold` takes `FnMut`
+    /// with no thread bounds at all, the way
+    /// [`for_each_column`](Self::for_each_column) already does.
+    ///
+    /// ```no_run
+    /// # use oxihipo::Chain;
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let chain = Chain::open("rec.hipo")?;
+    /// // `Vec<f32>` is not `Sync`, and the closure mutates captured state —
+    /// // neither is a problem on this path.
+    /// let mut seen = 0usize;
+    /// let (betas, _stats) = chain.fold(Vec::<f32>::new(), |acc, ev| {
+    ///     seen += 1;
+    ///     if let Some(b) = ev.bank("REC::Particle") {
+    ///         acc.push(b.get::<f32>("beta", 0));
+    ///     }
+    /// })?;
+    /// println!("{} betas over {seen} events", betas.len());
+    /// # Ok(()) }
+    /// ```
+    pub fn fold<T, F>(&self, init: T, mut f: F) -> Result<(T, ChainStats)>
+    where
+        F: for<'a> FnMut(&mut T, &EventCtx<'a>),
+    {
+        let tasks = self.build_tasks();
+        let filter = self.filter.as_ref();
+        let filter_active = filter.is_some_and(|f| f.is_active());
+        let events_in = AtomicU64::new(0);
+        let events_yielded = AtomicU64::new(0);
+        let start = Instant::now();
+
+        let mut acc = init;
+        let mut record = Record::new();
+        let mut read_buf = Vec::new();
+        for &(fi, ri) in &tasks {
+            let mut visit = |ev: &EventCtx<'_>| f(&mut acc, ev);
+            process_record(
+                &self.files[fi],
+                ri,
+                filter,
+                filter_active,
+                None,
+                &mut record,
+                &mut read_buf,
+                &mut visit,
+                &events_in,
+                &events_yielded,
+            )?;
+        }
+
+        Ok((
+            acc,
+            ChainStats {
+                events_in: events_in.load(Ordering::Relaxed),
+                events_yielded: events_yielded.load(Ordering::Relaxed),
+                records: tasks.len() as u64,
+                files: self.files.len(),
+                elapsed: start.elapsed(),
+            },
+        ))
     }
 
     /// [`for_each`](Self::for_each) over one **global event range**.
@@ -1144,7 +1365,7 @@ impl Chain {
                     Some(win(rs, a, b)),
                     &mut record,
                     &mut read_buf,
-                    &f,
+                    &mut &f,
                     &events_in,
                     &events_yielded,
                 )?;
@@ -1162,7 +1383,7 @@ impl Chain {
                             Some(win(rs, a, b)),
                             record,
                             read_buf,
-                            &f,
+                            &mut &f,
                             &events_in,
                             &events_yielded,
                         )
@@ -1272,12 +1493,16 @@ fn process_record<F>(
     window: Option<EventWindow<'_>>,
     record: &mut Record,
     read_buf: &mut Vec<u8>,
-    f: &F,
+    f: &mut F,
     events_in: &AtomicU64,
     events_yielded: &AtomicU64,
 ) -> Result<()>
 where
-    F: for<'a> Fn(&EventCtx<'a>) + Send + Sync,
+    // `FnMut`, not `Fn`: `par_fold` drives this with a closure that borrows a
+    // per-worker accumulator mutably. `Send + Sync` belongs at the rayon call
+    // site, not here — the sequential callers need neither. `for_each` passes
+    // a `&F` (which is `FnMut` whenever `F: Fn`), so it is unaffected.
+    F: for<'a> FnMut(&EventCtx<'a>),
 {
     let span = &inner.index.records()[ri];
     let header = inner.read_record_into(span.file_offset, read_buf)?;
