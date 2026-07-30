@@ -175,6 +175,57 @@ impl Chain {
         Self::from_inners(vec![Arc::new(inner)])
     }
 
+    /// Open a chain over a caller-supplied byte source rather than a path.
+    ///
+    /// [`open`](Self::open) resolves paths through the sealed [`IntoSources`]
+    /// trait, so it cannot be extended from outside the crate — hence a
+    /// separate constructor. Implement [`ReadAt`](crate::ReadAt) and everything above the
+    /// seam works unchanged: header, dictionary, record index, lazy
+    /// per-record streaming, and every parallel path. `read_exact_at` takes
+    /// `&self`, so a rayon scan issues concurrent positioned reads against
+    /// your source for free.
+    ///
+    /// `len` is the source's total size in bytes. It is captured once here
+    /// and every bounds check reads it, which is why [`ReadAt`](crate::ReadAt) has no
+    /// `len()` — the hot path never asks. Passing a `len` larger than the
+    /// source really is turns what would have been a clean bounds rejection
+    /// into a read error from your implementation.
+    ///
+    /// `label` names the source in error messages and in
+    /// [`files`](Self::files). Nothing opens it, so a URL or any other
+    /// identifier is fine.
+    ///
+    /// For several sources, build each [`Chain`] and combine — or call this
+    /// per source and merge with the same rules [`open`](Self::open) applies,
+    /// which require every file in a chain to share a dictionary.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use oxihipo::{Chain, ReadAt, Result};
+    /// # #[derive(Debug)] struct S3Object;
+    /// # impl ReadAt for S3Object {
+    /// #     fn read_exact_at(&self, _b: &mut [u8], _o: u64) -> Result<()> { Ok(()) }
+    /// # }
+    /// # fn main() -> Result<()> {
+    /// let chain = Chain::open_with(Arc::new(S3Object), 8_500_000_000, "s3://runs/5042.hipo")?;
+    /// let (rows, _) = chain.par_fold(
+    ///     0,
+    ///     || 0u64,
+    ///     |acc, ev| *acc += ev.bank("REC::Particle").map_or(0, |b| b.rows() as u64),
+    ///     |a, b| a + b,
+    /// )?;
+    /// println!("{rows} rows");
+    /// # Ok(()) }
+    /// ```
+    pub fn open_with(
+        src: Arc<dyn crate::ReadAt>,
+        len: u64,
+        label: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let inner = FileInner::from_reader(src, len, label.into())?;
+        Self::from_inners(vec![Arc::new(inner)])
+    }
+
     /// Open every resolved path in parallel, then validate dict equality.
     fn from_paths(paths: Vec<PathBuf>) -> Result<Self> {
         // Each `FileInner::open` is a latency-bound round-trip — a file open

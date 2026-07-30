@@ -14,6 +14,7 @@ mod source;
 pub use chain::{Chain, ChainEventIter, ChainStats};
 pub use columns::{ChainRecordSpan, ColumnBuffers, ColumnData, MaterializedColumn};
 pub use filter::Filter;
+pub use inner::ReadAt;
 pub use iter::EventIter;
 pub use occupancy::{BankOccupancy, Occupancy};
 pub use source::IntoSources;

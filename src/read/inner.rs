@@ -65,6 +65,13 @@ impl FileInner {
         Self::from_source(Arc::new(LocalFile::new(file)), len, path)
     }
 
+    /// Open over a caller-supplied [`ReadAt`]. `label` is carried purely for
+    /// diagnostics — it names the source in errors and in `Chain::files`, and
+    /// is never opened.
+    pub fn from_reader(src: Arc<dyn ReadAt>, len: u64, label: PathBuf) -> Result<Self> {
+        Self::from_source(src, len, label.clone()).map_err(|e| e.with_path(label))
+    }
+
     /// Open a file whose 56-byte header cannot be trusted, by finding the
     /// records themselves.
     ///
@@ -272,14 +279,58 @@ fn read_at(file: &SharedFile, offset: u64, buf: &mut [u8]) -> Result<()> {
 ///
 /// - it fills a **caller-owned** `buf` rather than returning one, because
 ///   `tests/no_alloc.rs` pins the steady-state scan loop at zero allocations;
-/// - there is no `len()`. The file length is captured once at open
-///   ([`FileInner::len`]) and every bounds check reads that, so a source is
-///   never asked its size on the hot path.
+/// - there is no `len()`. The length is captured once at open and every bounds
+///   check reads that, so a source is never asked its size on the hot path —
+///   which is why [`Chain::open_with`](crate::Chain::open_with) takes it as an
+///   argument.
 ///
-/// `Send + Sync` because the parallel readers hold `Arc<FileInner>` across rayon
+/// `Send + Sync` because the parallel readers hold the source across rayon
 /// workers, and PyO3's `frozen` pyclass requires `Chain: Sync`. `Debug` because
-/// `FileInner` derives it.
-pub(crate) trait ReadAt: std::fmt::Debug + Send + Sync {
+/// the reader state derives it.
+///
+/// # Implementing one
+///
+/// Everything above the seam — header parsing, the dictionary, the record
+/// index, lazy per-record streaming, every rayon path — works unchanged over
+/// whatever this returns. `read_exact_at` takes `&self`, so N workers already
+/// issue N concurrent positioned reads against one source: an XRootD, S3 or
+/// HTTP-range implementation gets that concurrency without oxihipo owning an
+/// async runtime, a network stack or TLS.
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use oxihipo::{Chain, HipoError, ReadAt, Result};
+///
+/// #[derive(Debug)]
+/// struct InMemory(Vec<u8>);
+///
+/// impl ReadAt for InMemory {
+///     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
+///         let start = offset as usize;
+///         let end = start + buf.len();
+///         if end > self.0.len() {
+///             return Err(HipoError::Io(std::io::Error::new(
+///                 std::io::ErrorKind::UnexpectedEof,
+///                 "read past end of in-memory source",
+///             )));
+///         }
+///         buf.copy_from_slice(&self.0[start..end]);
+///         Ok(())
+///     }
+/// }
+///
+/// # fn main() -> Result<()> {
+/// let bytes = std::fs::read("run.hipo")?;
+/// let len = bytes.len() as u64;
+/// let chain = Chain::open_with(Arc::new(InMemory(bytes)), len, "memory://run")?;
+/// println!("{} events", chain.event_count());
+/// # Ok(()) }
+/// ```
+pub trait ReadAt: std::fmt::Debug + Send + Sync {
+    /// Fill `buf` completely, starting at `offset`.
+    ///
+    /// A short read is an error, not a partial success: every caller above
+    /// this treats the buffer as fully populated on `Ok`.
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()>;
 }
 
