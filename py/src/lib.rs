@@ -283,7 +283,7 @@ impl PyChain {
     ///
     /// Multi-file chains share one dictionary by construction, so the first
     /// file's header is the canonical one.
-    fn file_header(&self) -> Option<(u32, u32, u32, String, bool, bool, u64, u32, u32, u32)> {
+    fn file_header(&self) -> Option<FileHeaderTuple> {
         let h = self.inner.file_header()?;
         Some((
             h.version(),
@@ -890,21 +890,21 @@ impl PyWriter {
             });
         }
         let n_events = n_events.unwrap_or(0);
-        if let Some(t) = &tags {
-            if t.len() != n_events {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "tags must have one entry per event ({} tags for {n_events} events)",
-                    t.len()
-                )));
-            }
+        if let Some(t) = &tags
+            && t.len() != n_events
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "tags must have one entry per event ({} tags for {n_events} events)",
+                t.len()
+            )));
         }
-        if let Some(total) = self.source_total {
-            if self.events_written + n_events as u64 > total {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "extending {} events past the source file's {total} events",
-                    self.events_written + n_events as u64
-                )));
-            }
+        if let Some(total) = self.source_total
+            && self.events_written + n_events as u64 > total
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "extending {} events past the source file's {total} events",
+                self.events_written + n_events as u64
+            )));
         }
 
         self.ensure_writer()?;
@@ -959,16 +959,15 @@ impl PyWriter {
     /// Finish the file (writes the trailer index). Returns
     /// `{"events", "records", "bytes"}`. Idempotent.
     fn close<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        if !self.finished {
-            if let Some(total) = self.source_total {
-                if self.events_written != total {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "decorate covered {} of the source's {total} events; \
-                         provide data for all events",
-                        self.events_written
-                    )));
-                }
-            }
+        if !self.finished
+            && let Some(total) = self.source_total
+            && self.events_written != total
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "decorate covered {} of the source's {total} events; \
+                 provide data for all events",
+                self.events_written
+            )));
         }
         self.ensure_writer()?;
         let summary = if let Some(writer) = self.writer.take() {
@@ -1006,6 +1005,11 @@ impl PyWriter {
         Ok(())
     }
 }
+
+/// What `PyChain::file_header` returns: version, file number, entries, the
+/// magic's byte order as a string, the two trailer flags, the trailer
+/// position, the user-header length, and the two index counts.
+type FileHeaderTuple = (u32, u32, u32, String, bool, bool, u64, u32, u32, u32);
 
 /// `(offsets, [(dtype_name, values)])` — the return of `composite_columns`.
 type CompositeColumns<'py> = (Bound<'py, PyArray1<i64>>, Vec<(String, Bound<'py, PyAny>)>);
