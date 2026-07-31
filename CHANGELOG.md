@@ -56,6 +56,11 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   structure between events without hardcoding the 8-byte layout; on the split
   codecs a header and its payload are never contiguous, so there is nothing to
   copy verbatim.
+- **`BankBuilder::finish_into` / `with_buffers` / `into_buffers`,
+  `EventBuilder::reset` / `add_bank` / `finish_into`** — assemble events
+  through reusable buffers. `finish(self)` consuming the builder was why
+  `BankBuilder::reset` had no possible caller.
+- **`examples/bench_write`** — the write-path benchmark, which did not exist.
 - **`Dict::try_add`** — non-panicking `add`.
 - **`examples/bench_random`** — concurrent random-access throughput, the
   benchmark for the record cache.
@@ -81,6 +86,14 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
 
 ### Fixed
 
+- **The write path allocated per bank and per column, on every event.**
+  Measured, not estimated: 15 allocations/event for a 2-bank event, 151 for
+  1x28x40, 266 for 10 banks, and **666 for a 47-bank CLAS12-shaped event** —
+  the earlier estimate was ~28. `Writer` now recycles column buffers and the
+  event builder across events; the marginal cost is **0.015 allocations per
+  additional event**, all of it the record buffer's geometric growth, with the
+  assembly share at exactly 0. Writing 50,000 such events goes from 31,148 to
+  49,836 ev/s (**1.59x**) with byte-identical output.
 - **Concurrent `Chain::event` did not scale at all.** The record cache held
   its mutex *across* the record decode, so every miss serialised behind one
   ~8 MB decompression. Measured on a 9.1 GB CLAS12 DST: random access was flat

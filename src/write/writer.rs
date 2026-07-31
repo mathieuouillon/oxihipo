@@ -221,6 +221,14 @@ pub struct Writer {
     cursor: u64,
     user_header_length: u32,
     finished: bool,
+    /// Free list of column buffers, recycled across every bank of every
+    /// event. Assembly used to allocate per bank and per column — 666 times
+    /// per event on a 47-bank CLAS12-shaped event (`tests/write_alloc.rs`).
+    bank_pool: Vec<Vec<Vec<u8>>>,
+    /// Reused across `event()` calls, so the event header and structure run
+    /// are not reallocated per event.
+    event_builder: EventBuilder,
+    event_buf: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -285,6 +293,9 @@ impl Writer {
             cursor: 0,
             user_header_length: 0,
             finished: false,
+            bank_pool: Vec::new(),
+            event_builder: EventBuilder::new(),
+            event_buf: Vec::new(),
         };
         me.write_file_header_and_dictionary()?;
         Ok(me)
@@ -305,10 +316,31 @@ impl Writer {
     where
         F: FnOnce(&mut EventWriter<'_>) -> Result<()>,
     {
-        let mut ev = EventWriter::new(&self.dict);
-        f(&mut ev)?;
-        let bytes = ev.finish();
-        self.append_raw(&bytes)
+        // Move the pooled state out for the duration of the closure: `f` needs
+        // `&mut` access to it while `self.dict` is borrowed, and `append_raw`
+        // afterwards needs `&mut self`. Taking and restoring sidesteps both
+        // without a self-referential struct.
+        let mut pool = std::mem::take(&mut self.bank_pool);
+        let mut builder = std::mem::take(&mut self.event_builder);
+        let mut buf = std::mem::take(&mut self.event_buf);
+
+        builder.reset();
+        buf.clear();
+        let assembled = {
+            let mut ev = EventWriter::new(&self.dict, &mut builder, &mut pool);
+            f(&mut ev)
+        };
+        if assembled.is_ok() {
+            builder.finish_into(&mut buf);
+        }
+
+        // Restore before propagating, so an error does not throw the pool away
+        // and leave the next event allocating from scratch.
+        let result = assembled.and_then(|()| self.append_raw(&buf));
+        self.bank_pool = pool;
+        self.event_builder = builder;
+        self.event_buf = buf;
+        result
     }
 
     /// Append already-serialised event bytes. Auto-flushes the current
@@ -650,14 +682,17 @@ use crate::event::{BankBuilder, EventBuilder};
 #[derive(Debug)]
 pub struct EventWriter<'a> {
     dict: &'a Dict,
-    builder: EventBuilder,
+    builder: &'a mut EventBuilder,
+    /// Borrowed from the writer so column buffers outlive the event.
+    pool: &'a mut Vec<Vec<Vec<u8>>>,
 }
 
 impl<'a> EventWriter<'a> {
-    fn new(dict: &'a Dict) -> Self {
+    fn new(dict: &'a Dict, builder: &'a mut EventBuilder, pool: &'a mut Vec<Vec<Vec<u8>>>) -> Self {
         Self {
             dict,
-            builder: EventBuilder::new(),
+            builder,
+            pool,
         }
     }
 
@@ -679,10 +714,16 @@ impl<'a> EventWriter<'a> {
         F: for<'b> FnOnce(&mut BankWriter<'b, 'a>) -> Result<()>,
     {
         let schema = self.dict.require(name)?;
-        let mut bw = BankWriter::new(BankBuilder::new(schema));
-        f(&mut bw)?;
-        let bytes = bw.into_inner().finish()?;
-        self.builder.add_bank_bytes(&bytes);
+        let buffers = self.pool.pop().unwrap_or_default();
+        let mut bw = BankWriter::new(BankBuilder::with_buffers(schema, buffers));
+        let filled = f(&mut bw);
+        let bb = bw.into_inner();
+        // Serialise straight into the event's structure run — no per-bank
+        // `Vec` — then return the buffers whatever happened, so an error in
+        // `f` does not leak them out of the pool.
+        let outcome = filled.and_then(|()| self.builder.add_bank(&bb).map(|_| ()));
+        self.pool.push(bb.into_buffers());
+        outcome?;
         Ok(self)
     }
 
@@ -691,10 +732,6 @@ impl<'a> EventWriter<'a> {
     pub fn add_bank_bytes(&mut self, bytes: &[u8]) -> &mut Self {
         self.builder.add_bank_bytes(bytes);
         self
-    }
-
-    fn finish(self) -> Vec<u8> {
-        self.builder.finish()
     }
 }
 

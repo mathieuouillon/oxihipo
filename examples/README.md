@@ -37,6 +37,7 @@ stored baseline; these do not.
 | `bench_decoders` | raw record decode, no bank materialization |
 | `bench_read_compression` | one dataset re-encoded into every format, then read |
 | `bench_event_tags` | the per-event tag read paths |
+| `bench_write` | write path: event assembly + record framing, for A/B-ing writer changes |
 | `bench_par` | `for_each` (shared atomic) vs `par_fold` (per-worker accumulator), each sequential and parallel |
 | `bench_random` | concurrent random-access `Chain::event` throughput across thread counts — the record-cache benchmark |
 | `project` | bank projection — writes a file keeping only the banks matching a pattern |
