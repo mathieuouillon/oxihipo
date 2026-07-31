@@ -7,6 +7,10 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.9.0] - 2026-07-31
+
 ### Added
 
 - **`Compression` is a (codec, layout) pair**, not a flat list of six named
@@ -60,7 +64,6 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   worse on a 9-column read (the end-of-assembly realloc). Sizing up front
   removes both the doubling and the realloc — measured against the pre-session
   baseline, best-of **1.283 -> 1.229 s** and median **1.606 -> 1.551 s**.
-
 
 ## [0.8.0] - 2026-07-31
 
@@ -1233,7 +1236,8 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.6.0...v0.7.0
