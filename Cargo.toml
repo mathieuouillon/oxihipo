@@ -40,6 +40,7 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 # with `--no-default-features` if you want a pure-Rust build.
 lz4-sys = { version = "1.10", optional = true }
 zstd = "0.13.3"
+xxhash-rust = { version = "0.8.18", features = ["xxh3"] }
 
 [features]
 default = ["lz4-c"]

@@ -690,3 +690,79 @@ mod tests {
         }
     }
 }
+
+// ---- byte-stream-split ----------------------------------------------------
+
+/// Deinterleave a `width`-byte-wide column into `width` planes of one byte.
+///
+/// A 32-bit field carrying an 11-bit value has two near-constant high bytes;
+/// interleaved they are spread through the stream, and grouped they collapse.
+/// This is why the transform helps *integers* most on real CLAS12 data — it is
+/// acting as a poor man's bit-packing — even though it is usually described as
+/// a float trick.
+///
+/// A trailing partial element (only possible on a corrupt or truncated
+/// stream) is copied through verbatim so the transform is total.
+pub fn byte_split(src: &[u8], width: usize, dst: &mut Vec<u8>) {
+    dst.clear();
+    dst.reserve(src.len());
+    if width <= 1 {
+        dst.extend_from_slice(src);
+        return;
+    }
+    let n = src.len() / width;
+    for k in 0..width {
+        for i in 0..n {
+            dst.push(src[i * width + k]);
+        }
+    }
+    dst.extend_from_slice(&src[n * width..]);
+}
+
+/// Inverse of [`byte_split`].
+pub fn byte_unsplit(src: &[u8], width: usize, dst: &mut [u8]) {
+    if width <= 1 || src.len() != dst.len() {
+        dst.copy_from_slice(&src[..dst.len().min(src.len())]);
+        return;
+    }
+    let n = src.len() / width;
+    for k in 0..width {
+        for i in 0..n {
+            dst[i * width + k] = src[k * n + i];
+        }
+    }
+    let tail = n * width;
+    dst[tail..].copy_from_slice(&src[tail..]);
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn byte_split_round_trips_every_width() {
+        for width in [1usize, 2, 4, 8] {
+            for len in [0usize, 1, width, width * 7, width * 7 + 3] {
+                let src: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+                let mut split = Vec::new();
+                byte_split(&src, width, &mut split);
+                assert_eq!(split.len(), src.len(), "width {width} len {len}");
+                let mut back = vec![0u8; src.len()];
+                byte_unsplit(&split, width, &mut back);
+                assert_eq!(back, src, "width {width} len {len}");
+            }
+        }
+    }
+
+    #[test]
+    fn byte_split_actually_groups_the_high_bytes() {
+        // Four 32-bit values whose top two bytes are zero — the shape that
+        // makes this transform pay on CLAS12 integer columns.
+        let src: Vec<u8> = vec![1, 2, 0, 0, 3, 4, 0, 0, 5, 6, 0, 0, 7, 8, 0, 0];
+        let mut out = Vec::new();
+        byte_split(&src, 4, &mut out);
+        // Planes: [1,3,5,7] [2,4,6,8] [0,0,0,0] [0,0,0,0]
+        assert_eq!(&out[..4], &[1, 3, 5, 7]);
+        assert_eq!(&out[8..], &[0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+}

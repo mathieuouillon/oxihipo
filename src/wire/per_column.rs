@@ -15,7 +15,10 @@ use std::sync::{Arc, OnceLock};
 use crate::compress::{decompress, decompress_into_slice};
 use crate::error::{HipoError, Result};
 use crate::wire::bytes::{Endianness, read_u32_le};
-use crate::wire::constants::{CompressionType, EXT_FORMAT_ACCEPT_PER_COLUMN};
+use crate::wire::constants::{
+    CompressionType, EXT_FORMAT_ACCEPT_PER_COLUMN, EXT_FORMAT_VERSION_PER_COLUMN_ENCODED,
+    StreamEncoding,
+};
 use crate::wire::record_header::RecordHeader;
 
 /// Owns a [`PerColumnRecord`]'s compressed payload section (one `pread`'d
@@ -94,6 +97,11 @@ pub struct PerColumnRecord {
     backing: Backing,
     /// Per stream, its compressed byte range within `backing.section()`.
     compressed_streams: Vec<std::ops::Range<usize>>,
+    /// Version-3 only: per-stream encoding id and checksum of the compressed
+    /// bytes. Empty on versions 1 and 2, where every stream is `Raw` and
+    /// unchecksummed.
+    stream_encodings: Vec<u8>,
+    stream_checksums: Vec<u32>,
     /// Per stream, its expected decompressed size.
     decompressed_sizes: Vec<u32>,
     /// Lazily-built per-bank column geometry, cached so whole-event
@@ -297,14 +305,22 @@ impl PerColumnRecord {
             buf.truncate(dir_decomp_len);
             buf
         };
-        Self::from_directory(header, backing, num_banks, event_count, &dir, streams_off)
+        Self::from_directory(
+            header,
+            backing,
+            ext_version,
+            num_banks,
+            event_count,
+            &dir,
+            streams_off,
+        )
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn from_directory(
         header: RecordHeader,
         backing: Backing,
+        ext_version: u8,
         num_banks: usize,
         event_count: u32,
         dir: &[u8],
@@ -405,6 +421,30 @@ impl PerColumnRecord {
             }
         }
 
+        // Version-3 tail: one encoding byte then one u32 checksum per stream.
+        // Only read when the version byte says so — a version-1 file whose
+        // directory happens to be long enough must not be misread as having
+        // one, which is why this is version-gated where `header_sizes` above
+        // is length-detected. The two tails differ in kind: that one is
+        // backward compatible, this one changes what the stream bytes mean.
+        let mut stream_encodings: Vec<u8> = Vec::new();
+        let mut stream_checksums: Vec<u32> = Vec::new();
+        if ext_version == EXT_FORMAT_VERSION_PER_COLUMN_ENCODED {
+            let enc_off = header_sizes_off + num_banks;
+            let need = enc_off + total_streams * 5;
+            if dir.len() < need {
+                return Err(HipoError::CorruptRecord {
+                    offset: 0,
+                    reason: "Lz4PerColumn: version-3 directory is missing its encoding tail",
+                });
+            }
+            stream_encodings = dir[enc_off..enc_off + total_streams].to_vec();
+            let ck_off = enc_off + total_streams;
+            stream_checksums = (0..total_streams)
+                .map(|i| read_u32_le(dir, ck_off + i * 4))
+                .collect();
+        }
+
         // event tags
         let mut event_tags: Vec<u32> = Vec::with_capacity(ec);
         for e in 0..ec {
@@ -485,6 +525,8 @@ impl PerColumnRecord {
             stream_data,
             backing,
             compressed_streams,
+            stream_encodings,
+            stream_checksums,
             decompressed_sizes,
             col_layout: OnceLock::new(),
         }))
@@ -595,11 +637,45 @@ impl PerColumnRecord {
             // was dead on arrival, and `into_boxed_slice()` then reallocated
             // and memcpy'd `expected` bytes to shrink it back. Decompressing
             // straight into an exactly-sized box does neither.
+            // Checksum first: this is the point of storing one. A corrupt
+            // stream otherwise reaches the decoder, which reports a
+            // decompression failure and gives no hint that the bytes were
+            // damaged in storage rather than written wrong.
+            if let Some(&want) = self.stream_checksums.get(s)
+                && want != 0
+                && xxhash_rust::xxh3::xxh3_64(src) as u32 != want
+            {
+                return Err(HipoError::CorruptRecord {
+                    offset: 0,
+                    reason: "Lz4PerColumn: stream checksum mismatch — the compressed \
+                             bytes changed after they were written",
+                });
+            }
             let mut out: Box<[u8]> = vec![0u8; expected].into_boxed_slice();
             // The record's own tag, so a Zstd/Gzip/None split record inflates
             // with the codec it was written with. The *directory* above stays
             // LZ4 for every split tag — see the writer.
             decompress_into_slice(self.header.compression, src, &mut out)?;
+            // Undo the per-stream encoding. Absent on versions 1 and 2, where
+            // every stream is stored raw.
+            if let Some(&packed) = self.stream_encodings.get(s) {
+                // High nibble: element width. Low nibble: encoding id.
+                let width = usize::from(packed >> 4).max(1);
+                match StreamEncoding::from_u8(packed & 0x0F) {
+                    Some(StreamEncoding::ByteSplit) => {
+                        let mut back = vec![0u8; out.len()].into_boxed_slice();
+                        crate::compress::byte_unsplit(&out, width, &mut back);
+                        out = back;
+                    }
+                    Some(StreamEncoding::Raw) => {}
+                    None => {
+                        return Err(HipoError::CorruptRecord {
+                            offset: 0,
+                            reason: "Lz4PerColumn: unknown per-stream encoding id",
+                        });
+                    }
+                }
+            }
             let _ = self.stream_data[s].set(out);
         }
         Ok(self.stream_data[s]

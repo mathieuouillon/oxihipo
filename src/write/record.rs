@@ -12,6 +12,7 @@ use crate::error::{HipoError, Result};
 use crate::event::Event;
 use crate::schema::Dict;
 use crate::wire::bytes::{Endianness, write_u32_le};
+use crate::wire::constants::StreamEncoding;
 use crate::wire::constants::*;
 use crate::wire::record_header::RecordHeader;
 
@@ -40,6 +41,9 @@ pub struct Compression {
     /// Zstd effort, 1-6. Meaningless for the other codecs, and not on the
     /// wire: any level decodes through the same path.
     zstd_level: u8,
+    /// Write per-stream encodings and checksums (`ext_format_version` 3).
+    /// Off by default — see [`Self::with_encodings`].
+    encodings: bool,
 }
 
 // The six names below were enum variants before this became a (codec, layout)
@@ -68,6 +72,7 @@ impl Compression {
             codec,
             layout,
             zstd_level: crate::compress::ZSTD_DEFAULT_LEVEL as u8,
+            encodings: false,
         }
     }
 
@@ -103,6 +108,35 @@ impl Compression {
 
     pub const fn zstd_level(self) -> u8 {
         self.zstd_level
+    }
+
+    /// Per-stream encodings and checksums, on `Layout::PerColumn`.
+    ///
+    /// Each column stream gets an encoding chosen by trying the candidates and
+    /// keeping the smallest — today raw or byte-stream-split — plus an xxh3
+    /// checksum of its compressed bytes. Measured worth **8.6-12.9%** on real
+    /// CLAS12 files (most on raw, where byte-split acts as poor-man's
+    /// bit-packing on over-wide integer fields), for ~1-2% of decode time on
+    /// the checksum.
+    ///
+    /// **This raises `ext_format_version` to 3, and that is deliberate.** A
+    /// byte-split stream inflated by a reader that does not un-split it is
+    /// garbage, so a reader that does not understand version 3 must refuse the
+    /// file — and refusing on an unknown version is exactly right. Old
+    /// oxihipo, `hipo-cpp` and `hipo-java` all reject it cleanly rather than
+    /// misreading.
+    ///
+    /// Off by default for that reason: files stay readable by everything
+    /// unless you ask for this.
+    ///
+    /// No effect on the other layouts.
+    pub const fn with_encodings(mut self) -> Self {
+        self.encodings = true;
+        self
+    }
+
+    pub const fn encodings(self) -> bool {
+        self.encodings
     }
 
     /// Wire-level compression tag written into the record header.
@@ -800,6 +834,9 @@ fn build_per_column_record_bytes(
     // ---- 3. Split each bank into per-column streams (or keep opaque). ---
     let mut num_cols: Vec<u16> = Vec::with_capacity(num_banks); // 0 = opaque
     let mut streams: Vec<Vec<u8>> = Vec::new(); // flat, bank-major
+    // Scalar width of each stream's element, for byte-stream-split's stride.
+    // 1 for opaque banks and array columns — splitting those is meaningless.
+    let mut stream_widths: Vec<u8> = Vec::new();
 
     for b in 0..num_banks {
         let (group, item, _t) = descriptors[b];
@@ -817,6 +854,7 @@ fn build_per_column_record_bytes(
         let bb = std::mem::take(&mut bank_bytes[b]);
         if !columnar {
             num_cols.push(0);
+            stream_widths.push(1);
             streams.push(bb);
             continue;
         }
@@ -841,20 +879,31 @@ fn build_per_column_record_bytes(
                 cs.extend_from_slice(&block[col_start..col_start + rows_e * col_width]);
             }
         }
+        for c in 0..col_streams.len() {
+            let e = &s.entries()[c];
+            stream_widths.push(if e.length == 1 { e.ty.size() as u8 } else { 1 });
+        }
         streams.extend(col_streams);
     }
     let num_streams = streams.len();
+    debug_assert_eq!(stream_widths.len(), num_streams);
 
     // ---- 4. Compress each stream (LZ4-HC). ------------------------------
     let mut compressed_streams: Vec<Vec<u8>> = Vec::with_capacity(num_streams);
     let mut compressed_sizes: Vec<u32> = Vec::with_capacity(num_streams);
     let mut decompressed_sizes: Vec<u32> = Vec::with_capacity(num_streams);
-    for stream in &streams {
+    let mut stream_encodings: Vec<u8> = Vec::with_capacity(num_streams);
+    let mut stream_checksums: Vec<u32> = Vec::with_capacity(num_streams);
+    let mut split_buf: Vec<u8> = Vec::new();
+    let mut alt_buf: Vec<u8> = Vec::new();
+    for (si, stream) in streams.iter().enumerate() {
         let decompressed = stream.len() as u32;
         decompressed_sizes.push(decompressed);
         if decompressed == 0 {
             compressed_sizes.push(0);
             compressed_streams.push(Vec::new());
+            stream_encodings.push(StreamEncoding::Raw as u8);
+            stream_checksums.push(0);
             continue;
         }
         compress_buf.clear();
@@ -869,7 +918,38 @@ fn build_per_column_record_bytes(
             stream,
             compress_buf,
         )?;
+        // Try byte-stream-split and keep whichever is smaller — the PNG
+        // per-scanline-filter trick. Measured, this picks split on most
+        // over-wide integer columns and leaves already-dense ones alone; a
+        // fixed global choice loses on one or the other.
+        let mut enc = StreamEncoding::Raw;
+        let mut n = n;
+        let width = stream_widths[si] as usize;
+        if compression.encodings() && width > 1 {
+            crate::compress::byte_split(stream, width, &mut split_buf);
+            alt_buf.clear();
+            let m = compress_at(
+                compression.wire_tag(),
+                i32::from(compression.zstd_level()),
+                &split_buf,
+                &mut alt_buf,
+            )?;
+            if m < n {
+                enc = StreamEncoding::ByteSplit;
+                n = m;
+                compress_buf.clear();
+                compress_buf.extend_from_slice(&alt_buf[..m]);
+            }
+        }
         compressed_sizes.push(n as u32);
+        // Self-describing: high nibble is the element width, low nibble the
+        // encoding. The stream then carries everything needed to decode it
+        // without consulting the schema — which is what lets a reader handle a
+        // column whose bank it has no dictionary entry for.
+        stream_encodings.push(((width as u8) << 4) | enc as u8);
+        // Checksum the bytes as they hit the disk, so this catches storage
+        // corruption before the decoder is handed something it cannot parse.
+        stream_checksums.push(xxhash_rust::xxh3::xxh3_64(&compress_buf[..n]) as u32);
         compressed_streams.push(compress_buf[..n].to_vec());
     }
 
@@ -919,6 +999,20 @@ fn build_per_column_record_bytes(
     // lets a v1 reader be a v2 reader with the tail defaulted to zero.
     dir.extend_from_slice(&header_sizes);
     debug_assert_eq!(dir.len(), dir_len);
+    // ---- version-3 tail: one encoding byte + one u32 checksum per stream.
+    //
+    // Appended after every other table, so the offsets above are unchanged and
+    // the tail is length-detected exactly like `header_sizes`. Unlike that one
+    // it is *not* backward compatible — a reader that ignores it inflates a
+    // byte-split stream without un-splitting it and gets garbage — so the
+    // version byte moves to 3 and old readers refuse the file. That is the
+    // version field working, not the 0.7.0 mistake repeated.
+    if compression.encodings() {
+        dir.extend_from_slice(&stream_encodings);
+        for c in &stream_checksums {
+            dir.extend_from_slice(&c.to_le_bytes());
+        }
+    }
 
     // ---- 7. LZ4-compress the directory. --------------------------------
     let mut dir_compressed = Vec::new();
@@ -935,12 +1029,19 @@ fn build_per_column_record_bytes(
 
     payload_buf.clear();
     payload_buf.reserve(section_len);
-    payload_buf.push(EXT_FORMAT_VERSION_PER_COLUMN);
+    payload_buf.push(if compression.encodings() {
+        EXT_FORMAT_VERSION_PER_COLUMN_ENCODED
+    } else {
+        EXT_FORMAT_VERSION_PER_COLUMN
+    });
     payload_buf.extend_from_slice(&[0u8, 0, 0]); // reserved
     payload_buf.extend_from_slice(&(num_banks as u32).to_le_bytes());
     payload_buf.extend_from_slice(&event_count.to_le_bytes());
     payload_buf.extend_from_slice(&(dir_comp_len as u32).to_le_bytes());
-    payload_buf.extend_from_slice(&(dir_len as u32).to_le_bytes());
+    // `dir.len()`, not `dir_len`: the version-3 tail is appended after the
+    // length was computed, and advertising the pre-tail length truncates the
+    // directory so the reader never sees the encodings it needs.
+    payload_buf.extend_from_slice(&(dir.len() as u32).to_le_bytes());
     payload_buf.extend_from_slice(&dir_compressed[..dir_comp_len]);
     for stream in &compressed_streams {
         payload_buf.extend_from_slice(stream);

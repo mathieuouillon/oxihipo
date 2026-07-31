@@ -7,7 +7,32 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`Compression::with_encodings()`** — per-stream encodings and checksums on
+  `Layout::PerColumn`, written as `ext_format_version` **3**. Each column
+  stream is compressed both raw and byte-stream-split and the smaller kept, so
+  the choice adapts per column rather than being fixed globally. Measured on a
+  real RG-A decoded file: **46,741,412 -> 41,233,756 bytes, 11.8% smaller**,
+  for ~3.7x the write cost (each stream is compressed twice to choose).
+
+  **Off by default, and the version bump is deliberate.** A byte-split stream
+  inflated by a reader that does not un-split it is garbage, so a reader that
+  does not understand version 3 must refuse the file — old oxihipo,
+  `hipo-cpp` and `hipo-java` all reject it cleanly. That is the version field
+  doing its job, as distinct from 0.7.0's bump, which announced a
+  *backward-compatible* tail and broke those readers for no reason. Versions 1
+  and 2 are written and read exactly as before.
+
+  Each stream's encoding byte packs its element width in the high nibble, so a
+  stream carries everything needed to decode itself without consulting the
+  schema.
+
+  Caveat: the per-stream checksums are written and read back, but the
+  *detection* path is not yet demonstrated by a test — every corruption sweep
+  landed in the compressed directory, which fails the record parse before a
+  stream is inflated. Do not rely on them as a guarantee yet.
+
 
 ## [0.9.0] - 2026-07-31
 
