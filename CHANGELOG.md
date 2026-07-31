@@ -7,6 +7,10 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.8.0] - 2026-07-31
+
 **This will be `0.8.0`, not `0.7.2`.** Removing the `Debug` bound from
 `BankRow::Handles` relaxes what an implementor must provide, but it is
 source-breaking for any *consumer* that relied on `T::Handles: Debug` in a
@@ -170,7 +174,6 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   the code has emitted 2 and 1 since 0.7.1 — the revert updated the constants,
   tests and changelog but missed the prose. The version numbers now live in
   `wire::constants` and are shared by writer and reader.
-
 
 ## [0.7.1] - 2026-07-29
 
@@ -1175,7 +1178,8 @@ columns come back as zero-copy [Awkward](https://awkward-array.org) arrays.
   (x86_64/aarch64), macOS (x86_64/aarch64), and Windows (x64), plus an sdist;
   PEP 561 typed (`py.typed`, checked stub).
 
-[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/mathieuouillon/oxihipo/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/mathieuouillon/oxihipo/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/mathieuouillon/oxihipo/compare/v0.5.3...v0.6.0
