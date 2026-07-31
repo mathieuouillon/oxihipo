@@ -23,7 +23,8 @@ joins). The Rust crate itself stays physics-free.
 - **Zero-copy columnar reads.** `bank.col::<T>("name")` returns a
   `Cow<[T]>` that borrows straight from the decompressed record buffer when
   the bytes are aligned (always for 4-byte types), with a one-shot copy
-  fallback otherwise. Fixed-length array columns (`name/T#N`) read as `[T; N]`.
+  fallback otherwise. Fixed-length array columns (`name/T#N`) read as `[T; N]` (readable by
+  Java, **not** by C++ `hipo4` — see Writing · Array columns).
 - **Bounded memory, any file size.** Records stream in one at a time via
   `pread` into a recycled buffer — the file is never mapped or read whole.
   A sequential scan of a 100 GB file holds ~one record resident (tens of MB),

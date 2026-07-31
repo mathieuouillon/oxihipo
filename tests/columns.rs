@@ -449,3 +449,34 @@ fn record_decompressed_sizes_are_per_record_and_positive() {
         "every record has payload bytes"
     );
 }
+
+/// `ColumnBuffers::event_count` must saturate on empty `offsets`.
+///
+/// Nothing in oxihipo produces such a value — `read_columns` maintains
+/// `offsets.len() == events + 1` — but every field is `pub` and the struct is
+/// not `#[non_exhaustive]`, so an external crate can build one. The bare
+/// `len() - 1` panicked in debug and wrapped to `usize::MAX` in release, and a
+/// caller looping `0..event_count()` on the wrapped value spins instead of
+/// aborting. The release wrap is the worse half, which is why this saturates
+/// rather than asserting.
+#[test]
+fn empty_column_buffers_report_zero_events() {
+    use oxihipo::ColumnBuffers;
+
+    let empty = ColumnBuffers {
+        bank: String::new(),
+        offsets: Vec::new(),
+        columns: Vec::new(),
+    };
+    assert_eq!(empty.event_count(), 0);
+    assert_eq!(empty.total_rows(), 0);
+
+    // The normal invariant is unaffected.
+    let one = ColumnBuffers {
+        bank: "A::b".into(),
+        offsets: vec![0, 3, 7],
+        columns: Vec::new(),
+    };
+    assert_eq!(one.event_count(), 2);
+    assert_eq!(one.total_rows(), 7);
+}

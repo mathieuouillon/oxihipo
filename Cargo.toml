@@ -54,8 +54,12 @@ lz4-c = ["dep:lz4-sys"]
 # `fuzz_api`). Not for library users; exempt from semver.
 fuzz-api = []
 # Route LZ4 *decompression* through Apple's system `libcompression` framework
-# (`COMPRESSION_LZ4_RAW`). On Apple Silicon this is ~7% faster than the
-# reference C `liblz4`. Decompression-only; compression still uses
+# (`COMPRESSION_LZ4_RAW`). Measured on an M4 Pro over 188 real CLAS12 DST
+# records (799 MB compressed, `examples/bench_decoders.rs`, 40 iterations):
+# 6.0-7.7% faster than the reference C `liblz4` (12.23 s / 12.20 s -> 11.49 s /
+# 11.25 s), and 4.5% off a full single-threaded scan of a 9.1 GB DST
+# (median 4.24 s -> 4.05 s, 10 interleaved reps each).
+# Decompression-only; compression still uses
 # `lz4-c` or `lz4_flex`. Active only on macOS (the cfg-gate is in
 # `compress.rs`); enabling it on other platforms is a no-op.
 lz4-apple = []

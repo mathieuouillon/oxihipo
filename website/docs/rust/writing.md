@@ -216,6 +216,27 @@ aren't a column type — model those as separate bank rows cross-referenced by a
 index column (the CLAS12 `pindex` pattern).
 :::
 
+:::warning C++ `hipo4` cannot read `T#N` columns
+A plain-`Lz4` compatibility gap, separate from the split codecs, and not an
+oxihipo bug — Java parses `T#N` correctly and documents it as oxihipo's
+serialization, so C++ is the outlier.
+
+C++'s `schema::parse` splits the schema text on `,` and `/` only, so for
+`cov/F#6` the type token is the literal `"F#6"`; `getTypeByString` returns -1
+and `getTypeSize(-1)` returns 0. Measured on hipo4 itself with
+`pid/S,cov/F#6,px/F`, that has two consequences:
+
+- the array column reads as type -1 — `bank.get` prints
+  `---> error(get) : unknown type` and returns 0;
+- **every column declared after it is mis-offset, silently.** `px` lands at
+  byte 2 instead of 26 and the row length comes out 6 instead of 30, with no
+  diagnostic at all.
+
+The second is the dangerous one: it produces plausible wrong numbers rather
+than an error. If a C++ consumer has to read the file, keep array columns out
+of the schema, or split them into N scalar columns.
+:::
+
 ## Copying events verbatim
 
 `append_raw(&[u8])` writes an already-encoded event through unchanged. This is

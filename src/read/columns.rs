@@ -267,9 +267,17 @@ pub struct ColumnBuffers {
 }
 
 impl ColumnBuffers {
-    /// Number of events represented (`offsets.len() - 1`).
+    /// Number of events represented (`offsets.len() - 1`, or 0 when empty).
+    ///
+    /// Every field of this struct is `pub` and it is not `#[non_exhaustive]`,
+    /// so an externally-constructed value can have empty `offsets`. Nothing in
+    /// oxihipo produces one — `read_columns` maintains
+    /// `offsets.len() == events + 1` — but the bare subtraction panicked in
+    /// debug and wrapped to `usize::MAX` in release, and a caller looping
+    /// `0..event_count()` on the wrapped value spins rather than aborting.
+    /// Saturating matches `total_rows`'s `unwrap_or(&0)` just below.
     pub fn event_count(&self) -> usize {
-        self.offsets.len() - 1
+        self.offsets.len().saturating_sub(1)
     }
 
     /// Total rows across all events (`offsets.last()`).

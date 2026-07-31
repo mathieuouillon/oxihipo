@@ -32,6 +32,25 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   allocation-free column access on byte-packed rows.
 - **`Dict::try_add`** — non-panicking `add`.
 
+### Documentation
+
+- The reading guide now **leads with `bank_row!`**: a Java or C++ port lands on
+  `ev.bank(name)` hoisted out of a loop, which in oxihipo re-resolves the name
+  every event. Typed rows resolve handles once per bank.
+- A new **Recovering a damaged file** section — `open_salvage` + `skim` is the
+  equivalent of Java's `hipoutils -doctor`, and appeared in no guide before.
+- **C++ `hipo4` cannot read `T#N` array columns.** Its schema parser splits on
+  `,` and `/` only, so the type token is the literal `"F#6"` and resolves to
+  type -1. Worse than the missing column: every column declared *after* it is
+  silently mis-offset. Java reads them correctly, so this is a C++ gap, not an
+  oxihipo one — but it needed saying next to the feature.
+- The `lz4-apple` "~7% faster" claim is now backed by the measurement:
+  6.0-7.7% on decoder-isolated timings over 188 real DST records, 4.5% off a
+  full single-threaded scan of a 9.1 GB DST.
+- `Chain::for_each` documents that its parallel modes already overlap I/O with
+  compute — each worker `pread`s independently — which is why there is no
+  prefetcher and why oversubscribing is the lever on a slow filesystem.
+
 ### Fixed
 
 - **`OwnedEvent::size()` decompressed the whole event to measure it.** On the
@@ -42,6 +61,13 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   field.** Both matched only `Float`/`Double`, so reading an `Int` field came
   back 0.0 — indistinguishable from a stored zero, in an accessor whose whole
   purpose is to erase the type.
+- **`BankBuilder::with_row_capacity` under-reserved array columns** by exactly
+  the per-row element count, so a `cov/F#16` column got 1/16th of what it
+  needed and regrew from there. Affects the Python columnar writer, which uses
+  `with_row_capacity` + `push_rows` directly.
+- **`ColumnBuffers::event_count` wrapped to `usize::MAX`** on an
+  externally-constructed value with empty `offsets` (release; it panicked in
+  debug). It saturates, matching `total_rows` beside it.
 - **`Dict::parse_text` could abort the process.** It is public, in the prelude,
   and takes arbitrary text; more than 65,536 schemas overflowed the `u16` id
   space and panicked, and release builds set `panic = "abort"`, so

@@ -50,6 +50,53 @@ surfaces as an `Err` you propagate with `?` rather than a panic. Each
 `OwnedEvent` is a slice into a shared, ref-counted record buffer — there is no
 per-event allocation.
 
+`ev.bank(name)` resolves the name against the schema on **every event**. That is
+fine for orientation and for banks you touch once, but it is not the shape you
+want in an inner loop. Reach for [Typed rows](#typed-rows--start-here), or
+resolve a `ColumnHandle` once — see [Reading columns](#reading-columns).
+
+## Typed rows — start here
+
+If you are porting from Java or C++, this is the section to read first. `bank_row!`
+generates a plain struct from a bank's columns and resolves every column handle
+**once per bank**, not once per field per row:
+
+```rust
+use oxihipo::{bank_row, Chain};
+
+bank_row! {
+    #[derive(Clone, Copy, Debug)]
+    struct Particle for "REC::Particle" @ (300, 1) {
+        pid:    i32 => "pid",
+        px:     f32 => "px",
+        py:     f32 => "py",
+        pz:     f32 => "pz",
+        charge: i8  => "charge",
+        status: i16 => "status",
+    }
+}
+
+let chain = Chain::open("/data/cooked/run5042")?;
+let mut electrons = 0u64;
+for ev in chain.events() {
+    let ev = ev?;
+    for p in ev.ctx().rows::<Particle>() {
+        if p.pid == 11 && p.status < 0 {
+            electrons += 1;
+        }
+    }
+}
+```
+
+There is **no column limit** — `REC::Calorimeter`'s 28 columns map to one
+struct. A field naming a column the schema does not carry decodes as
+`Default::default()` rather than failing, so one struct can span files whose
+dictionaries differ slightly.
+
+The `clas12` module ships pre-generated structs for the common banks, so you
+often need no macro at all. `rows_for_pindex` / `rows_for_index` cover the usual
+cross-referencing between `REC::Particle` and its detector banks.
+
 ## Random access
 
 When you already know which events you want — a list of indices from an earlier
@@ -103,6 +150,36 @@ Record the names in the file with [`Writer::tag_names`](./writing.md#tagging-eve
 `filtered(event_tag="dvcs")` in the Python binding, and `skim` copies the
 registry into the output.
 :::
+
+## Recovering a damaged file
+
+A file whose 56-byte header is gone cannot be opened by the normal path, even
+though nothing important lives in that header — the magic, the version, the
+counts, where the dictionary starts and where the trailer is are all
+re-derivable, because every record carries its own header and magic.
+`Chain::open_salvage` finds the records instead:
+
+```rust
+use oxihipo::{Chain, Compression};
+
+let chain = Chain::open("broken.hipo")
+    .or_else(|_| Chain::open_salvage("broken.hipo"))?;
+chain.skim("repaired.hipo", Compression::Lz4)?;
+```
+
+That pair is the equivalent of Java's `hipoutils -doctor`. Java's recovery is
+manual: when the trailer position is 0 or past EOF, `HipoReader` warns, clears
+the record positions, hands back a reader reporting 0 events, and tells you to
+run the tool. oxihipo does the index half automatically — `Chain::open` already
+falls back to a scan on a missing or undecodable trailer — and `open_salvage`
+covers the case Java cannot open at all. `skim` is the repair half: it rewrites
+a well-formed file with a fresh header, index and trailer.
+
+What salvage cannot recover is the **dictionary**, which lives in the record
+immediately after the header. If the damage reached it, the events are still
+readable as bytes and still copyable, but their banks have no names or column
+types — those exist nowhere else in the file. You get an empty dictionary rather
+than a guess, and should supply one from a sibling file.
 
 ## Parallel scans
 
@@ -241,10 +318,7 @@ plausible, and wrong with no error anywhere.
 
 ## Typed rows
 
-`ev.rows::<T>()` decodes a bank into a generated row struct; `bank_row!` builds
-those structs, and the `clas12` module ships pre-generated ones for the common
-CLAS12 banks. `rows_for_pindex` / `rows_for_index` cover the usual
-cross-referencing patterns.
+Moved up — see [Typed rows — start here](#typed-rows--start-here).
 
 ## Skimming
 

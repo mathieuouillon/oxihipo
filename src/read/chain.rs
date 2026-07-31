@@ -966,7 +966,16 @@ impl Chain {
     ///
     /// Event order is preserved only for `threads == 1`; the parallel
     /// modes visit events out of order, so use atomics or a `Mutex` in `f`
-    /// for shared state. Returns aggregate [`ChainStats`].
+    /// for shared state — or [`par_fold`](Self::par_fold), which gives each
+    /// worker its own accumulator and needs neither. Returns aggregate
+    /// [`ChainStats`].
+    ///
+    /// The parallel modes also **overlap I/O with compute for free**: each
+    /// worker issues its own `pread` on the shared descriptor, so N workers
+    /// keep N records in flight. That is why there is no separate prefetcher,
+    /// and why oversubscribing (`threads = 2 * num_cpus`) is the lever worth
+    /// reaching for on a high-latency filesystem — extra workers hide the
+    /// stall rather than adding compute.
     ///
     ///
     /// ```no_run

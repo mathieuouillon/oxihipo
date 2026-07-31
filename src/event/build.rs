@@ -18,7 +18,9 @@ use crate::wire::constants::*;
 #[derive(Debug)]
 pub struct BankBuilder<'s> {
     schema: &'s Schema,
-    /// One buffer per column. Length is always `rows * entry.ty.size()`.
+    /// One buffer per column. Length is always
+    /// `rows * entry.ty.size() * entry.length` — the `length` factor is what
+    /// makes an array column (`name/T#N`) N times wider than a scalar one.
     columns: Vec<Vec<u8>>,
     rows: u32,
 }
@@ -37,7 +39,10 @@ impl<'s> BankBuilder<'s> {
         let columns = schema
             .entries()
             .iter()
-            .map(|e| Vec::with_capacity(rows as usize * e.ty.size()))
+            // `* e.length` matters: without it an array column reserves 1/N of
+            // what it needs and regrows from there. The row layout in `push_row`
+            // below is the mirror of this product, so they must agree.
+            .map(|e| Vec::with_capacity(rows as usize * e.ty.size() * e.length as usize))
             .collect();
         Self {
             schema,
@@ -611,5 +616,50 @@ mod tests {
         assert_eq!(event.iter_structures().count(), 2);
         assert!(event.has(300, 1));
         assert!(event.has(300, 30));
+    }
+
+    /// `with_row_capacity` must account for `entry.length`.
+    ///
+    /// It reserved `rows * ty.size()`, dropping the per-row element count, so
+    /// an array column such as `cov/F#16` got 1/16th of what it needed and
+    /// regrew from there. Output was always correct — only the allocation was
+    /// wrong — so the guard has to be on capacity, not on bytes.
+    #[test]
+    fn with_row_capacity_reserves_for_array_columns() {
+        let schema = Schema::from_columns(
+            "T::Test",
+            1000,
+            1,
+            [
+                ("cov".into(), DataType::Float, 16),
+                ("px".into(), DataType::Float, 1),
+            ],
+        );
+        const ROWS: u32 = 1000;
+        let b = BankBuilder::with_row_capacity(&schema, ROWS);
+
+        // 16 f32 per row for `cov`, 1 for `px`.
+        assert!(
+            b.columns[0].capacity() >= ROWS as usize * 4 * 16,
+            "array column reserved {} bytes, needs {}",
+            b.columns[0].capacity(),
+            ROWS as usize * 4 * 16
+        );
+        assert!(b.columns[1].capacity() >= ROWS as usize * 4);
+
+        // And filling to that many rows must not have reallocated: capacity
+        // was already enough. This is what actually fails on the old code.
+        let cap_before = b.columns[0].capacity();
+        let mut b = b;
+        b.push_rows(ROWS);
+        assert_eq!(
+            b.columns[0].capacity(),
+            cap_before,
+            "the array column regrew, so the reservation was short"
+        );
+        assert_eq!(b.rows(), ROWS);
+        // Sanity: the buffer really is 16 floats per row wide, so the
+        // capacity assertion above is measuring the right thing.
+        assert_eq!(b.columns[0].len(), ROWS as usize * 4 * 16);
     }
 }
