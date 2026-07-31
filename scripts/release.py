@@ -279,6 +279,47 @@ def ci_status(sha: str) -> dict[str, str]:
 # prepare
 # --------------------------------------------------------------------------- #
 
+# Words that mean "a downstream crate can stop compiling". Matched against the
+# `[Unreleased]` body, which is where such a change is described if anywhere.
+BREAKING_MARKERS = re.compile(
+    r"\bbreaking\b|\bsource-breaking\b|\bsemver break\b|\bincompatible\b", re.I
+)
+
+
+def check_breaking_bump(version: str, current: str, allow_patch: bool) -> None:
+    """Refuse a patch bump when the changelog says the release breaks callers.
+
+    0.8.0 nearly shipped as 0.7.2. Dropping the `Debug` bound from
+    `BankRow::Handles` *relaxes* what an implementor must provide, which reads
+    as harmless — but it is source-breaking for a consumer that relied on
+    `T::Handles: Debug` in a generic context, so a `^0.7` dependent would have
+    broken on a plain `cargo update`. Nothing in the tooling would have caught
+    it; a human noticed.
+
+    Below 1.0 the minor is the breaking position (Cargo treats `0.x.y` as
+    compatible within `0.x`), so a breaking change must move the minor.
+    """
+    if allow_patch:
+        return
+    body = re.search(r"^## \[Unreleased\]\n(.*?)(?=^## \[|\Z)", read("CHANGELOG.md"), re.S | re.M)
+    if not body or not BREAKING_MARKERS.search(body.group(1)):
+        return
+    cur = [int(x) for x in current.split("-")[0].split(".")[:3]]
+    new = [int(x) for x in version.split("-")[0].split(".")[:3]]
+    breaking_moved = new[0] > cur[0] or (new[0] == cur[0] and new[1] > cur[1])
+    if breaking_moved:
+        ok(f"changelog says breaking, and {current} -> {version} moves the "
+           f"{'major' if new[0] > cur[0] else 'minor'}")
+        return
+    raise Fail(
+        f"the [Unreleased] changelog describes a breaking change, but "
+        f"{current} -> {version} is a patch bump. Below 1.0 the minor is the "
+        f"breaking position, so `^{cur[0]}.{cur[1]}` dependents would take this "
+        f"on a plain `cargo update`. Use {cur[0]}.{cur[1] + 1}.0, or pass "
+        f"--allow-patch-breaking if the wording is a false positive."
+    )
+
+
 def bump_changelog(version: str, allow_empty: bool) -> None:
     text = read("CHANGELOG.md")
     m = re.search(r"^## \[Unreleased\]\n(.*?)(?=^## \[|\Z)", text, re.S | re.M)
@@ -388,6 +429,8 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     if f"v{version}" in tags:
         raise Fail(f"tag v{version} already exists locally")
     ok(f"tag v{version} does not exist")
+
+    check_breaking_bump(version, current, args.allow_patch_breaking)
 
     step(f"Rewriting version sites -> {version}")
     set_version(version)
@@ -541,6 +584,8 @@ def main() -> int:
     pr.add_argument("--allow-empty", action="store_true",
                     help="allow a release with an empty [Unreleased]")
     pr.add_argument("--force", action="store_true", help="allow a non-main branch")
+    pr.add_argument("--allow-patch-breaking", action="store_true",
+                    help="ship a patch bump even though the changelog says breaking")
     pr.set_defaults(func=cmd_prepare)
 
     t = sub.add_parser("tag", help="tag and push, triggering the PyPI publish")

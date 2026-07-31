@@ -50,3 +50,4 @@ fixtures/large/
 # Generated from CHANGELOG.md by website/scripts/sync-changelog.mjs
 # (npm prebuild). Edit the changelog, not the generated page.
 website/docs/release-notes.md
+__pycache__/

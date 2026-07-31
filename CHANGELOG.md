@@ -11,10 +11,12 @@ Nothing yet.
 
 ## [0.8.0] - 2026-07-31
 
-**This will be `0.8.0`, not `0.7.2`.** Removing the `Debug` bound from
-`BankRow::Handles` relaxes what an implementor must provide, but it is
+**Breaking: this is `0.8.0` rather than `0.7.2`.** Removing the `Debug` bound
+from `BankRow::Handles` relaxes what an implementor must provide, but it is
 source-breaking for any *consumer* that relied on `T::Handles: Debug` in a
-generic context — so a `^0.7` dependent could break on a plain `cargo update`.
+generic context — a `^0.7` dependent would have broken on a plain
+`cargo update`. `scripts/release.py` now refuses a patch bump on a changelog
+section that says "breaking", so this cannot be shipped as a patch by mistake.
 
 ### Added
 
