@@ -1010,21 +1010,83 @@ impl PyWriter {
 /// `(offsets, [(dtype_name, values)])` — the return of `composite_columns`.
 type CompositeColumns<'py> = (Bound<'py, PyArray1<i64>>, Vec<(String, Bound<'py, PyAny>)>);
 
-/// Map a compression name to the core enum.
+/// Map a compression name to the core (codec, layout) pair.
+///
+/// Grammar: `"<codec>"` or `"<codec>+<layout>"`. A bare codec means
+/// `perchunk`, which is what the pre-matrix names meant.
+///
+/// ```text
+/// codec   none | lz4 | lz4hc (alias lz4best) | gzip | zstd | zstd1..zstd6
+/// layout  perchunk | perbank | percolumn
+/// ```
+///
+/// The six names that predate the matrix keep working and keep meaning
+/// exactly what they meant — `"lz4percolumn"` is `lz4hc+percolumn`, not
+/// `lz4+percolumn`, because the split codecs were always high-compression.
+/// Every Python call site in the wild passes one of those six.
 fn parse_compression(name: &str) -> PyResult<oxihipo::Compression> {
-    use oxihipo::Compression;
-    Ok(match name.to_ascii_lowercase().as_str() {
-        "none" => Compression::None,
-        "lz4" => Compression::Lz4,
-        "lz4best" => Compression::Lz4Best,
-        "gzip" => Compression::Gzip,
-        "lz4perbank" => Compression::Lz4PerBank,
-        "lz4percolumn" => Compression::Lz4PerColumn,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown compression {other:?}"
-            )));
+    use oxihipo::{Codec, Compression, Layout};
+
+    let lower = name.to_ascii_lowercase();
+
+    // The pre-matrix names, unchanged.
+    match lower.as_str() {
+        "none" => return Ok(Compression::None),
+        "lz4" => return Ok(Compression::Lz4),
+        "lz4best" | "lz4hc" => return Ok(Compression::Lz4Best),
+        "gzip" => return Ok(Compression::Gzip),
+        "lz4perbank" => return Ok(Compression::Lz4PerBank),
+        "lz4percolumn" => return Ok(Compression::Lz4PerColumn),
+        _ => {}
+    }
+
+    let bad = |what: &str| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown compression {name:?}: {what}. Expected \"<codec>\" or \
+             \"<codec>+<layout>\", where codec is one of none, lz4, lz4hc, gzip, \
+             zstd, zstd1..zstd6, and layout is one of perchunk, perbank, \
+             percolumn. The older names none, lz4, lz4best, gzip, lz4perbank and \
+             lz4percolumn also still work."
+        ))
+    };
+
+    let (codec_s, layout_s) = match lower.split_once('+') {
+        Some((c, l)) => (c.trim(), l.trim()),
+        None => (lower.as_str(), "perchunk"),
+    };
+
+    let mut level: Option<u8> = None;
+    let codec = match codec_s {
+        "none" => Codec::None,
+        "lz4" => Codec::Lz4,
+        "lz4hc" | "lz4best" => Codec::Lz4Hc,
+        "gzip" => Codec::Gzip,
+        "zstd" => Codec::Zstd,
+        z if z.starts_with("zstd") => {
+            let n: u8 = z[4..].parse().map_err(|_| bad("bad zstd level"))?;
+            if !(1..=6).contains(&n) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "zstd level {n} out of range: levels 1-6 are supported \
+                     (above 6 the write cost climbs steeply for little further gain)"
+                )));
+            }
+            level = Some(n);
+            Codec::Zstd
         }
+        _ => return Err(bad("unknown codec")),
+    };
+
+    let layout = match layout_s {
+        "perchunk" | "chunk" => Layout::PerChunk,
+        "perbank" | "bank" => Layout::PerBank,
+        "percolumn" | "column" => Layout::PerColumn,
+        _ => return Err(bad("unknown layout")),
+    };
+
+    let c = Compression::new(codec, layout);
+    Ok(match level {
+        Some(n) => c.with_zstd_level(n),
+        None => c,
     })
 }
 

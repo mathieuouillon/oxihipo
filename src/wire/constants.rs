@@ -155,7 +155,7 @@ impl HeaderType {
 ///
 /// Orthogonal to [`Layout`], which decides *what* gets squeezed separately.
 /// The pair is carried on the wire as a single 4-bit record-header tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Codec {
     None,
     Lz4,
@@ -173,7 +173,7 @@ pub enum Codec {
 /// Orthogonal to [`Codec`]. `PerBank` and `PerColumn` are what make partial
 /// decompression possible: a reader inflates only the banks or columns it
 /// touches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layout {
     /// One stream for the whole record. Every read inflates everything.
     PerChunk,

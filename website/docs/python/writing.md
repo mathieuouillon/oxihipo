@@ -35,7 +35,7 @@ or Awkward**.
 import oxihipo as ox
 import awkward as ak
 
-with ox.create("out.hipo", compression="lz4percolumn") as w:
+with ox.create("out.hipo", compression="zstd+percolumn") as w:
     w.new_bank("NEW::bank", {"px": "F", "py": "F", "pid": "I"})   # declare a bank
     w.extend({"NEW::bank": {                                     # append a batch
         "px":  ak.Array([[1.0, 2.0], [], [3.0]]),               # jagged: rows per event

@@ -2148,8 +2148,24 @@ def create(
     """Open a **new** HIPO file for writing, refusing to overwrite an existing
     one — use :func:`recreate` for that. Declare banks with
     :meth:`Writer.new_bank`, feed batches with :meth:`Writer.extend`, then
-    :meth:`Writer.close`. Compression is one of ``none`` / ``lz4`` / ``lz4best``
-    / ``gzip`` / ``lz4perbank`` / ``lz4percolumn``.
+    :meth:`Writer.close`.
+
+    Compression is a **codec and a layout**, written ``"<codec>+<layout>"``:
+
+    * codec — ``none``, ``lz4``, ``lz4hc``, ``gzip``, ``zstd`` (or ``zstd1``
+      … ``zstd6`` to pick the level; bare ``zstd`` is level 3).
+    * layout — ``perchunk`` (one stream per record, the stock HIPO shape),
+      ``perbank`` (one per bank, so reading one bank inflates only it),
+      ``percolumn`` (one per ``(bank, column)``).
+
+    A bare codec means ``perchunk``. All 15 pairs work, and the six older
+    names still do and still mean the same thing: ``lz4percolumn`` is
+    ``lz4hc+percolumn``, ``lz4best`` is ``lz4hc+perchunk``.
+
+    **Pick the layout first** — it is worth an order of magnitude on selective
+    reads where the codec is worth tens of percent on size. ``zstd+percolumn``
+    is the best general default: smaller than ``lz4percolumn`` and ~10x faster
+    to write.
 
     Portability, if the file will be read by other HIPO implementations:
 
@@ -2158,7 +2174,11 @@ def create(
     * ``gzip`` — read by the Java reader, **not** by the reference C++ reader,
       which has no gzip decode path (it LZ4-decodes every non-``none`` tag).
     * ``lz4perbank`` / ``lz4percolumn`` — format extensions with true partial
-      decompression; not read by the released C++/Java readers.
+      decompression; read by the ``feature/bybank-bycolumn-compression``
+      branches of hipo-cpp and hipo-java, not by the released readers.
+    * every other pair (anything with ``zstd``, or ``gzip``/``none``/``lz4``
+      combined with a split layout) is oxihipo-only — other readers reject
+      the tag.
 
     ``config`` writes a user key/value store into the dictionary record (read
     back via :attr:`Chain.config`); it interoperates with the C++/Java writers.

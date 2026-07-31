@@ -2218,3 +2218,79 @@ def test_link_round_trips_through_a_written_file(tmp_path):
     assert ak.to_list(
         ak.sum(ev["REC::Particle"]["REC::Calorimeter"].energy, axis=-1)
     ) == [[0.25, 0.5], [0.75]]
+
+
+# --- compression: the (codec x layout) matrix ------------------------------
+#
+# `compression=` used to accept six fixed names. It now accepts a pair,
+# `"<codec>+<layout>"`, with the six old names kept as shorthand. These tests
+# exist because every Python caller in the wild passes one of those six, and
+# the two split ones were always LZ4-**HC** — silently remapping them to plain
+# LZ4 would make every skimmed file bigger with nothing to notice it.
+
+CODECS = ["none", "lz4", "lz4hc", "gzip", "zstd"]
+LAYOUTS = ["perchunk", "perbank", "percolumn"]
+
+
+def _pids(c):
+    """`REC::Particle.pid` across the chain — the value fingerprint."""
+    ((_bank, _off, cols),) = c.read_columns([("REC::Particle", ["pid"])])
+    return cols[0][1].tolist()
+
+
+def _skim(chain, tmp_path, name, spec):
+    out = str(tmp_path / f"{name}.hipo")
+    chain.skim(out, compression=spec)
+    return oxihipo.open(out), os.path.getsize(out)
+
+
+@pytest.mark.parametrize("codec", CODECS)
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_every_codec_layout_pair_round_trips(chain, tmp_path, codec, layout):
+    spec = f"{codec}+{layout}"
+    expect = _pids(chain)
+    got, size = _skim(chain, tmp_path, spec.replace("+", "_"), spec)
+    assert size > 0
+    assert _pids(got) == expect, f"{spec} did not round-trip"
+
+
+def test_pre_matrix_names_still_work(chain, tmp_path):
+    expect = _pids(chain)
+    for name in ["none", "lz4", "lz4best", "gzip", "lz4perbank", "lz4percolumn"]:
+        got, _ = _skim(chain, tmp_path, f"legacy_{name}", name)
+        assert _pids(got) == expect, name
+
+
+def test_lz4percolumn_is_still_high_compression(chain, tmp_path):
+    # `lz4percolumn` must remain LZ4-HC, not plain LZ4. If it silently became
+    # the fast codec the file would just get bigger, which no round-trip test
+    # can see — so compare the two directly.
+    _, hc = _skim(chain, tmp_path, "hc", "lz4percolumn")
+    _, fast = _skim(chain, tmp_path, "fast", "lz4+percolumn")
+    assert hc <= fast, (
+        f"lz4percolumn produced {hc} bytes against plain lz4's {fast} — "
+        "it should be the high-compression codec"
+    )
+
+
+def test_zstd_levels(chain, tmp_path):
+    expect = _pids(chain)
+    for level in range(1, 7):
+        got, _ = _skim(chain, tmp_path, f"z{level}", f"zstd{level}+percolumn")
+        assert _pids(got) == expect, level
+    # A bare `zstd` takes the default level rather than failing.
+    _skim(chain, tmp_path, "zdefault", "zstd")
+
+
+def test_bad_compression_names_explain_themselves(chain, tmp_path):
+    out = str(tmp_path / "x.hipo")
+    for bad in ["lz5", "zstd+perrow", "lz4+", "+percolumn", ""]:
+        with pytest.raises(ValueError) as e:
+            chain.skim(out, compression=bad)
+        msg = str(e.value)
+        assert "percolumn" in msg and "zstd" in msg, f"{bad!r}: {msg}"
+    # Out-of-range zstd levels say so rather than clamping silently.
+    for bad in ["zstd0", "zstd7+percolumn", "zstd22"]:
+        with pytest.raises(ValueError) as e:
+            chain.skim(out, compression=bad)
+        assert "1-6" in str(e.value), bad

@@ -84,6 +84,40 @@ impl ColumnData {
         }
     }
 
+    /// Append one value. Each pushes only into its matching variant; a
+    /// mismatched call is a no-op, so a caller driving these from a field's
+    /// declared type can't corrupt the buffer.
+    pub fn push_i8(&mut self, v: i8) {
+        if let Self::I8(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_i16(&mut self, v: i16) {
+        if let Self::I16(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_i32(&mut self, v: i32) {
+        if let Self::I32(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_i64(&mut self, v: i64) {
+        if let Self::I64(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_f32(&mut self, v: f32) {
+        if let Self::F32(b) = self {
+            b.push(v);
+        }
+    }
+    pub fn push_f64(&mut self, v: f64) {
+        if let Self::F64(b) = self {
+            b.push(v);
+        }
+    }
+
     /// The wire element type of the stored scalars.
     pub fn data_type(&self) -> DataType {
         match self {
