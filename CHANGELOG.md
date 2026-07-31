@@ -30,6 +30,19 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   already issues concurrent positioned reads against it.
 - **`Bank::iter(handle)`** and **`Bank::read_into(handle, &mut Vec<T>)`** —
   allocation-free column access on byte-packed rows.
+- **`Display` for `Schema`, `Dict` and `Bank`.** `{}` prints the useful thing
+  and truncates; `{:#}` prints everything. `Dict` sorts by `(group, item)` and
+  caps at 8 schemas — the alternative was `{:?}`, which on the shipped
+  274-schema CLAS12 dictionary is over 41 million characters. `Bank` renders a
+  row table capped at 10 rows, with each cell formatted by *its own* type, so
+  an `f32` keeps its shortest round-trip rather than becoming 17 digits of
+  widened noise. `examples/show` prints all three.
+- **`Bank::value` / `value_i64` / `value_by_name` / `array_values`** — read a
+  cell without naming its type, for printers, statistics and expression
+  evaluators that walk `schema().entries()`. Indexed by schema position, not
+  name: the hash costs ~5.8 ns per cell against ~0.4 ns for the type dispatch.
+  Returns `Option`, and refuses array columns rather than silently handing back
+  element 0 of a covariance matrix.
 - **`Dict::try_add`** — non-panicking `add`.
 
 ### Documentation

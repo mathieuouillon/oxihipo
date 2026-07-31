@@ -310,6 +310,74 @@ impl SchemaIndex {
     }
 }
 
+/// Human-readable schema table.
+///
+/// `{}` prints the columns; `{:#}` adds each column's byte offset within a row
+/// and the round-trip schema text. Column width follows the longest name, so a
+/// 28-column `REC::Calorimeter` renders the same shape as a 2-column bank.
+///
+/// This is deliberately not `Debug`: `{:?}` on a `Schema` is for a bug report,
+/// this is for a person. [`Dict`](crate::Dict) and [`Bank`](crate::Bank) have
+/// matching impls.
+impl std::fmt::Display for Schema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let full = f.alternate();
+        writeln!(
+            f,
+            "{}  group {}  item {}  {} columns  {} B/row",
+            self.name(),
+            self.group(),
+            self.item(),
+            self.num_columns(),
+            self.row_size(),
+        )?;
+        let w = self
+            .entries()
+            .iter()
+            .map(|e| e.name.len())
+            .max()
+            .unwrap_or(6)
+            .max(6);
+        if full {
+            writeln!(
+                f,
+                "  {:>3}  {:<w$}  {:<7} {:>3} {:>5}",
+                "#", "column", "type", "len", "off"
+            )?;
+        } else {
+            writeln!(
+                f,
+                "  {:>3}  {:<w$}  {:<7} {:>3}",
+                "#", "column", "type", "len"
+            )?;
+        }
+        for (i, e) in self.entries().iter().enumerate() {
+            if full {
+                writeln!(
+                    f,
+                    "  {i:>3}  {:<w$}  {:<7} {:>3} {:>5}",
+                    e.name,
+                    e.ty.name(),
+                    e.length,
+                    e.row_offset,
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "  {i:>3}  {:<w$}  {:<7} {:>3}",
+                    e.name,
+                    e.ty.name(),
+                    e.length,
+                )?;
+            }
+        }
+        if full {
+            write!(f, "  text: {}", self.to_text())?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

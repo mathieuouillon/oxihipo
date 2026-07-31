@@ -169,6 +169,52 @@ fn scan_to_close(bytes: &[u8], start: usize) -> Result<usize> {
     Ok(j)
 }
 
+/// One line per schema, sorted by `(group, item)`.
+///
+/// `{}` caps at 8 and says how many were withheld; `{:#}` prints all. The cap
+/// is what makes this usable at all: `{:?}` on the shipped 274-schema CLAS12
+/// dictionary is over 41 million characters.
+impl std::fmt::Display for Dict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const CAP: usize = 8;
+        writeln!(f, "Dict: {} schemas", self.schemas.len())?;
+        let mut order: Vec<&Schema> = self.schemas.iter().collect();
+        order.sort_by_key(|s| (s.group(), s.item()));
+
+        let shown = if f.alternate() {
+            order.len()
+        } else {
+            order.len().min(CAP)
+        };
+        let w = order[..shown]
+            .iter()
+            .map(|s| s.name().len())
+            .max()
+            .unwrap_or(4)
+            .max(4);
+        writeln!(
+            f,
+            "  {:>5}  {:>4}  {:<w$}  {:>4}  {:>5}",
+            "group", "item", "bank", "cols", "B/row"
+        )?;
+        for s in &order[..shown] {
+            writeln!(
+                f,
+                "  {:>5}  {:>4}  {:<w$}  {:>4}  {:>5}",
+                s.group(),
+                s.item(),
+                s.name(),
+                s.num_columns(),
+                s.row_size(),
+            )?;
+        }
+        if shown < order.len() {
+            write!(f, "  ... {} more ({{:#}} prints all)", order.len() - shown)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

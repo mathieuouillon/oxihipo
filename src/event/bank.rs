@@ -535,6 +535,138 @@ impl<'b> Bank<'b> {
     /// Use [`Self::col`] / [`Self::read`] for strict access (error on
     /// missing column / type mismatch) and bulk reads.
     #[inline]
+    /// Read cell `(col, row)` as an `f64` **without naming its type**.
+    ///
+    /// For code that iterates `schema().entries()` and does not know the column
+    /// types at compile time — printers, statistics, expression evaluators.
+    /// Everything else should use [`get`](Self::get), [`read`](Self::read) or
+    /// [`iter`](Self::iter), which are typed and, for the bulk accessors,
+    /// allocation-free. This one dispatches on the runtime `DataType` per call.
+    ///
+    /// `col` is a **schema index**, not a name: resolving a name costs a hash
+    /// per cell (measured at ~5.8 ns against ~0.4 ns for the type dispatch),
+    /// and a caller walking `entries()` already holds the index. Use
+    /// [`value_by_name`](Self::value_by_name) if you only have a name.
+    ///
+    /// Returns `None` — never a default — when:
+    ///
+    /// - `col` is out of range, or `row >= self.rows()`;
+    /// - the column is an **array** (`entry.length != 1`). Element 0 of a
+    ///   covariance matrix is not "the value"; use
+    ///   [`array_values`](Self::array_values);
+    /// - the column's bytes are truncated.
+    ///
+    /// `None` rather than `0.0` is the point. `get::<f32>` returning
+    /// `T::default()` on a mismatch is recoverable because the caller named a
+    /// type and can re-check the schema; a type-erased `0.0` is
+    /// indistinguishable from a stored zero.
+    ///
+    /// Byte, Short, Int, Float and Double widen exactly. **`Long` is lossy
+    /// above 2^53** — use [`value_i64`](Self::value_i64) when the column is a
+    /// `Long` and every bit matters.
+    pub fn value(&self, col: usize, row: u32) -> Option<f64> {
+        let (entry, off) = self.scalar_cell(col, row)?;
+        let b = self.col_bytes(col);
+        Some(match entry.ty {
+            crate::schema::DataType::Byte => f64::from(b[off] as i8),
+            crate::schema::DataType::Short => f64::from(i16::from_le_bytes([b[off], b[off + 1]])),
+            crate::schema::DataType::Int => {
+                f64::from(i32::from_le_bytes(b[off..off + 4].try_into().ok()?))
+            }
+            crate::schema::DataType::Float => {
+                f64::from(f32::from_le_bytes(b[off..off + 4].try_into().ok()?))
+            }
+            crate::schema::DataType::Double => f64::from_le_bytes(b[off..off + 8].try_into().ok()?),
+            crate::schema::DataType::Long => {
+                i64::from_le_bytes(b[off..off + 8].try_into().ok()?) as f64
+            }
+        })
+    }
+
+    /// [`value`](Self::value) for integer columns, exactly.
+    ///
+    /// `Some` for Byte, Short, Int and Long; `None` for Float and Double,
+    /// because truncating a float towards zero silently is worse than
+    /// declining — and for the same out-of-range and array cases as `value`.
+    pub fn value_i64(&self, col: usize, row: u32) -> Option<i64> {
+        let (entry, off) = self.scalar_cell(col, row)?;
+        let b = self.col_bytes(col);
+        Some(match entry.ty {
+            crate::schema::DataType::Byte => i64::from(b[off] as i8),
+            crate::schema::DataType::Short => i64::from(i16::from_le_bytes([b[off], b[off + 1]])),
+            crate::schema::DataType::Int => {
+                i64::from(i32::from_le_bytes(b[off..off + 4].try_into().ok()?))
+            }
+            crate::schema::DataType::Long => i64::from_le_bytes(b[off..off + 8].try_into().ok()?),
+            crate::schema::DataType::Float | crate::schema::DataType::Double => return None,
+        })
+    }
+
+    /// [`value`](Self::value) by column name. One hash per call — prefer the
+    /// index form in a loop.
+    pub fn value_by_name(&self, name: &str, row: u32) -> Option<f64> {
+        self.value(self.schema.column_index(name)?, row)
+    }
+
+    /// Every element of cell `(col, row)`, widened to `f64`, appended to `out`.
+    ///
+    /// Clears `out` first. Works for any `length`, including 1, so this is the
+    /// accessor that does handle array columns — [`value`](Self::value)
+    /// deliberately refuses them. Returns `false` (with `out` cleared) when
+    /// `col`/`row` is out of range or the bytes are truncated.
+    pub fn array_values(&self, col: usize, row: u32, out: &mut Vec<f64>) -> bool {
+        out.clear();
+        let Some(entry) = self.schema.entries().get(col) else {
+            return false;
+        };
+        if row >= self.rows {
+            return false;
+        }
+        let width = entry.ty.size();
+        let n = entry.length as usize;
+        let base = row as usize * width * n;
+        let b = self.col_bytes(col);
+        if base + width * n > b.len() {
+            return false;
+        }
+        out.reserve(n);
+        for i in 0..n {
+            let off = base + i * width;
+            out.push(match entry.ty {
+                crate::schema::DataType::Byte => f64::from(b[off] as i8),
+                crate::schema::DataType::Short => {
+                    f64::from(i16::from_le_bytes([b[off], b[off + 1]]))
+                }
+                crate::schema::DataType::Int => {
+                    f64::from(i32::from_le_bytes(b[off..off + 4].try_into().unwrap()))
+                }
+                crate::schema::DataType::Float => {
+                    f64::from(f32::from_le_bytes(b[off..off + 4].try_into().unwrap()))
+                }
+                crate::schema::DataType::Double => {
+                    f64::from_le_bytes(b[off..off + 8].try_into().unwrap())
+                }
+                crate::schema::DataType::Long => {
+                    i64::from_le_bytes(b[off..off + 8].try_into().unwrap()) as f64
+                }
+            });
+        }
+        true
+    }
+
+    /// Shared bounds check for the scalar type-erased accessors: rejects an
+    /// out-of-range column or row, an array column, and truncated bytes, and
+    /// returns the entry plus the cell's byte offset within its column.
+    fn scalar_cell(&self, col: usize, row: u32) -> Option<(&'b crate::schema::SchemaEntry, usize)> {
+        let entry = self.schema.entries().get(col)?;
+        if entry.length != 1 || row >= self.rows {
+            return None;
+        }
+        let width = entry.ty.size();
+        let off = row as usize * width;
+        (off + width <= self.col_bytes(col).len()).then_some((entry, off))
+    }
+
     pub fn get<T: BankColumnType + Default>(&self, name: &str, row: u32) -> T {
         let Some(col) = self.schema.column_index(name) else {
             return T::default();
@@ -642,6 +774,118 @@ impl<'b> Bank<'b> {
         // matching `T`, so `cast_cells` borrows zero-copy on aligned data
         // (the common case for 4-byte types) and copies otherwise.
         cast_cells::<T>(self.col_bytes(col), self.rows as usize)
+    }
+}
+
+/// A bank as a table of rows.
+///
+/// `{}` caps at 10 rows and reports how many were withheld; `{:#}` prints all.
+/// The cap is not hypothetical — over 2,000 real CLAS12 events, `COAT::config`
+/// reaches 1,550 rows, `RAW::epics` 1,320 and `RICH::tdc` 1,082.
+///
+/// Cells are rendered with their own type's `Display`, i.e. the shortest
+/// round-trip form for `f32`/`f64`, never a fixed `{:.3}`: a printer that
+/// silently truncates `chi2pid` turns a bug report into a day of confusion.
+/// Array columns show `[F x16]` under `{}` and their elements under `{:#}`.
+impl std::fmt::Display for Bank<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::schema::DataType;
+        const CAP: u32 = 10;
+
+        let entries = self.schema.entries();
+        writeln!(
+            f,
+            "{}  {} rows x {} cols",
+            self.schema.name(),
+            self.rows,
+            entries.len()
+        )?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let shown = if f.alternate() {
+            self.rows
+        } else {
+            self.rows.min(CAP)
+        };
+
+        // Render every cell first so the column widths fit the data actually
+        // printed rather than a guess.
+        // Render each element with **its own type's** `Display`. Going through
+        // `value` would widen an `f32` to `f64` first, and the shortest
+        // round-trip of a widened `f32` is 17 digits — `-0.5249287` prints as
+        // `-0.5249286890029907`, which is noise, not precision.
+        let elem = |c: usize, byte_off: usize| -> String {
+            let e = &entries[c];
+            let b = self.col_bytes(c);
+            let w = e.ty.size();
+            if byte_off + w > b.len() {
+                return "?".into();
+            }
+            match e.ty {
+                DataType::Byte => (b[byte_off] as i8).to_string(),
+                DataType::Short => i16::from_le_bytes([b[byte_off], b[byte_off + 1]]).to_string(),
+                DataType::Int => {
+                    i32::from_le_bytes(b[byte_off..byte_off + 4].try_into().unwrap()).to_string()
+                }
+                DataType::Float => {
+                    f32::from_le_bytes(b[byte_off..byte_off + 4].try_into().unwrap()).to_string()
+                }
+                DataType::Double => {
+                    f64::from_le_bytes(b[byte_off..byte_off + 8].try_into().unwrap()).to_string()
+                }
+                DataType::Long => {
+                    i64::from_le_bytes(b[byte_off..byte_off + 8].try_into().unwrap()).to_string()
+                }
+            }
+        };
+        let cell = |c: usize, r: u32| -> String {
+            let e = &entries[c];
+            let w = e.ty.size();
+            let base = r as usize * w * e.length as usize;
+            if e.length != 1 {
+                if f.alternate() {
+                    let inner: Vec<String> = (0..e.length as usize)
+                        .map(|i| elem(c, base + i * w))
+                        .collect();
+                    return format!("[{}]", inner.join(" "));
+                }
+                return format!("[{} x{}]", e.ty.letter(), e.length);
+            }
+            elem(c, base)
+        };
+
+        let mut widths: Vec<usize> = entries.iter().map(|e| e.name.len()).collect();
+        let mut body: Vec<Vec<String>> = Vec::with_capacity(shown as usize);
+        for r in 0..shown {
+            let row: Vec<String> = (0..entries.len()).map(|c| cell(c, r)).collect();
+            for (w, s) in widths.iter_mut().zip(&row) {
+                *w = (*w).max(s.len());
+            }
+            body.push(row);
+        }
+
+        let idx_w = shown.saturating_sub(1).to_string().len().max(3);
+        write!(f, "{:>idx_w$}", "row")?;
+        for (e, w) in entries.iter().zip(&widths) {
+            write!(f, "  {:>w$}", e.name)?;
+        }
+        writeln!(f)?;
+        for (r, row) in body.iter().enumerate() {
+            write!(f, "{r:>idx_w$}")?;
+            for (s, w) in row.iter().zip(&widths) {
+                write!(f, "  {s:>w$}")?;
+            }
+            writeln!(f)?;
+        }
+        if shown < self.rows {
+            write!(
+                f,
+                "  ... {} more rows ({{:#}} prints all)",
+                self.rows - shown
+            )?;
+        }
+        Ok(())
     }
 }
 
