@@ -24,29 +24,54 @@ follow, and both hurt:
 
 ## The full menu
 
-Every mode oxihipo can write, in wire-tag order. The Rust name is the
-[`Compression`](../rust/writing.md) variant; the Python name is the string
-[`skim`](../python/reading.md) accepts.
+Compression is a **(codec × layout) pair**. The codec decides what squeezes the
+bytes; the layout decides what gets squeezed separately. They are independent,
+and all 15 combinations work.
 
-| Mode (`Compression::`) | Python (`skim=`) | `hipo4`? | What it does |
-|---|---|:---:|---|
-| `None` | `"none"` | ✅ | Uncompressed. |
-| `Lz4` | `"lz4"` | ✅ | Stock LZ4, one block per record. |
-| `Lz4Best` | `"lz4best"` | ✅ | LZ4 high-compression. Needs the `lz4-c` feature; without it, falls back to standard LZ4 (identical output to `Lz4`). |
-| `Gzip` | `"gzip"` | ✅ | Stock gzip, one block per record. |
-| `Lz4PerBank` | `"lz4perbank"` | ❌ | One LZ4-HC stream per bank, plus a compressed directory; inflate only the banks you read. |
-| `Lz4PerColumn` | `"lz4percolumn"` | ❌ | One LZ4-HC stream per `(bank, column)`; best ratio and finest-grained selective reads. |
+```rust
+use oxihipo::{Codec, Compression, Layout};
 
-The two extensions (`Lz4PerBank`, `Lz4PerColumn`) carry wire tags 6 and 7 that
-the C++ `hipo4` reader doesn't understand — use them for Rust-only, or
-oxihipo-Python-only, consumers. The four stock codecs stay byte-compatible with
-`hipo4`.
+// The pair, spelled out:
+let c = Compression::new(Codec::Zstd, Layout::PerColumn).with_zstd_level(3);
 
-:::note Two older extensions were removed
-Earlier versions also shipped `Lz4Chunked` (parallel-inflate-everything, tag 4)
-and `Lz4ByBank` v1 (tag 5). Both are superseded — `Lz4PerBank` does everything
-v1 did with smaller files, and `Lz4PerColumn` goes finer still — so they were
-removed. A file written in either old format is now **rejected on read**.
+// The six historical names are the same thing under an old spelling:
+assert_eq!(Compression::Lz4PerColumn, Compression::new(Codec::Lz4Hc, Layout::PerColumn));
+```
+
+| `Codec` | What it is |
+|---|---|
+| `None` | Uncompressed. |
+| `Lz4` | Stock LZ4. Fastest to write. |
+| `Lz4Hc` | LZ4 high-compression: ~10–15% smaller than `Lz4`, ~4× the write cost, identical to decode. Needs the `lz4-c` feature; without it, falls back to standard LZ4. |
+| `Gzip` | Smallest of the five, and by far the slowest to inflate. |
+| `Zstd` | Levels 1–6 via `with_zstd_level`. Near-gzip ratios at a fraction of the write cost. The level is a writer-side choice and never reaches the wire — one tag decodes every level. |
+
+| `Layout` | What it is |
+|---|---|
+| `PerChunk` | One stream for the whole record — the stock HIPO shape. Reading any bank inflates every bank. |
+| `PerBank` | One stream per bank type, plus a compressed presence directory. `ev.bank(…)` inflates only that bank. |
+| `PerColumn` | One stream per `(bank, column)`, cross-event contiguous. Reads at column granularity, and homogeneous columns compress better than a bank's interleaved bytes. |
+
+### Which pair should I use?
+
+**`Zstd × PerColumn`**, unless you have a specific reason otherwise. It is
+smaller than the LZ4-HC equivalent, reads a column just as fast, and writes
+**10.7× faster**. See [the matrix](#the-matrix-measured).
+
+- Need `hipo4` compatibility → a `PerChunk` codec, or `Lz4Hc × PerBank` /
+  `Lz4Hc × PerColumn` (see [Format versions](#format-versions-and-cross-version-compatibility)).
+- Every byte matters → `Gzip × PerColumn` (2.32×), at 3.6× Zstd's write cost.
+- Writing is the bottleneck → `Lz4 × PerColumn`: the fastest compressing cell
+  to write, and still beats every whole-record codec on selective reads.
+
+:::note Tags 4 and 5 were reused
+Earlier versions shipped `Lz4Chunked` (tag 4) and `Lz4ByBank` v1 (tag 5). Both
+were removed and their tags left rejected. Those two slots now carry Zstd.
+
+That reuse is safe for one specific reason: a zstd frame begins with the magic
+`0xFD2FB528`, so a stale file carrying an old tag fails the frame check rather
+than decoding into something plausible. No other codec in those slots would
+have that property. Tag 15 is the only one still unassigned.
 :::
 
 ## Stock formats (`hipo4`-compatible)
@@ -213,29 +238,66 @@ Reproduce with `cargo run --release --example profile_streams -- file.hipo`
 and `cargo run --release --example record_size_scaling -- file.hipo`.
 :::
 
-## Head-to-head — all formats
+## The matrix, measured
 
-The same 50,000 events of a real CLAS12 file (`rec_clas_022083`, 274 banks)
-re-encoded into every format (Apple M4 Pro, single thread, warm cache,
-best-of-3). `Ratio` is file size versus `None` (smaller is better); `sel` / `all`
-are the ms to read every column of one bank / all 274:
+All 15 pairs on 248 MB of a real CLAS12 DST (599k events), Apple M4 Pro, single
+thread, warm cache. Best-of-3 with the reps **interleaved across cells**, so
+drift over the run cannot land on whichever cell went last. `scan all` reads a
+value from every bank of every event; `scan 1 col` reads one column across the
+whole file through `read_columns`.
 
-| Format | Size MB | Ratio | sel (1 bk) | all (274) |
-|---|---:|---:|---:|---:|
-| `None` | 1734 | 1.00× | 158 | 1589 |
-| `Lz4` | 1081 | 0.62× | 396 | 1817 |
-| `Lz4Best` | 922 | 0.53× | 395 | 1826 |
-| `Gzip` | 852 | 0.49× | 2878 | 4348 |
-| **`Lz4PerBank`** | 872 | 0.50× | **86** | 1529 |
-| **`Lz4PerColumn`** | **813** | **0.47×** | **75** | **1280** |
+Every cell checksums identically — a codec that read faster by reading less
+would otherwise look like a win.
 
-*(read columns in ms)*
+| codec | layout | size | ratio | write | scan all | **scan 1 col** |
+|---|---|---:|---:|---:|---:|---:|
+| `None` | `PerChunk` | 248 MB | 1.00× | 0.14 s | 77 ms | 36 ms |
+| `None` | `PerBank` | 228 MB | 1.09× | 0.18 s | 95 ms | 38 ms |
+| `None` | `PerColumn` | 228 MB | 1.09× | 0.24 s | 113 ms | 32 ms |
+| `Lz4` | `PerChunk` | 146 MB | 1.70× | 0.33 s | 120 ms | 78 ms |
+| `Lz4` | `PerBank` | 142 MB | 1.75× | 0.38 s | 125 ms | 69 ms |
+| `Lz4` | `PerColumn` | 136 MB | 1.83× | **0.43 s** | 110 ms | **28 ms** |
+| `Lz4Hc` | `PerChunk` | 126 MB | 1.96× | 6.07 s | 109 ms | 64 ms |
+| `Lz4Hc` | `PerBank` | 126 MB | 1.97× | 5.67 s | 125 ms | 66 ms |
+| `Lz4Hc` | `PerColumn` | 122 MB | 2.03× | 7.73 s | 116 ms | 32 ms |
+| `Gzip` | `PerChunk` | 117 MB | 2.12× | 2.37 s | 416 ms | 370 ms |
+| `Gzip` | `PerBank` | 116 MB | 2.14× | 2.35 s | 421 ms | 349 ms |
+| `Gzip` | `PerColumn` | **107 MB** | **2.32×** | 2.58 s | 112 ms | 30 ms |
+| `Zstd` | `PerChunk` | 124 MB | 2.00× | 0.75 s | 228 ms | 184 ms |
+| `Zstd` | `PerBank` | 121 MB | 2.05× | 0.80 s | 231 ms | 168 ms |
+| **`Zstd`** | **`PerColumn`** | **112 MB** | **2.22×** | **0.72 s** | 118 ms | **35 ms** |
 
-`Lz4PerColumn` is the **smallest file** — beating even `Gzip` — *and* the
-**fastest read at every scope**: one bank is ~5× faster than whole-record `Lz4`
-(75 ms vs 396 ms) because it inflates only that bank's columns. `Gzip` packs
-tightly but inflates an order of magnitude slower. The full breakdown — an extra
-read scope plus the matching Python numbers — is on the
+Reproduce with:
+
+```bash
+cargo run --release --example bench_compression -- file.hipo 3
+```
+
+### What the matrix shows
+
+**The layout decides the selective read, not the codec.** Every `PerColumn`
+cell reads one column in 28–35 ms *whatever the codec* — including `Gzip`,
+which takes 349–370 ms in the same codec on the whole-record layouts. A
+`PerChunk` codec must inflate everything to reach anything. That difference is
+an order of magnitude and it dwarfs the codec choice; if you take one thing
+from this page, take that.
+
+**`Zstd × PerColumn` is the best default.** Smaller than `Lz4Hc × PerColumn`
+(2.22× against 2.03×), reads a column just as fast, and writes in 0.72 s where
+LZ4-HC takes 7.73 s — **10.7× faster to write, for a smaller file**. Anywhere
+you were reaching for `Lz4PerColumn`, reach for this.
+
+**`Gzip × PerColumn` still wins on size** at 2.32×, for 3.6× Zstd's write cost.
+And plain **`Lz4 × PerColumn`** is the fastest compressing cell to write
+(0.43 s) while still beating every whole-record codec on selective reads.
+
+**Compression is not the whole story on the `None` row.** `None × PerColumn`
+reads a column faster than `None × PerChunk` (32 ms against 36) despite doing
+no decompression at all, because the column's bytes are contiguous rather than
+strided across every row.
+
+The older whole-file numbers — 1734 MB of the same DST across the six original
+formats, plus the matching Python figures — are on the
 [Benchmarks](./benchmarks.md) page.
 
 ## Through the Python API on ifarm
@@ -373,12 +435,33 @@ decompression automatically, with no format-aware code anywhere.
 
 | Situation | Use |
 |---|---|
-| C++ `hipo4` has to read the file | `Lz4` (or `Gzip` for a tighter, slower file) |
-| Archival with `hipo4` compatibility, size matters | `Lz4Best` (needs the `lz4-c` feature) |
-| Rust/Python-only, analysis touches a few banks | **`Lz4PerBank`** |
-| Rust/Python-only, you read a few *columns* — or want the best ratio | **`Lz4PerColumn`** |
+| **Default** — Rust/Python-only | **`Zstd × PerColumn`** |
+| Every byte matters, write cost does not | `Gzip × PerColumn` (2.32×) |
+| Writing is the bottleneck | `Lz4 × PerColumn` (0.43 s, still 1.83×) |
+| C++ `hipo4` has to read the file | `Lz4 × PerChunk`, or `Gzip × PerChunk` for a tighter, slower file |
+| `hipo4`-compatible archival, size matters | `Lz4Hc × PerChunk` (needs the `lz4-c` feature) |
+| `hipo-cpp`/`hipo-java` split-codec branches | `Lz4Hc × PerBank` or `Lz4Hc × PerColumn` |
 
-`Chain::skim` (and Python `skim`) default to `Lz4PerColumn`: the best ratio and
-the finest selective reads, at the cost of a slower one-time write. Drop to
-`Lz4PerBank` if you'd rather write faster and still only inflate the banks you
-read.
+```rust
+use oxihipo::{Chain, Codec, Compression, Layout};
+
+# fn main() -> oxihipo::Result<()> {
+Chain::open("run.hipo")?
+    .skim("small.hipo", Compression::new(Codec::Zstd, Layout::PerColumn))?;
+# Ok(()) }
+```
+
+**Pick the layout first.** It is worth an order of magnitude on selective reads
+— 28–35 ms against 349–370 ms — where the codec is worth tens of percent on
+size. `PerColumn` unless you have a reason.
+
+Then pick the codec on write cost, since all three `PerColumn` codecs read a
+column at about the same speed: `Zstd` (0.72 s, 2.22×) is the balance, `Lz4`
+(0.43 s, 1.83×) if writes dominate, `Gzip` (2.58 s, 2.32×) if bytes do.
+`Lz4Hc × PerColumn` is now dominated by `Zstd × PerColumn` on every axis —
+bigger file, 10.7× slower write, same read — and is worth choosing only for
+compatibility with the `hipo-cpp`/`hipo-java` split-codec branches.
+
+`Chain::skim` (and Python `skim`) still default to `Lz4Hc × PerColumn`
+(`Compression::Lz4PerColumn`) so that a skimmed file stays readable by those
+branches. Pass `Zstd × PerColumn` explicitly when you do not need that.

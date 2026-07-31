@@ -53,26 +53,49 @@ lower the reader's resident memory.
 
 ## Choosing a compression
 
-```rust
-use oxihipo::Compression;
+Compression is a **(codec × layout) pair** — what squeezes the bytes, and what
+gets squeezed separately:
 
-Compression::None            // no compression
-Compression::Lz4             // stock, hipo4-compatible
-Compression::Lz4Best         // HC level (needs the `lz4-c` feature)
-Compression::Gzip            // stock, hipo4-compatible
-Compression::Lz4PerBank     // per-bank streams, lazy inflate
-Compression::Lz4PerColumn    // per-column streams, best ratio + finest reads
+```rust
+use oxihipo::{Codec, Compression, Layout};
+
+// Codec:  None | Lz4 | Lz4Hc | Gzip | Zstd
+// Layout: PerChunk | PerBank | PerColumn
+Compression::new(Codec::Zstd, Layout::PerColumn).with_zstd_level(3)
 ```
 
-`None`, `Lz4`, `Lz4Best`, and `Gzip` stay byte-compatible with the C++ `hipo4`
-reader. `Lz4PerBank` and `Lz4PerColumn` are **opt-in format extensions** with
-new compression tags that `hipo4` doesn't know about — use them for Rust-only
-(or oxihipo-Python-only) consumers.
+All 15 pairs work. The six that predate the matrix keep their old names as
+shorthand, and mean exactly what they always did:
 
-If you're deciding between them, read
-[Compression formats](../performance/compression.md) — the short version is that
-`Lz4PerBank` is usually the one you want, and `Lz4PerColumn` (what `skim`
-defaults to) squeezes the file smaller still.
+```rust
+use oxihipo::{Codec, Compression, Layout};
+
+Compression::None            // None  × PerChunk
+Compression::Lz4             // Lz4   × PerChunk   — stock, hipo4-compatible
+Compression::Lz4Best         // Lz4Hc × PerChunk   — needs the `lz4-c` feature
+Compression::Gzip            // Gzip  × PerChunk   — stock, hipo4-compatible
+Compression::Lz4PerBank      // Lz4Hc × PerBank
+Compression::Lz4PerColumn    // Lz4Hc × PerColumn  — what `skim` defaults to
+assert_eq!(Compression::Lz4PerColumn, Compression::new(Codec::Lz4Hc, Layout::PerColumn));
+```
+
+**Pick the layout first** — it decides selective-read speed, and is worth an
+order of magnitude where the codec is worth tens of percent on size. `PerChunk`
+must inflate a whole record to reach any bank in it; `PerBank` and `PerColumn`
+inflate only what you touch.
+
+**Then pick the codec on write cost.** `Zstd × PerColumn` is the best default:
+smaller than `Lz4Hc × PerColumn` and **10.7× faster to write**. Use `Lz4` if
+writes dominate, `Gzip` if bytes do.
+
+Only the four `PerChunk` codecs are byte-compatible with the C++ `hipo4`
+reader; `Lz4Hc × PerBank` and `Lz4Hc × PerColumn` are readable by the
+`feature/bybank-bycolumn-compression` branches of `hipo-cpp` and `hipo-java`.
+The other nine pairs are oxihipo extensions those readers reject as an unknown
+tag — use them for Rust-only (or oxihipo-Python-only) consumers.
+
+The measured matrix of all fifteen is in
+[Compression formats](../performance/compression.md).
 
 ## Tagging events
 

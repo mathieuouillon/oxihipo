@@ -400,48 +400,90 @@ stores **one LZ4 block per record**, so reading any bank inflates *every* bank.
 Two opt-in format extensions fix that by storing sub-record streams and inflating
 only what an analysis touches:
 
-- **`Compression::Lz4PerBank`** — one LZ4-HC stream per bank type, plus a
-  compressed presence directory. `ev.bank("REC::Particle")` inflates only that
-  bank's stream; untouched banks stay compressed. No reader-side code change.
-- **`Compression::Lz4PerColumn`** — one LZ4-HC stream per `(bank, column)`,
-  cross-event contiguous. Reads at *column* granularity and compresses better
-  than a bank's interleaved bytes, so it beats `Lz4PerBank` on both size and
-  selective reads. It's what `skim` defaults to.
+`Compression` is a **(codec × layout) pair**, not a flat list of formats:
 
-Both carry Rust-only wire tags the C++ `hipo4` reader can't read (the stock
-`None` / `Lz4` / `Lz4Best` / `Gzip` codecs stay compatible).
+```rust
+use oxihipo::{Codec, Compression, Layout};
 
-The released C++ `hipo4` and Java readers do not know tags 6 and 7, but the
-`feature/bybank-bycolumn-compression` branches of
+Compression::new(Codec::Zstd, Layout::PerColumn).with_zstd_level(3)
+```
+
+- **`Codec`** — what squeezes the bytes: `None`, `Lz4`, `Lz4Hc`, `Gzip`,
+  `Zstd` (levels 1–6).
+- **`Layout`** — what gets squeezed separately: `PerChunk` (one stream for the
+  whole record — the stock HIPO shape), `PerBank` (one per bank type, so
+  `ev.bank(…)` inflates only that bank), `PerColumn` (one per `(bank, column)`,
+  cross-event contiguous).
+
+All 15 pairs work. The six that predate the matrix keep their names —
+`Compression::Lz4PerColumn` is `Lz4Hc × PerColumn`, and still means that.
+
+### The matrix, measured
+
+248 MB of a real CLAS12 DST, 599k events, Apple M4 Pro, single thread, warm
+cache. Best-of-3, reps interleaved across cells. `scan all` reads a value from
+every bank of every event; `scan 1 col` reads one column across the file
+through `read_columns`. Every cell checksums identically —
+`cargo run --release --example bench_compression -- <file>`:
+
+| codec | layout | size | ratio | write | scan all | **scan 1 col** |
+|---|---|--:|--:|--:|--:|--:|
+| `None` | PerChunk | 248 MB | 1.00× | 0.14 s | 77 ms | 36 ms |
+| `None` | PerBank | 228 MB | 1.09× | 0.18 s | 95 ms | 38 ms |
+| `None` | PerColumn | 228 MB | 1.09× | 0.24 s | 113 ms | 32 ms |
+| `Lz4` | PerChunk | 146 MB | 1.70× | 0.33 s | 120 ms | 78 ms |
+| `Lz4` | PerBank | 142 MB | 1.75× | 0.38 s | 125 ms | 69 ms |
+| `Lz4` | PerColumn | 136 MB | 1.83× | **0.43 s** | 110 ms | **28 ms** |
+| `Lz4Hc` | PerChunk | 126 MB | 1.96× | 6.07 s | 109 ms | 64 ms |
+| `Lz4Hc` | PerBank | 126 MB | 1.97× | 5.67 s | 125 ms | 66 ms |
+| `Lz4Hc` | PerColumn | 122 MB | 2.03× | 7.73 s | 116 ms | 32 ms |
+| `Gzip` | PerChunk | 117 MB | 2.12× | 2.37 s | 416 ms | 370 ms |
+| `Gzip` | PerBank | 116 MB | 2.14× | 2.35 s | 421 ms | 349 ms |
+| `Gzip` | PerColumn | **107 MB** | **2.32×** | 2.58 s | 112 ms | 30 ms |
+| `Zstd` | PerChunk | 124 MB | 2.00× | 0.75 s | 228 ms | 184 ms |
+| `Zstd` | PerBank | 121 MB | 2.05× | 0.80 s | 231 ms | 168 ms |
+| **`Zstd`** | **PerColumn** | **112 MB** | **2.22×** | **0.72 s** | 118 ms | **35 ms** |
+
+Three things the matrix makes obvious:
+
+**The layout decides the selective read, not the codec.** Every `PerColumn`
+cell reads one column in 28–35 ms regardless of codec — even `Gzip`, which
+takes 349–370 ms in the same codec on the whole-record layouts. A `PerChunk`
+codec must inflate everything to reach anything; that is the whole point of
+the split layouts, and it dwarfs the codec choice.
+
+**`Zstd × PerColumn` is the best default.** It is smaller than `Lz4Hc ×
+PerColumn` (2.22× against 2.03×), reads a column just as fast, and writes in
+0.72 s where LZ4-HC takes 7.73 s — **10.7× faster to write** for a *smaller*
+file. If you were reaching for `Lz4PerColumn`, reach for this instead.
+
+**`Gzip × PerColumn` still wins on size** (2.32×) if bytes are what you are
+paying for, at 3.6× the write cost of Zstd. Plain `Lz4 × PerColumn` is the
+fastest to write of any compressing cell (0.43 s) and still beats every
+whole-record codec on selective reads.
+
+### Cross-implementation compatibility
+
+Only the six pairs that predate the matrix have wire tags `hipo-cpp` and
+`hipo-java` know: the four `PerChunk` codecs (`None`/`Lz4`/`Lz4Hc`/`Gzip`)
+plus `Lz4Hc × PerBank` and `Lz4Hc × PerColumn`. The other nine are oxihipo
+extensions those readers reject as an unknown tag.
+
+For the two split tags, the released C++ and Java readers do not know them, but
+the `feature/bybank-bycolumn-compression` branches of
 [`hipo-cpp`](https://code.jlab.org/hallb/clas12/hipo-cpp) and
 [`hipo-java`](https://code.jlab.org/hallb/clas12/hipo-java) implement them, and
 all three libraries produce identical checksums on the same files. Their
 on-disk `ext_format_version` — 2 for by-bank, 1 for by-column — is therefore a
 cross-implementation contract. **0.7.0 bumped it and broke both; 0.7.1 puts it
-back.** Composite banks already written to a split-codec file by 0.6.0 or
-earlier cannot be recovered — re-convert from the original. See
+back.** The split-record directory stays LZ4 whatever the stream codec, so
+those two tags remain byte-compatible. Composite banks already written to a
+split-codec file by 0.6.0 or earlier cannot be recovered — re-convert from the
+original. See
 [Format versions](https://mathieuouillon.github.io/oxihipo/docs/performance/compression#format-versions-and-cross-version-compatibility).
 
-Every format, on 50k events of a real CLAS12 file (274 banks; Apple M4 Pro,
-single thread, warm cache). `Ratio` is file size vs `None`; `sel`/`all` are the
-ms to read one bank / all 274:
-
-| Format | Size MB | Ratio | sel (1 bk) | all (274) |
-|---|--:|--:|--:|--:|
-| `None` | 1734 | 1.00× | 158 | 1589 |
-| `Lz4` | 1081 | 0.62× | 396 | 1817 |
-| `Lz4Best` | 922 | 0.53× | 395 | 1826 |
-| `Gzip` | 852 | 0.49× | 2878 | 4348 |
-| **`Lz4PerBank`** | 872 | 0.50× | **86** | 1529 |
-| **`Lz4PerColumn`** | **813** | **0.47×** | **75** | **1280** |
-
-`Lz4PerColumn` is the **smallest file** (beating even Gzip) *and* the **fastest
-read at every scope** — one bank is ~5× faster than whole-record `Lz4` because it
-inflates only that bank's columns. `Gzip` packs tightly but is an order of
-magnitude slower to inflate. The same win reaches Python: `arrays("REC::Particle")`
-is ~4× faster on the per-bank/per-column formats than on `Lz4`. And on a 29.7 GB
-ifarm skim (parallel, Lustre) the by-bank format hit **36.6 Mev/s — 25× the `Lz4`
-baseline**.
+On a 29.7 GB ifarm skim (parallel, Lustre) the by-bank format hit **36.6 Mev/s
+— 25× the `Lz4` baseline**.
 
 Reproduce (both benchmarks read the same per-format files):
 
