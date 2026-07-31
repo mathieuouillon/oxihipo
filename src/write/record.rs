@@ -33,7 +33,7 @@ use crate::wire::record_header::RecordHeader;
 /// that predate this matrix — the whole-record codecs and the two LZ4-HC split
 /// codecs — are readable by `hipo-cpp` and `hipo-java`; the rest are oxihipo
 /// extensions those readers reject as an unknown tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Compression {
     codec: Codec,
     layout: Layout,
@@ -108,6 +108,42 @@ impl Compression {
     /// Wire-level compression tag written into the record header.
     pub(crate) const fn wire_tag(self) -> CompressionType {
         CompressionType::for_pair(self.codec, self.layout)
+    }
+}
+
+/// `lz4hc+perbank`, `zstd3+percolumn` — the same grammar the Python binding
+/// accepts, so `format!("{c:?}")` round-trips back through it.
+///
+/// Hand-written rather than derived. The derive prints
+/// `Compression { codec: Lz4Hc, layout: PerBank, zstd_level: 3 }`, which is
+/// noise in a log and — found by CI on Windows, where a test used it as a
+/// filename — contains `{`, `}` and `:`, none of which are legal there.
+impl std::fmt::Debug for Compression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let codec = match self.codec {
+            Codec::None => "none",
+            Codec::Lz4 => "lz4",
+            Codec::Lz4Hc => "lz4hc",
+            Codec::Gzip => "gzip",
+            Codec::Zstd => {
+                return write!(f, "zstd{}+{}", self.zstd_level, layout_name(self.layout));
+            }
+        };
+        write!(f, "{codec}+{}", layout_name(self.layout))
+    }
+}
+
+impl std::fmt::Display for Compression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+const fn layout_name(l: Layout) -> &'static str {
+    match l {
+        Layout::PerChunk => "perchunk",
+        Layout::PerBank => "perbank",
+        Layout::PerColumn => "percolumn",
     }
 }
 

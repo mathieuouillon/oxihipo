@@ -39,6 +39,10 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   (`"lz4percolumn"` is `lz4hc+percolumn`, not `lz4+percolumn` — the split
   codecs were always high-compression). An unknown name lists what is valid;
   a zstd level outside 1-6 is an error rather than a silent clamp.
+- **`Compression` prints as `lz4hc+perbank` / `zstd3+percolumn`** — the same
+  grammar the Python binding accepts, so `format!("{c:?}")` round-trips back
+  through it. The derived `Debug` printed a struct dump containing `{`, `}` and
+  `:`, which is noise in a log and illegal in a Windows filename.
 
 ### Fixed
 

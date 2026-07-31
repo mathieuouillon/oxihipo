@@ -132,8 +132,15 @@ jobs:
   # The 13 py/examples/*.py are the first thing a new user runs, and nothing
   # executed them — the Rust examples have had a smoke-run for ages. Each is
   # written to work against the bundled sample with no arguments.
-  python-examples:
-    name: smoke-run python examples
+  # The binding is built here *and* its test suite run. Building alone is not
+  # enough: a commit once deleted six `ColumnData::push_*` methods that only
+  # `py/` uses, and the wheel build caught it — but the Python tests, which
+  # were not run at all, are what pin the binding's *behaviour*. `cargo test`
+  # at the repo root does not build `py/`, and `cargo test` inside `py/`
+  # cannot link, because pyo3's `extension-module` is unconditional there.
+  # pytest is the only gate this crate's logic has.
+  python:
+    name: python binding (tests + examples)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -146,9 +153,13 @@ jobs:
           key: py-examples
       - name: Build and install the binding
         run: |
-          python -m pip install --upgrade pip maturin -q
+          python -m pip install --upgrade pip maturin pytest -q
           (cd py && maturin build --release --out dist)
           python -m pip install -q py/dist/*.whl
+      - name: Clippy the binding
+        run: cargo clippy --manifest-path py/Cargo.toml --all-targets
+      - name: Run the test suite
+        run: python -m pytest py/tests -q
       - name: Run every example
         run: |
           fail=0
