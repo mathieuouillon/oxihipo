@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::compress::decompress;
+use crate::compress::{decompress, decompress_into_slice};
 use crate::error::{HipoError, Result};
 use crate::wire::bytes::{Endianness, read_u32_le};
 use crate::wire::constants::{CompressionType, EXT_FORMAT_ACCEPT_BY_BANK};
@@ -23,12 +23,26 @@ use crate::wire::record_header::RecordHeader;
 /// hands this an owned copy of just the compressed section, so a live
 /// record costs one section's worth of bytes — not a whole-file mapping.
 #[derive(Debug)]
-struct Backing(Box<[u8]>);
+struct Backing {
+    buf: Box<[u8]>,
+    off: usize,
+    len: usize,
+}
 
 impl Backing {
+    /// The compressed section. `off`/`len` exist so the whole record buffer
+    /// can be moved in without copying the section out of it — see
+    /// `parse_owned`. When the section *is* the whole buffer, `off` is 0.
+    ///
+    /// The upper bound is load-bearing for corruption rejection, not for
+    /// valid files: `len` excludes the record's alignment padding, and the
+    /// parser's `streams_off > section.len()` checks are only as tight as
+    /// this slice. Widening it to `self.off..` lets a crafted record place a
+    /// stream inside the padding and pass a check it should fail. No current
+    /// test constructs that record, so this is stated rather than pinned.
     #[inline]
     fn section(&self) -> &[u8] {
-        &self.0
+        &self.buf[self.off..self.off + self.len]
     }
 }
 
@@ -128,8 +142,35 @@ impl ByBankRecord {
         let section = &src[section_off..section_off + section_len];
         Self::parse_section(
             header,
-            section,
-            Backing(section.to_vec().into_boxed_slice()),
+            Backing {
+                buf: section.to_vec().into_boxed_slice(),
+                off: 0,
+                len: section_len,
+            },
+        )
+    }
+
+    /// Parse a record from a buffer it **takes ownership of**, keeping the
+    /// whole buffer rather than copying the compressed section out of it.
+    ///
+    /// [`Self::parse`] copies the section — 4 MB per record on a real CLAS12
+    /// DST — because its caller still needs the buffer afterwards. Callers
+    /// whose buffer is dead after the call should use this instead: measured
+    /// 12% off a selective split-codec scan.
+    ///
+    /// The section is located by `off`/`len` inside the retained buffer, so
+    /// the record header bytes ride along. That is a few dozen bytes against
+    /// the megabytes the copy cost.
+    pub fn parse_owned(src: Vec<u8>) -> Result<Arc<Self>> {
+        let header = Self::check_header(&src)?;
+        let (section_off, section_len) = Self::section_bounds(&header, src.len())?;
+        Self::parse_section(
+            header,
+            Backing {
+                buf: src.into_boxed_slice(),
+                off: section_off,
+                len: section_len,
+            },
         )
     }
 
@@ -184,18 +225,17 @@ impl ByBankRecord {
         Ok((header_len, section_len))
     }
 
-    fn parse_section(header: RecordHeader, section: &[u8], backing: Backing) -> Result<Arc<Self>> {
+    fn parse_section(header: RecordHeader, backing: Backing) -> Result<Arc<Self>> {
         // `check_header` guarantees a by-bank tag, which is only `Lz4PerBank`.
-        Self::parse_section_v2(header, section, backing)
+        Self::parse_section_v2(header, backing)
     }
 
     /// v2 layout: `[u8 ver=2, u8×3 reserved, u32 B, u32 E, u32 dir_comp,
     /// u32 dir_decomp, LZ4(directory), bank streams]`.
-    fn parse_section_v2(
-        header: RecordHeader,
-        section: &[u8],
-        backing: Backing,
-    ) -> Result<Arc<Self>> {
+    fn parse_section_v2(header: RecordHeader, backing: Backing) -> Result<Arc<Self>> {
+        // Borrowed from `backing`, which is moved into `Self` at the end —
+        // every use of `section` precedes that move.
+        let section = backing.section();
         if section.len() < 20 {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
@@ -280,15 +320,7 @@ impl ByBankRecord {
             buf.truncate(dir_decomp_len);
             buf
         };
-        Self::from_directory(
-            header,
-            section,
-            backing,
-            num_banks,
-            event_count,
-            &dir,
-            streams_off,
-        )
+        Self::from_directory(header, backing, num_banks, event_count, &dir, streams_off)
     }
 
     /// Parse the directory *body* (descriptors at offset 0 of `dir`) and
@@ -298,13 +330,16 @@ impl ByBankRecord {
     #[allow(clippy::too_many_arguments)]
     fn from_directory(
         header: RecordHeader,
-        section: &[u8],
         backing: Backing,
         num_banks: usize,
         event_count: u32,
         dir: &[u8],
         streams_off: usize,
     ) -> Result<Arc<Self>> {
+        // Derived here rather than passed in: `backing` is moved into `Self`
+        // at the end of this function, so a `section` borrow handed down from
+        // the caller would still be live at the move.
+        let section = backing.section();
         let dir_body_len = directory_body_len(num_banks, event_count)?;
         if dir.len() < dir_body_len {
             return Err(HipoError::CorruptRecord {
@@ -506,11 +541,14 @@ impl ByBankRecord {
             // Empty stream → empty payload, no decompression needed.
             let _ = self.bank_data[b].set(Box::new([]));
         } else {
-            let mut out: Vec<u8> = Vec::with_capacity(expected);
-            decompress(CompressionType::Lz4, src, &mut out, expected)?;
-            // Trim to expected size (decompress may write the slack).
-            out.truncate(expected);
-            let _ = self.bank_data[b].set(out.into_boxed_slice());
+            // `decompress` clears `out` and `reserve_exact`s to
+            // `max(expected*2, src.len()*32)`, so a `with_capacity(expected)`
+            // was dead on arrival, and `into_boxed_slice()` then reallocated
+            // and memcpy'd `expected` bytes to shrink it back. Decompressing
+            // straight into an exactly-sized box does neither.
+            let mut out: Box<[u8]> = vec![0u8; expected].into_boxed_slice();
+            decompress_into_slice(CompressionType::Lz4, src, &mut out)?;
+            let _ = self.bank_data[b].set(out);
         }
         // Safe: we just set it.
         Ok(self.bank_data[b]

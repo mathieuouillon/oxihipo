@@ -91,6 +91,15 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
 
 ### Fixed
 
+- **The split codecs copied and re-copied on every record.** `parse` copied
+  the compressed section out of the caller's buffer (4 MB per record on a real
+  DST), and the lazy stream inflate allocated a `Vec`, let `decompress`
+  reallocate it, then reallocated *again* to shrink it back to a `Box<[u8]>`.
+  New `parse_owned` takes the buffer where the caller is done with it, and the
+  inflate decompresses straight into an exactly-sized box. Measured on real
+  re-encoded CLAS12 data: full scans **176.5 -> 148.1 ns/event on `Lz4PerBank`
+  (-16%)** and 72.4 -> 69.5 on `Lz4PerColumn` (-4%); random access +13% and
+  +15%. Plain `Lz4` — what a stock DST uses — is unchanged.
 - **Decode errors were unattributable.** 58 of 73 construction sites pass
   `offset: 0`, so a corrupt record in the middle of a multi-gigabyte chain
   reported `corrupt record at offset 0x0` — pointing at the file header — with

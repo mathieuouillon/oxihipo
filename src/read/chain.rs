@@ -529,10 +529,17 @@ impl Chain {
                 let span = &inner.index.records()[rec_idx];
                 let mut raw = Vec::new();
                 let header = inner.read_record_into(span.file_offset, &mut raw).ok()?;
+                // `parse_owned`, not `parse`: `raw` is freshly allocated
+                // just above and dead after this, so handing the buffer over
+                // saves copying the compressed section out of it — 4 MB per
+                // record on a real CLAS12 DST. The recycled-buffer callers
+                // (`for_each_column`, the columnar and occupancy scans) must
+                // stay on `parse`, where giving the buffer away would trade a
+                // memcpy for a fresh allocation per record.
                 let decoded = Arc::new(if header.compression.is_by_bank() {
-                    CachedRecord::ByBank(ByBankRecord::parse(&raw).ok()?)
+                    CachedRecord::ByBank(ByBankRecord::parse_owned(raw).ok()?)
                 } else if header.compression.is_per_column() {
-                    CachedRecord::PerColumn(PerColumnRecord::parse(&raw).ok()?)
+                    CachedRecord::PerColumn(PerColumnRecord::parse_owned(raw).ok()?)
                 } else {
                     let mut payload = Vec::new();
                     let mut offsets = Vec::new();
