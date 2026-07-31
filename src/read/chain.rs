@@ -1813,7 +1813,10 @@ fn union_dict(files: &[Arc<FileInner>]) -> Result<Dict> {
                     owner,
                 )));
             }
-            let stored = union.add(schema.clone());
+            // `try_add`, not `add`: these schemas come from files, so a long
+            // chain of corrupt dictionaries could exhaust the u16 id space —
+            // and this function can already report failure.
+            let stored = union.try_add(schema.clone())?;
             ids.insert((stored.group(), stored.item()), schema.name());
         }
     }

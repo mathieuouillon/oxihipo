@@ -307,3 +307,121 @@ fn big_endian_random_access_and_columns() {
     assert_eq!(cb.offsets.len() as i64, N_EVENTS + 1);
     assert_eq!(cb.columns.len(), 1);
 }
+
+/// The split codecs must **reject** a big-endian record, not decode it as
+/// little-endian.
+///
+/// The transcoder above is only wired to `Compression::None` — line 51 is this
+/// file's sole `.compression(...)` call — so until now no big-endian test
+/// touched `Lz4`, `Gzip`, or either split codec. That matters because
+/// `wire/endian.rs` is wired into the whole-record paths only
+/// (`decode_record_into`, `Record::load_with_header`); neither
+/// `ByBankRecord::parse` nor `PerColumnRecord::parse` goes through them, and
+/// every field of a split section is read with `read_u32_le` unconditionally.
+///
+/// `RecordHeader::parse` accepts the big-endian magic, so such a record used
+/// to reach the split parsers with `endianness == Big`. It did not actually
+/// mis-parse — an unrelated `event_count` cross-check happened to stop it —
+/// but it stopped for the wrong reason and reported the wrong cause. Now the
+/// refusal is explicit.
+///
+/// Nothing can write such a file: only oxihipo emits tags 6 and 7, always
+/// little-endian. The record here is built by byte-swapping a real record
+/// header word for word, which is precisely what a big-endian writer would
+/// have produced for the header.
+#[test]
+fn split_codecs_reject_a_big_endian_record() {
+    const RH_MAGIC_OFFSET: usize = 28;
+    const RH_COMP_WORD: usize = 36;
+    const RH_USER_WORD1: usize = 40; // u64
+    const RH_USER_WORD2: usize = 48; // u64
+    const RECORD_HEADER_SIZE: usize = 56;
+    const MAGIC_LE: [u8; 4] = [0x00, 0x01, 0xda, 0xc0]; // 0xc0da_0100
+
+    for (label, compression) in [
+        ("Lz4PerBank", Compression::Lz4PerBank),
+        ("Lz4PerColumn", Compression::Lz4PerColumn),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("be.hipo");
+        let d = dict();
+        let mut w = Writer::create(&path)
+            .schemas(&d)
+            .compression(compression)
+            .max_record_events(5)
+            .build()
+            .unwrap();
+        for evno in 0..N_EVENTS {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| r.set("evno", evno).map(|_| ()))?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+
+        // Rewrite each *data* record header the way a big-endian writer
+        // would: the ten u32 fields byte-swapped in place, and the two
+        // trailing u64 user words swapped as 8-byte units — a uniform u32
+        // swap would corrupt those and the header would not read back. The
+        // magic sits in the u32 range, so swapping it is what flips the
+        // marker to big-endian and gets the record past the compression-tag
+        // check and on to the new guard.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut patched = 0usize;
+        let mut i = 0usize;
+        while i + 4 <= bytes.len() {
+            if bytes[i..i + 4] == MAGIC_LE && i >= RH_MAGIC_OFFSET {
+                let hdr = i - RH_MAGIC_OFFSET;
+                if hdr + RECORD_HEADER_SIZE <= bytes.len() {
+                    // Only the data records carry the split tag; this skips
+                    // the file header and the dictionary record.
+                    let comp = u32::from_le_bytes(
+                        bytes[hdr + RH_COMP_WORD..hdr + RH_COMP_WORD + 4]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    let codec = (comp >> 28) & 0xF;
+                    if codec == 6 || codec == 7 {
+                        for off in (0..RH_USER_WORD1).step_by(4) {
+                            let o = hdr + off;
+                            bytes[o..o + 4].reverse();
+                        }
+                        for off in [RH_USER_WORD1, RH_USER_WORD2] {
+                            let o = hdr + off;
+                            bytes[o..o + 8].reverse();
+                        }
+                        patched += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        assert!(
+            patched > 0,
+            "{label}: no split-codec record header was found, so nothing was exercised"
+        );
+        std::fs::write(&path, &bytes).unwrap();
+
+        // Opening may or may not survive the mangled index; what must never
+        // happen is a successful decode of a big-endian split record.
+        let msg = match Chain::open(&path) {
+            Err(e) => e.to_string(),
+            Ok(chain) => match chain.events().find_map(Result::err) {
+                Some(e) => e.to_string(),
+                None => panic!("{label}: a big-endian split record decoded successfully"),
+            },
+        };
+        assert!(
+            msg.contains("big-endian records are not supported"),
+            "{label}: expected the explicit endianness refusal, got: {msg}"
+        );
+        assert!(
+            msg.contains(label),
+            "{label}: error should name the codec: {msg}"
+        );
+    }
+}

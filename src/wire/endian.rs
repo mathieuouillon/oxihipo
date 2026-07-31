@@ -11,6 +11,17 @@
 //! A little-endian file — every file any current HIPO writer produces — pays
 //! exactly one `if` per record and never enters this module.
 //!
+//! # Which decode paths honour this
+//!
+//! Only the whole-record ones: `decode_record_into` and
+//! `Record::load_with_header`, both in [`crate::wire::record`]. The **split
+//! codecs do not.** `ByBankRecord` and `PerColumnRecord` read a directory plus
+//! per-bank LZ4 streams rather than a flat event stream, so this normalizer has
+//! nothing to walk, and every field there is read with `read_u32_le`
+//! unconditionally. They therefore **reject** a big-endian record in
+//! `check_header` instead of normalizing it. That forecloses nothing real: only
+//! oxihipo emits tags 6 and 7, and always little-endian.
+//!
 //! What gets swapped, in payload order:
 //!
 //! - the index array (`event_count` × `u32` event lengths);

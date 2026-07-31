@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::compress::decompress;
 use crate::error::{HipoError, Result};
-use crate::wire::bytes::read_u32_le;
+use crate::wire::bytes::{Endianness, read_u32_le};
 use crate::wire::constants::CompressionType;
 use crate::wire::record_header::RecordHeader;
 
@@ -137,6 +137,22 @@ impl PerColumnRecord {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "PerColumnRecord::parse called on a non-per-column record",
+            });
+        }
+        // Every field of a split-codec section is read with `read_u32_le`,
+        // and the big-endian normalizer is wired only into the whole-record
+        // paths (`wire/record.rs`), never here — so a big-endian record would
+        // be decoded as little-endian. Refuse it rather than produce a
+        // plausible wrong parse.
+        //
+        // Only oxihipo writes tags 6/7 and always little-endian, so this is
+        // not reachable from any file in the wild. Today such a record happens
+        // to be stopped a few checks later by an `event_count` mismatch, which
+        // is an accident of the numbers and reports the wrong cause.
+        if !matches!(header.endianness, Endianness::Little) {
+            return Err(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "Lz4PerColumn: big-endian records are not supported by the split codecs",
             });
         }
         if src.len() < header.total_bytes() as usize {

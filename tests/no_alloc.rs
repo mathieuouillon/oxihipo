@@ -107,8 +107,25 @@ fn build_fixture(path: &std::path::Path, events: i32, max_record_events: u32) {
     build_fixture_with(path, events, max_record_events, oxihipo::Compression::Lz4);
 }
 
+/// Serialises the counting windows.
+///
+/// The gate (`COUNTING`) is thread-local but the counter (`ALLOCS`) is global,
+/// so two windows open at once on different threads clobber each other: one
+/// test's `store(0)` zeroes the other's running total, and each attributes the
+/// other's allocations to itself. `cargo test` runs the tests in this file on
+/// separate threads, so that is not hypothetical — it surfaced as
+/// `column_iter_and_read_into_are_alloc_free_on_a_mixed_width_bank` failing
+/// once a third counting test was added, having passed with two purely by
+/// luck of scheduling.
+///
+/// Taken *before* arming the gate, so the lock's own bookkeeping is never
+/// counted. Poisoning is ignored: a panicking test has already failed, and its
+/// leftover count is discarded by the next `store(0)` anyway.
+static COUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Run a closure with allocation counting enabled; returns the count.
 fn count_allocs<F: FnOnce()>(f: F) -> usize {
+    let _guard = COUNT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ALLOCS.store(0, Ordering::Relaxed);
     COUNTING.with(|c| c.set(true));
     f();
