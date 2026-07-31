@@ -97,10 +97,7 @@ pub enum HipoError {
          uncompressed (`Compression::None`) records can be patched in place; rewrite \
          with `skim_tagged` instead"
     )]
-    InPlaceTagUnsupported {
-        offset: u64,
-        compression: &'static str,
-    },
+    InPlaceTagUnsupported { offset: u64, compression: String },
 
     #[error(
         "`for_each_column({bank:?}, {column:?})` cannot be used on a filtered chain: it sweeps \

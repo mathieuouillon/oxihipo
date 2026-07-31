@@ -50,6 +50,7 @@ pub use crate::read::{
 };
 pub use crate::schema::{BankPatterns, ColumnHandle, DataType, Dict, Schema, SchemaEntry};
 pub use crate::tag::{TagRegistry, TagSet};
+pub use crate::wire::constants::{Codec, Layout};
 pub use crate::write::{BankWriter, Compression, RowWriter, WriteSummary, Writer};
 // `Chain::file_header` returns a `&FileHeader` whose `endianness` field is an
 // `Endianness`, and both lived behind the private `wire` module. A caller could

@@ -547,7 +547,10 @@ impl ByBankRecord {
             // and memcpy'd `expected` bytes to shrink it back. Decompressing
             // straight into an exactly-sized box does neither.
             let mut out: Box<[u8]> = vec![0u8; expected].into_boxed_slice();
-            decompress_into_slice(CompressionType::Lz4, src, &mut out)?;
+            // The record's own tag, so a Zstd/Gzip/None split record inflates
+            // with the codec it was written with. The *directory* above stays
+            // LZ4 for every split tag — see the writer.
+            decompress_into_slice(self.header.compression, src, &mut out)?;
             let _ = self.bank_data[b].set(out);
         }
         // Safe: we just set it.

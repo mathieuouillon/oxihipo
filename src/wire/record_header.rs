@@ -256,20 +256,48 @@ mod tests {
     }
 
     #[test]
-    fn rejects_removed_compression_tags() {
-        // Tags 4 (`Lz4Chunked`) and 5 (`Lz4ByBank` v1) were removed; a record
-        // carrying either must be rejected at header parse rather than
-        // silently misread.
-        for tag in [4u32, 5u32] {
+    fn reclaimed_tags_4_and_5_are_zstd_and_only_15_is_unassigned() {
+        use crate::wire::constants::{Codec, Layout};
+
+        // Tags 4 and 5 carried `Lz4Chunked` and `Lz4ByBank` v1, both removed
+        // during 0.x and rejected at parse ever since. They now carry Zstd.
+        //
+        // Reusing a tag is only safe if a stale file fails *loudly*, and this
+        // is why Zstd went into these two slots specifically: a zstd frame
+        // begins with the magic 0xFD2FB528, so an old Lz4Chunked payload does
+        // not decode as anything — it fails the frame check. No other codec in
+        // these slots would have that property, which is what makes the reuse
+        // defensible rather than merely convenient.
+        for (tag, want) in [
+            (4u32, (Codec::Zstd, Layout::PerChunk)),
+            (5, (Codec::Zstd, Layout::PerBank)),
+        ] {
             let mut buf = [0u8; RECORD_HEADER_SIZE];
             sample().write(&mut buf);
-            // Overwrite just the compression-type nibble (top 4 bits of the
-            // compression word) with the removed tag.
             write_u32_le(&mut buf, RH_COMP_WORD, tag << COMP_TYPE_SHIFT);
-            let err = RecordHeader::parse(&buf).unwrap_err();
-            assert!(
-                matches!(err, HipoError::UnknownCompression(t) if t == tag),
-                "tag {tag} should be rejected as UnknownCompression, got {err:?}"
+            let h = RecordHeader::parse(&buf)
+                .unwrap_or_else(|e| panic!("tag {tag} should now parse: {e:?}"));
+            assert_eq!((h.compression.codec(), h.compression.layout()), want);
+        }
+
+        // 15 is the only tag left unassigned, and must still be rejected.
+        let mut buf = [0u8; RECORD_HEADER_SIZE];
+        sample().write(&mut buf);
+        write_u32_le(&mut buf, RH_COMP_WORD, 15u32 << COMP_TYPE_SHIFT);
+        let err = RecordHeader::parse(&buf).unwrap_err();
+        assert!(
+            matches!(err, HipoError::UnknownCompression(15)),
+            "tag 15 should be rejected, got {err:?}"
+        );
+
+        // Every one of the 15 assigned tags round-trips through the pair.
+        for tag in 0u8..15 {
+            let ct = crate::wire::constants::CompressionType::from_tag(tag)
+                .unwrap_or_else(|| panic!("tag {tag} should be assigned"));
+            assert_eq!(
+                crate::wire::constants::CompressionType::for_pair(ct.codec(), ct.layout()),
+                ct,
+                "tag {tag} does not round-trip through (codec, layout)"
             );
         }
     }

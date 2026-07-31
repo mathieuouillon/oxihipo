@@ -39,6 +39,7 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 # Cost: pulls in a C dependency. Enabled by default for speed; opt out
 # with `--no-default-features` if you want a pure-Rust build.
 lz4-sys = { version = "1.10", optional = true }
+zstd = "0.13.3"
 
 [features]
 default = ["lz4-c"]

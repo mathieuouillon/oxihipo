@@ -7,6 +7,33 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`Compression` is a (codec, layout) pair**, not a flat list of six named
+  combinations: `Codec::{None,Lz4,Lz4Hc,Gzip,Zstd}` x
+  `Layout::{PerChunk,PerBank,PerColumn}`. All **15** pairs have a wire tag and
+  round-trip. The six historical names survive as associated constants, so
+  `Compression::Lz4PerColumn` is still valid source at all 229 call sites and
+  still means exactly what it meant (`Lz4Hc` x `PerColumn`).
+- **Zstandard**, levels 1-6 via `Compression::with_zstd_level`. The level is a
+  writer-side knob and never reaches the wire — one tag decodes them all,
+  unlike LZ4/LZ4-HC which burn two. On a 248 MB real CLAS12 file,
+  `Zstd x PerColumn` is **2.22x** smaller and scans in **20.9 ms**, against
+  2.03x/28.2 ms for `Lz4Hc x PerColumn` and 2.32x/21.9 ms for
+  `Gzip x PerColumn` — but writes in 0.69 s where gzip takes 2.52 s and LZ4-HC
+  7.66 s.
+
+  Tags **4 and 5**, left poisoned when `Lz4Chunked` and `Lz4ByBank` v1 were
+  removed in 0.x, are reused for Zstd. That is safe specifically because a
+  zstd frame begins with the magic `0xFD2FB528`: a stale file carrying one of
+  those tags fails the frame check rather than decoding as something
+  plausible. Tag 15 is the only one left unassigned.
+
+  Only the six pairs that predate the matrix are readable by `hipo-cpp` and
+  `hipo-java`; the other nine are oxihipo extensions those readers reject as
+  an unknown tag. The split-record *directory* stays LZ4 for every layout so
+  tags 6 and 7 remain byte-compatible.
+
 ### Fixed
 
 - **`read_columns` handed back buffers carrying their growth slack.** Assembly

@@ -33,7 +33,7 @@ use crate::tag::TagRegistry;
 use crate::wire::by_bank::ByBankRecord;
 use crate::wire::bytes::write_u32_le;
 use crate::wire::constants::{
-    CompressionType, EH_SIZE, EH_TAG, EVENT_HEADER_SIZE, RECORD_HEADER_SIZE,
+    Codec, CompressionType, EH_SIZE, EH_TAG, EVENT_HEADER_SIZE, Layout, RECORD_HEADER_SIZE,
 };
 use crate::wire::per_column::PerColumnRecord;
 use crate::wire::record::{Record, decode_record_into};
@@ -2089,15 +2089,23 @@ fn union_dict(files: &[Arc<FileInner>]) -> Result<Dict> {
 }
 
 /// Lower-case wire name of a record compression, for error messages.
-fn compression_label(c: CompressionType) -> &'static str {
-    match c {
-        CompressionType::None => "none",
-        CompressionType::Lz4 => "lz4",
-        CompressionType::Lz4Best => "lz4best",
-        CompressionType::Gzip => "gzip",
-        CompressionType::Lz4PerBank => "lz4perbank",
-        CompressionType::Lz4PerColumn => "lz4percolumn",
-    }
+///
+/// Built from the (codec, layout) pair rather than a per-tag table, so a new
+/// tag cannot be added without a name: `lz4hc+perbank`, `zstd+perchunk`.
+fn compression_label(c: CompressionType) -> String {
+    let codec = match c.codec() {
+        Codec::None => "none",
+        Codec::Lz4 => "lz4",
+        Codec::Lz4Hc => "lz4hc",
+        Codec::Gzip => "gzip",
+        Codec::Zstd => "zstd",
+    };
+    let layout = match c.layout() {
+        Layout::PerChunk => "perchunk",
+        Layout::PerBank => "perbank",
+        Layout::PerColumn => "percolumn",
+    };
+    format!("{codec}+{layout}")
 }
 
 /// Positioned read. On Unix this is `pread` (no shared cursor). Elsewhere it

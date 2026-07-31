@@ -17,7 +17,7 @@
 use std::io::{Read, Write};
 
 use crate::error::{HipoError, Result};
-use crate::wire::constants::CompressionType;
+use crate::wire::constants::{Codec, CompressionType};
 
 // Apple's `libcompression` framework — FFI surface used for the
 // `lz4-apple` feature. macOS only; on other platforms the feature is a
@@ -71,8 +71,8 @@ const DECOMPRESS_SLACK: usize = 64 * 1024;
 /// split-codec directory parsers are exactly that case, which is why this is
 /// a named function rather than an expression inline below.
 pub(crate) fn max_plausible_decompressed(kind: CompressionType, comp_len: usize) -> usize {
-    match kind {
-        CompressionType::None => comp_len,
+    match kind.codec() {
+        Codec::None => comp_len,
         _ => comp_len
             .saturating_mul(1056)
             .saturating_add(DECOMPRESS_SLACK),
@@ -103,8 +103,8 @@ pub fn decompress(
         dst.reserve_exact(need - dst.capacity());
     }
 
-    match kind {
-        CompressionType::None => {
+    match kind.codec() {
+        Codec::None => {
             if src.len() < expected {
                 return Err(HipoError::DecompressUnderflow {
                     produced: src.len(),
@@ -114,10 +114,7 @@ pub fn decompress(
             dst.extend_from_slice(&src[..expected]);
             Ok(())
         }
-        CompressionType::Lz4
-        | CompressionType::Lz4Best
-        | CompressionType::Lz4PerBank
-        | CompressionType::Lz4PerColumn => {
+        Codec::Lz4 | Codec::Lz4Hc => {
             // The by-bank / per-column formats reach this point only when their
             // record decoders hand us a single inner LZ4 block; their
             // record-level wrappers always pass `Lz4` explicitly. Routing
@@ -228,7 +225,7 @@ pub fn decompress(
             unsafe { dst.set_len(produced) };
             Ok(())
         }
-        CompressionType::Gzip => {
+        Codec::Gzip => {
             // `read_to_end` appends inflated bytes into the pre-reserved
             // capacity, initializing only the bytes it actually reads (std uses
             // a `BorrowedBuf` internally) — sound *and* single-write: no
@@ -238,6 +235,23 @@ pub fn decompress(
             // `max_plausible` check bounds `expected`; this bounds the stream).
             let limit = (expected as u64).saturating_add(DECOMPRESS_SLACK as u64);
             let produced = flate2::read::GzDecoder::new(src)
+                .take(limit)
+                .read_to_end(dst)
+                .map_err(HipoError::Io)?;
+            if produced + DECOMPRESS_SLACK < expected {
+                return Err(HipoError::DecompressUnderflow { produced, expected });
+            }
+            Ok(())
+        }
+        Codec::Zstd => {
+            // Same shape as gzip: stream into the reserved capacity, bounded by
+            // `take` so a decompression bomb cannot grow `dst` without limit.
+            // A zstd frame begins with the magic 0xFD2FB528, so a mislabelled
+            // payload — notably a stale file carrying the reclaimed tag 4 or 5
+            // — fails here rather than producing plausible bytes.
+            let limit = (expected as u64).saturating_add(DECOMPRESS_SLACK as u64);
+            let produced = zstd::stream::read::Decoder::new(src)
+                .map_err(HipoError::Io)?
                 .take(limit)
                 .read_to_end(dst)
                 .map_err(HipoError::Io)?;
@@ -264,8 +278,8 @@ pub fn decompress(
 /// the expensive part of bringing one back.
 pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) -> Result<usize> {
     let expected = dst.len();
-    match kind {
-        CompressionType::None => {
+    match kind.codec() {
+        Codec::None => {
             if src.len() < expected {
                 return Err(HipoError::DecompressUnderflow {
                     produced: src.len(),
@@ -275,10 +289,7 @@ pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) 
             dst.copy_from_slice(&src[..expected]);
             Ok(expected)
         }
-        CompressionType::Lz4
-        | CompressionType::Lz4Best
-        | CompressionType::Lz4PerBank
-        | CompressionType::Lz4PerColumn => {
+        Codec::Lz4 | Codec::Lz4Hc => {
             if expected == 0 {
                 return Ok(0);
             }
@@ -332,7 +343,7 @@ pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) 
             }
             Ok(produced)
         }
-        CompressionType::Gzip => {
+        Codec::Gzip => {
             let mut decoder = flate2::read::GzDecoder::new(src);
             let mut filled = 0;
             while filled < expected {
@@ -347,20 +358,55 @@ pub fn decompress_into_slice(kind: CompressionType, src: &[u8], dst: &mut [u8]) 
             }
             Ok(filled)
         }
+        Codec::Zstd => {
+            // Bounded by `dst.len()`: `copy_to_slice`-style streaming into a
+            // fixed slice, then a length check, mirroring the LZ4 arm.
+            let mut d = zstd::stream::read::Decoder::new(src).map_err(HipoError::Io)?;
+            let mut filled = 0usize;
+            while filled < expected {
+                let n = d.read(&mut dst[filled..]).map_err(HipoError::Io)?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            if filled < expected {
+                return Err(HipoError::DecompressUnderflow {
+                    produced: filled,
+                    expected,
+                });
+            }
+            Ok(filled)
+        }
     }
 }
 
+/// Default zstd level when a caller does not name one. Level 3 is zstd's own
+/// default: roughly gzip's ratio at several times the speed.
+pub const ZSTD_DEFAULT_LEVEL: i32 = 3;
+
 /// Compress `src` into `dst`. Appends to `dst`; returns bytes written.
+///
+/// Zstd compresses at [`ZSTD_DEFAULT_LEVEL`]; use [`compress_at`] to choose.
 pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<usize> {
+    compress_at(kind, ZSTD_DEFAULT_LEVEL, src, dst)
+}
+
+/// [`compress`] with an explicit zstd level. Ignored by the other codecs —
+/// LZ4's two effort settings are separate wire tags, and gzip's level is not
+/// exposed.
+pub fn compress_at(
+    kind: CompressionType,
+    zstd_level: i32,
+    src: &[u8],
+    dst: &mut Vec<u8>,
+) -> Result<usize> {
     let start = dst.len();
-    match kind {
-        CompressionType::None => {
+    match kind.codec() {
+        Codec::None => {
             dst.extend_from_slice(src);
         }
-        CompressionType::Lz4
-        | CompressionType::Lz4Best
-        | CompressionType::Lz4PerBank
-        | CompressionType::Lz4PerColumn => {
+        Codec::Lz4 | Codec::Lz4Hc => {
             // The by-bank / per-column formats are record-level extensions;
             // their inner compression units still flow through this same
             // code path with `Lz4`/`Lz4Best`. The tags route here to keep the
@@ -398,7 +444,13 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
                 // destination — so no uninitialized byte is ever read and no
                 // reference over uninit memory exists.
                 let n = unsafe {
-                    if matches!(kind, CompressionType::Lz4Best) {
+                    // On the *codec*, not the tag. Testing `kind ==
+                    // Lz4Best` silently dropped the split codecs to plain LZ4
+                    // once they started passing their own tag here: a
+                    // `Lz4Hc x PerBank` record is tag 6, not tag 2, so HC was
+                    // never selected and the files came out the same size as
+                    // plain LZ4 — which a round-trip test cannot see.
+                    if matches!(kind.codec(), Codec::Lz4Hc) {
                         // Level 9 ≈ `LZ4HC_CLEVEL_OPT_MIN`, matching what
                         // CLAS12 / `hipo4` use.
                         lz4_sys::LZ4_compress_HC(
@@ -450,11 +502,15 @@ pub fn compress(kind: CompressionType, src: &[u8], dst: &mut Vec<u8>) -> Result<
             // initialized and within the allocation reserved above.
             unsafe { dst.set_len(start + n) };
         }
-        CompressionType::Gzip => {
+        Codec::Gzip => {
             let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             enc.write_all(src).map_err(HipoError::Io)?;
             let buf = enc.finish().map_err(HipoError::Io)?;
             dst.extend_from_slice(&buf);
+        }
+        Codec::Zstd => {
+            let out = zstd::stream::encode_all(src, zstd_level).map_err(HipoError::Io)?;
+            dst.extend_from_slice(&out);
         }
     }
     Ok(dst.len() - start)

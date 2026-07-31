@@ -7,7 +7,7 @@
 //! take up. [`Writer`](super::Writer) is the whole public write surface, and
 //! `Writer::write_record` is the escape hatch for a prebuilt record.
 
-use crate::compress::{ScratchBuf, compress};
+use crate::compress::{ScratchBuf, compress, compress_at};
 use crate::error::{HipoError, Result};
 use crate::event::Event;
 use crate::schema::Dict;
@@ -15,65 +15,105 @@ use crate::wire::bytes::{Endianness, write_u32_le};
 use crate::wire::constants::*;
 use crate::wire::record_header::RecordHeader;
 
-/// Compression mode for HIPO records.
+/// What squeezes the bytes, and how they are grouped first — a (codec, layout)
+/// pair rather than a flat list of named combinations.
 ///
-/// The wire-level compression tag is derived from this enum by the record
-/// builder.
+/// ```
+/// use oxihipo::{Codec, Compression, Layout};
 ///
-/// - `None` / `Lz4` / `Lz4Best` produce files readable by the C++ `hipo4`
-///   reader.
-/// - `Gzip` (RFC 1952) is read by the Java `jnp-hipo4` reader but **not** by
-///   the reference C++ `hipo4` reader, which has no gzip decode path (it
-///   LZ4-decodes every non-`None` tag). Prefer `Lz4`/`Lz4Best` for portability.
-/// - `Lz4PerBank` and `Lz4PerColumn` are Rust-only format extensions that
-///   enable true partial decompression — `ev.bank("name")` (or one column)
-///   inflates only the stream it needs, leaving the rest compressed.
+/// // The pair, spelled out:
+/// let c = Compression::new(Codec::Zstd, Layout::PerColumn);
+/// assert_eq!(c.codec(), Codec::Zstd);
 ///
-/// **Files written with `Lz4PerBank` or `Lz4PerColumn` are not readable by
-/// the C++ `hipo4` reader.**
+/// // The six historical names still work, and mean what they always did:
+/// assert_eq!(Compression::Lz4PerColumn, Compression::new(Codec::Lz4Hc, Layout::PerColumn));
+/// ```
+///
+/// All fifteen pairs have a wire tag, so any of them round-trips. Only the six
+/// that predate this matrix — the whole-record codecs and the two LZ4-HC split
+/// codecs — are readable by `hipo-cpp` and `hipo-java`; the rest are oxihipo
+/// extensions those readers reject as an unknown tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compression {
-    None,
-    Lz4,
-    Lz4Best,
-    Gzip,
-    /// Store each bank type as its own LZ4-HC stream within the record, plus
-    /// an event×bank presence directory (itself LZ4-compressed, prefixed with
-    /// an extension-format-version byte). Readers decompress only the bank
-    /// streams they actually touch; per-bank grouping plus HC beats
-    /// whole-record [`Self::Lz4Best`]. Writes are slower (HC).
-    Lz4PerBank,
-    /// Per-*column* layout: within each bank, every column is stored as its
-    /// own LZ4-HC stream laid out cross-event contiguous (all events' `px`,
-    /// then all `py`, …). Reading one column inflates only that column, and
-    /// homogeneous columns compress better than a bank's interleaved bytes,
-    /// so this beats [`Self::Lz4PerBank`] on both size and selective reads.
-    /// Banks without a schema (or composite banks) are stored opaquely as a
-    /// single stream. Writes are slower (HC). Layout in `wire/per_column.rs`.
-    Lz4PerColumn,
-    // Both split codecs store banks sorted by (group, item) — the reader
-    // binary-searches that table — so neither preserves the order banks were
-    // added in. `structures()` yields ascending (group, item) here and write
-    // order on the blob codecs. Banks are addressed by group/item everywhere,
-    // so nothing but iteration order depends on it. Neither codec is readable
-    // by C++ hipo4.
+pub struct Compression {
+    codec: Codec,
+    layout: Layout,
+    /// Zstd effort, 1-6. Meaningless for the other codecs, and not on the
+    /// wire: any level decodes through the same path.
+    zstd_level: u8,
 }
 
+// The six names below were enum variants before this became a (codec, layout)
+// pair. Keeping them as associated constants keeps `Compression::Lz4PerColumn`
+// valid source across 229 call sites — the API gains a dimension without a
+// mechanical rename sweep. That means variant-style casing, deliberately.
+#[allow(non_upper_case_globals)]
 impl Compression {
-    /// Wire-level compression tag that gets written into the record
-    /// header.
-    ///
-    /// This is an internal mapping used by the record builder; callers
-    /// don't normally need it.
-    pub(crate) const fn wire_tag(self) -> CompressionType {
-        match self {
-            Self::None => CompressionType::None,
-            Self::Lz4 => CompressionType::Lz4,
-            Self::Lz4Best => CompressionType::Lz4Best,
-            Self::Gzip => CompressionType::Gzip,
-            Self::Lz4PerBank => CompressionType::Lz4PerBank,
-            Self::Lz4PerColumn => CompressionType::Lz4PerColumn,
+    /// Whole-record, uncompressed.
+    pub const None: Self = Self::pair(Codec::None, Layout::PerChunk);
+    /// Whole-record LZ4.
+    pub const Lz4: Self = Self::pair(Codec::Lz4, Layout::PerChunk);
+    /// Whole-record LZ4-HC.
+    pub const Lz4Best: Self = Self::pair(Codec::Lz4Hc, Layout::PerChunk);
+    /// Whole-record gzip.
+    pub const Gzip: Self = Self::pair(Codec::Gzip, Layout::PerChunk);
+    /// One LZ4-HC stream per bank, plus an event x bank presence directory.
+    /// `ev.bank(name)` inflates only that bank.
+    pub const Lz4PerBank: Self = Self::pair(Codec::Lz4Hc, Layout::PerBank);
+    /// One LZ4-HC stream per `(bank, column)`, cross-event contiguous.
+    /// Smallest and fastest for selective reads.
+    pub const Lz4PerColumn: Self = Self::pair(Codec::Lz4Hc, Layout::PerColumn);
+
+    const fn pair(codec: Codec, layout: Layout) -> Self {
+        Self {
+            codec,
+            layout,
+            zstd_level: crate::compress::ZSTD_DEFAULT_LEVEL as u8,
         }
+    }
+
+    /// A (codec, layout) pair. Zstd gets the default level; pair with
+    /// [`Self::with_zstd_level`] to choose.
+    pub const fn new(codec: Codec, layout: Layout) -> Self {
+        Self::pair(codec, layout)
+    }
+
+    /// Set the zstd effort level, clamped to 1-6.
+    ///
+    /// Capped deliberately: above ~6 zstd's write cost climbs steeply for
+    /// little further gain on bank data, and the level never reaches the wire
+    /// — a reader decodes any level through the same path.
+    pub const fn with_zstd_level(mut self, level: u8) -> Self {
+        self.zstd_level = if level < 1 {
+            1
+        } else if level > 6 {
+            6
+        } else {
+            level
+        };
+        self
+    }
+
+    pub const fn codec(self) -> Codec {
+        self.codec
+    }
+
+    pub const fn layout(self) -> Layout {
+        self.layout
+    }
+
+    pub const fn zstd_level(self) -> u8 {
+        self.zstd_level
+    }
+
+    /// Wire-level compression tag written into the record header.
+    pub(crate) const fn wire_tag(self) -> CompressionType {
+        CompressionType::for_pair(self.codec, self.layout)
+    }
+}
+
+impl Default for Compression {
+    fn default() -> Self {
+        Self::Lz4
     }
 }
 
@@ -162,35 +202,35 @@ pub(crate) fn build_record_bytes(
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
-    match compression {
-        Compression::Lz4PerBank => build_by_bank_record_bytes(
+    match compression.layout() {
+        Layout::PerBank => build_by_bank_record_bytes(
             events,
             user_word_1,
             user_word_2,
             record_number,
+            compression,
             payload_buf,
             compress_buf,
         ),
-        Compression::Lz4PerColumn => build_per_column_record_bytes(
+        Layout::PerColumn => build_per_column_record_bytes(
             events,
             dict,
             user_word_1,
             user_word_2,
             record_number,
+            compression,
             payload_buf,
             compress_buf,
         ),
-        Compression::None | Compression::Lz4 | Compression::Lz4Best | Compression::Gzip => {
-            build_single_block_record_bytes(
-                events,
-                user_word_1,
-                user_word_2,
-                compression,
-                record_number,
-                payload_buf,
-                compress_buf,
-            )
-        }
+        Layout::PerChunk => build_single_block_record_bytes(
+            events,
+            user_word_1,
+            user_word_2,
+            compression,
+            record_number,
+            payload_buf,
+            compress_buf,
+        ),
     }
 }
 
@@ -287,7 +327,11 @@ struct ByBankParts {
 /// Steps 1–4 of the by-bank builder: walk events into per-bank tables, sort
 /// banks for determinism, LZ4-HC-compress each bank stream, pack the presence
 /// matrix.
-fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<ByBankParts> {
+fn build_by_bank_parts(
+    events: &[&[u8]],
+    compression: Compression,
+    compress_buf: &mut Vec<u8>,
+) -> Result<ByBankParts> {
     let event_count = events.len() as u32;
     let e_count = events.len();
 
@@ -367,7 +411,17 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
         // HC-compress each bank stream for a better ratio: per-bank grouping
         // plus LZ4-HC compounds to beat whole-record `Lz4Best`. The output is
         // still a plain LZ4 block, so the reader is unchanged.
-        let n = compress(CompressionType::Lz4Best, stream, compress_buf)?;
+        // The record's own codec, so a `Zstd`/`Gzip`/`None` split record puts
+        // that codec in its streams. The *directory* below deliberately stays
+        // LZ4 for every split tag: tags 6 and 7 are read by hipo-cpp and
+        // hipo-java, which expect an LZ4 directory, and holding one rule for
+        // all the tags keeps those two byte-compatible.
+        let n = compress_at(
+            compression.wire_tag(),
+            i32::from(compression.zstd_level()),
+            stream,
+            compress_buf,
+        )?;
         compressed_sizes.push(n as u32);
         compressed_streams.push(compress_buf[..n].to_vec());
     }
@@ -459,6 +513,7 @@ fn build_by_bank_record_bytes(
     user_word_1: u64,
     user_word_2: u64,
     record_number: u32,
+    compression: Compression,
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
@@ -475,7 +530,7 @@ fn build_by_bank_record_bytes(
         presence,
         bytes_per_row,
         sizes,
-    } = build_by_bank_parts(events, compress_buf)?;
+    } = build_by_bank_parts(events, compression, compress_buf)?;
 
     // ---- Build the directory body (uncompressed). ---------------------
     let dir_len = 4 * num_banks            // descriptors
@@ -562,7 +617,11 @@ fn build_by_bank_record_bytes(
         user_header_length: 0,
         data_length,
         compressed_data_length: compressed_with_pad as u32,
-        compression: CompressionType::Lz4PerBank,
+        // The pair's own tag. Hardcoding the LZ4-HC one here labelled every
+        // split record LZ4-HC regardless of the codec its streams were
+        // actually written with, so the reader inflated Zstd/Gzip/None streams
+        // as LZ4.
+        compression: compression.wire_tag(),
         user_word_1,
         user_word_2,
         endianness: Endianness::Little,
@@ -637,12 +696,14 @@ fn build_by_bank_record_bytes(
 ///
 /// On read, [`EXT_FORMAT_ACCEPT_PER_COLUMN`] also allows 2, so files written by 0.7.0
 /// remain readable. 2 is never written.
+#[allow(clippy::too_many_arguments)]
 fn build_per_column_record_bytes(
     events: &[&[u8]],
     dict: &Dict,
     user_word_1: u64,
     user_word_2: u64,
     record_number: u32,
+    compression: Compression,
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
@@ -761,7 +822,17 @@ fn build_per_column_record_bytes(
             continue;
         }
         compress_buf.clear();
-        let n = compress(CompressionType::Lz4Best, stream, compress_buf)?;
+        // The record's own codec, so a `Zstd`/`Gzip`/`None` split record puts
+        // that codec in its streams. The *directory* below deliberately stays
+        // LZ4 for every split tag: tags 6 and 7 are read by hipo-cpp and
+        // hipo-java, which expect an LZ4 directory, and holding one rule for
+        // all the tags keeps those two byte-compatible.
+        let n = compress_at(
+            compression.wire_tag(),
+            i32::from(compression.zstd_level()),
+            stream,
+            compress_buf,
+        )?;
         compressed_sizes.push(n as u32);
         compressed_streams.push(compress_buf[..n].to_vec());
     }
@@ -863,7 +934,11 @@ fn build_per_column_record_bytes(
         user_header_length: 0,
         data_length,
         compressed_data_length: compressed_with_pad as u32,
-        compression: CompressionType::Lz4PerColumn,
+        // The pair's own tag. Hardcoding the LZ4-HC one here labelled every
+        // split record LZ4-HC regardless of the codec its streams were
+        // actually written with, so the reader inflated Zstd/Gzip/None streams
+        // as LZ4.
+        compression: compression.wire_tag(),
         user_word_1,
         user_word_2,
         endianness: Endianness::Little,
