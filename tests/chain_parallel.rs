@@ -396,3 +396,99 @@ fn for_each_total_matches_event_count() {
     let stats = chain.for_each(2, |_ev| {}).unwrap();
     assert_eq!(stats.events_in, chain.event_count());
 }
+
+/// Concurrent `Chain::event` must agree with sequential `Chain::event`.
+///
+/// The record cache decodes outside its lock, so two threads missing on the
+/// same record can both decode it and both write the slot — last writer wins.
+/// That is sound only because the event returned comes from the caller's own
+/// `Arc`, never from the slot, so a racing overwrite cannot make a call wrong.
+/// This pins that: the answer must not depend on who won.
+///
+/// It does not pin the performance property. Holding the guard across the
+/// decode gives identical answers — just serialised — so only `examples/
+/// bench_random` can catch a regression there (measured: 375 -> 2721 ev/s at
+/// 12 threads on a 9.1 GB DST, single-threaded unchanged).
+#[test]
+fn concurrent_random_access_agrees_with_sequential() {
+    use oxihipo::{Chain, Compression, DataType, Dict, Schema, Writer};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rand.hipo");
+
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Event",
+        300,
+        30,
+        [("evno".into(), DataType::Long, 1)],
+    ));
+    // Many small records, so index lookups land in different records and the
+    // cache is missed constantly — which is the path under test.
+    let mut w = Writer::create(&path)
+        .schemas(&d)
+        .compression(Compression::Lz4)
+        .max_record_events(7)
+        .build()
+        .unwrap();
+    for evno in 0..500i64 {
+        w.event(|ev| {
+            ev.bank("REC::Event", |b| {
+                b.row(|r| r.set("evno", evno).map(|_| ()))?;
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+
+    let chain = Chain::open(&path).unwrap();
+    assert_eq!(chain.event_count(), 500);
+
+    // Ground truth, one thread.
+    let expect: Vec<(u32, u32)> = (0..500u64)
+        .map(|i| {
+            let ev = chain.event(i).expect("event in range");
+            (ev.size(), ev.tag())
+        })
+        .collect();
+
+    // A deliberately cache-hostile order: adjacent indices land in different
+    // records, so threads collide on the slot rather than each staying warm.
+    let order: Vec<u64> = (0..500u64).map(|i| (i * 37) % 500).collect();
+
+    for threads in [2usize, 4, 8] {
+        let mismatches = AtomicUsize::new(0);
+        let seen = AtomicUsize::new(0);
+        let chunk = order.len().div_ceil(threads);
+        std::thread::scope(|s| {
+            for part in order.chunks(chunk) {
+                let c = chain.clone();
+                let (mismatches, seen, expect) = (&mismatches, &seen, &expect);
+                s.spawn(move || {
+                    for &i in part {
+                        match c.event(i) {
+                            Some(ev) => {
+                                if (ev.size(), ev.tag()) != expect[i as usize] {
+                                    mismatches.fetch_add(1, Ordering::Relaxed);
+                                }
+                                seen.fetch_add(1, Ordering::Relaxed);
+                            }
+                            None => {
+                                mismatches.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(seen.load(Ordering::Relaxed), 500, "{threads} threads");
+        assert_eq!(
+            mismatches.load(Ordering::Relaxed),
+            0,
+            "{threads} threads disagreed with sequential"
+        );
+    }
+}

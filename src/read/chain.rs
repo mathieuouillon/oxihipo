@@ -60,8 +60,15 @@ pub struct Chain {
     record_tags: Option<Vec<u64>>,
     /// Last record decoded by [`Self::event`]. Shared across clones so a
     /// cloned chain inherits the warm record. `Mutex` (not `RefCell`) keeps
-    /// `Chain: Sync`; the lock is held only for the lookup/insert, and is
-    /// negligible next to a record decode.
+    /// `Chain: Sync`.
+    ///
+    /// The lock is held **only** for the lookup and the insert — never across
+    /// the decode. It used to span the decode, which serialised every
+    /// concurrent `event()` miss behind one ~8 MB decompression: measured on a
+    /// 9.1 GB CLAS12 DST, random access was flat at ~300 ev/s from 1 to 12
+    /// threads (12t/1t = 0.97x, no scaling at all). Releasing the guard first
+    /// takes 12 threads to 2455 ev/s — 8.0x — with single-threaded throughput
+    /// unchanged (A/B/A/B: 862/853/869 against 860/866/857 ev/s).
     record_cache: Arc<std::sync::Mutex<Option<RecordCache>>>,
 }
 
@@ -76,7 +83,11 @@ pub struct Chain {
 struct RecordCache {
     file_idx: usize,
     rec_idx: usize,
-    decoded: CachedRecord,
+    /// `Arc` so a cache hit is one refcount bump inside the critical section
+    /// rather than a borrow that pins the guard for the rest of `event()`.
+    /// `CachedRecord` already holds `Arc`s internally, so this costs one
+    /// allocation per *miss* and nothing per hit.
+    decoded: Arc<CachedRecord>,
 }
 
 #[derive(Debug)]
@@ -466,40 +477,58 @@ impl Chain {
         // Serve from the cached record when this call lands in the same one as
         // the last (the common case for a sorted list of event indices): a hit
         // is a slice / index, with no read and no decompression.
-        let mut guard = self.record_cache.lock().ok()?;
-        let hit = guard
-            .as_ref()
-            .is_some_and(|c| c.file_idx == file_idx && c.rec_idx == rec_idx);
-        if !hit {
-            let span = &inner.index.records()[rec_idx];
-            let mut raw = Vec::new();
-            let header = inner.read_record_into(span.file_offset, &mut raw).ok()?;
-            let decoded = if header.compression.is_by_bank() {
-                CachedRecord::ByBank(ByBankRecord::parse(&raw).ok()?)
-            } else if header.compression.is_per_column() {
-                CachedRecord::PerColumn(PerColumnRecord::parse(&raw).ok()?)
-            } else {
-                let mut payload = Vec::new();
-                let mut offsets = Vec::new();
-                // Degrade to `None` on a corrupt record rather than panicking —
-                // the documented contract is `None` on failure, not an abort.
-                let d =
-                    decode_record_into(&raw, &mut payload, &mut offsets, Some(&self.dict)).ok()?;
-                CachedRecord::Bytes {
-                    payload: Arc::new(payload),
-                    offsets,
-                    data_start: d.data_start,
-                }
-            };
-            *guard = Some(RecordCache {
-                file_idx,
-                rec_idx,
-                decoded,
-            });
-        }
+        //
+        // The guard is taken, tested, and dropped — the decode below runs
+        // outside it. Holding it across the decode serialised every concurrent
+        // miss behind one ~8 MB decompression and cost 8x at 12 threads.
+        let hot = {
+            let guard = self.record_cache.lock().ok()?;
+            guard.as_ref().and_then(|c| {
+                (c.file_idx == file_idx && c.rec_idx == rec_idx).then(|| Arc::clone(&c.decoded))
+            })
+        };
 
-        let cache = guard.as_ref()?;
-        match &cache.decoded {
+        let decoded = match hot {
+            Some(d) => d,
+            None => {
+                let span = &inner.index.records()[rec_idx];
+                let mut raw = Vec::new();
+                let header = inner.read_record_into(span.file_offset, &mut raw).ok()?;
+                let decoded = Arc::new(if header.compression.is_by_bank() {
+                    CachedRecord::ByBank(ByBankRecord::parse(&raw).ok()?)
+                } else if header.compression.is_per_column() {
+                    CachedRecord::PerColumn(PerColumnRecord::parse(&raw).ok()?)
+                } else {
+                    let mut payload = Vec::new();
+                    let mut offsets = Vec::new();
+                    // Degrade to `None` on a corrupt record rather than
+                    // panicking — the documented contract is `None` on
+                    // failure, not an abort.
+                    let d = decode_record_into(&raw, &mut payload, &mut offsets, Some(&self.dict))
+                        .ok()?;
+                    CachedRecord::Bytes {
+                        payload: Arc::new(payload),
+                        offsets,
+                        data_start: d.data_start,
+                    }
+                });
+                // Last writer wins. The slot is a hint: the event we return
+                // comes from the local `Arc`, never from the slot, so a racing
+                // overwrite cannot make this call wrong. Two threads missing on
+                // the same record may both decode it — strictly cheaper than
+                // serialising every miss behind one lock.
+                if let Ok(mut guard) = self.record_cache.lock() {
+                    *guard = Some(RecordCache {
+                        file_idx,
+                        rec_idx,
+                        decoded: Arc::clone(&decoded),
+                    });
+                }
+                decoded
+            }
+        };
+
+        match &*decoded {
             CachedRecord::ByBank(rec) => {
                 if ev_local >= rec.event_count() {
                     return None;

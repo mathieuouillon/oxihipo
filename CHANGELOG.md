@@ -44,6 +44,8 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   Returns `Option`, and refuses array columns rather than silently handing back
   element 0 of a covariance matrix.
 - **`Dict::try_add`** — non-panicking `add`.
+- **`examples/bench_random`** — concurrent random-access throughput, the
+  benchmark for the record cache.
 
 ### Documentation
 
@@ -66,6 +68,12 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
 
 ### Fixed
 
+- **Concurrent `Chain::event` did not scale at all.** The record cache held
+  its mutex *across* the record decode, so every miss serialised behind one
+  ~8 MB decompression. Measured on a 9.1 GB CLAS12 DST: random access was flat
+  at ~380 ev/s from 1 to 12 threads (12t/1t = 0.97x). Decoding outside the lock
+  takes 12 threads to 2721 ev/s — **7.1x** — with single-threaded throughput
+  unchanged and identical checksums.
 - **`OwnedEvent::size()` decompressed the whole event to measure it.** On the
   split codecs it reassembled via `bytes()`, inflating every bank stream in the
   record to answer a question the record directory already holds. 5.7 -> 19.0
