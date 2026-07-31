@@ -8,6 +8,11 @@
 //!
 //! Usage: cargo run --release --example gen_synthetic -- <out.hipo> [events] [codec]
 //!   codec: none | lz4 | lz4-per-bank | lz4-per-column   (default lz4)
+//!
+//! `GEN_REC_EVENTS` sets events-per-record (default 250,000). Lower it to make
+//! a **record-dense** file: the parallel unit is the record, so a file with 16
+//! of them cannot use 12 threads no matter how many events it holds, and the
+//! per-record code paths are invisible in it.
 
 use std::env;
 
@@ -40,6 +45,12 @@ fn main() -> Result<()> {
     let mut w = Writer::create(&out)
         .schemas(&d)
         .compression(compression)
+        .max_record_events(
+            std::env::var("GEN_REC_EVENTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(250_000),
+        )
         .build()?;
     for i in 0..events {
         w.event(|ev| {
