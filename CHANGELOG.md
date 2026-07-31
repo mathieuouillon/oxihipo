@@ -66,6 +66,11 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   from. Writer-API misuse (`set_*` before `push_row`, an out-of-range row
   index) reports as `InvalidUsage` rather than masquerading as a corrupt
   record.
+- **`EventCtx::try_bank`** — the fallible sibling of `bank()`, separating
+  "this event has no such bank" (`Ok(None)`) from "this bank is corrupt"
+  (`Err`) and from "the dictionary has no such bank" (`Err(UnknownSchema)`).
+  `bank()` collapses all three into `None`, so a corrupt `Lz4PerBank` record
+  read as an event with no particles and an analysis under-counted silently.
 - **`Dict::try_add`** — non-panicking `add`.
 - **`examples/bench_random`** — concurrent random-access throughput, the
   benchmark for the record cache.

@@ -18,6 +18,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
+use crate::error::{HipoError, Result};
 use crate::event::bank::Bank;
 use crate::event::composite::Composite;
 use crate::event::event::Event;
@@ -161,64 +162,139 @@ impl<'a> EventCtx<'a> {
     }
 
     /// Decode bank `name`. `None` if the schema isn't in the dict, the
-    /// structure isn't in the event, or the bank's data is mis-sized.
+    /// structure isn't in the event, **or the bank could not be decoded**.
     ///
     /// On by-bank records, only the requested bank's LZ4 stream is
     /// decompressed — other banks in the same record remain compressed.
+    ///
+    /// # This collapses "absent" and "corrupt" into the same answer
+    ///
+    /// On the split codecs a bank's stream inflates lazily, right here, so a
+    /// corrupt record surfaces as `None` — indistinguishable from an event
+    /// that genuinely has no such bank. An analysis counting
+    /// `ev.bank("REC::Particle")` hits would silently under-count rather than
+    /// fail. Use [`Self::try_bank`] when that distinction matters; it is the
+    /// same code path and costs the same.
+    ///
+    /// This signature is kept because `Option` is the right ergonomics for
+    /// the overwhelmingly common case — asking for a bank that may or may not
+    /// be in this event — and because 241 call sites depend on it.
     pub fn bank(&self, name: &str) -> Option<Bank<'a>> {
+        self.try_bank(name).ok().flatten()
+    }
+
+    /// [`Self::bank`], distinguishing the three outcomes it collapses.
+    ///
+    /// - `Ok(Some(bank))` — decoded.
+    /// - `Ok(None)` — the event genuinely does not carry this bank. Normal;
+    ///   most events carry a fraction of a dictionary's banks.
+    /// - `Err(UnknownSchema)` — the *dictionary* has no such bank. A typo, or
+    ///   a file that isn't what the caller thought.
+    /// - `Err(_)` otherwise — the bank is present but undecodable: its LZ4
+    ///   stream failed to inflate, its offset table points past the end of
+    ///   that stream, or its byte count is not a whole number of rows. This
+    ///   is the case [`Self::bank`] cannot report.
+    ///
+    /// ```no_run
+    /// # use oxihipo::{Chain, Result};
+    /// # fn main() -> Result<()> {
+    /// for ev in Chain::open("run.hipo")?.events() {
+    ///     let ev = ev?;
+    ///     // Propagates corruption instead of counting it as an empty event.
+    ///     if let Some(p) = ev.ctx().try_bank("REC::Particle")? {
+    ///         let _ = p.rows();
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # What this does not cover
+    ///
+    /// On `Lz4PerColumn`, a bank stored **column-wise** (the normal case; not
+    /// an opaque bank) is constructed here without inflating anything — its
+    /// streams inflate later, per column, inside the column accessors. Those
+    /// are infallible by construction (`read` returns `Cow`, `get` returns
+    /// `T::default()`), and on a decompression failure or an inconsistent
+    /// directory they degrade to an *empty column*. So on that codec this
+    /// returns `Ok(Some(bank))` and a corrupt column still reads as zeros.
+    ///
+    /// Closing that would mean making the column accessors fallible, which
+    /// changes `read`, `iter`, `get` and `value` together — a much larger
+    /// break than this method, and not one to make quietly. Verified by
+    /// sweeping single-byte corruptions across a per-column record: no byte
+    /// produces an error this method can report.
+    pub fn try_bank(&self, name: &str) -> Result<Option<Bank<'a>>> {
         // Per-event cache: a per-row loop over one bank resolves it once,
         // not on every call. The cached bank borrows `'a` (not `&self`), so
         // it survives across calls.
         if let Some((b, _)) = self.cache.get()
             && b.schema().name() == name
         {
-            return Some(b);
+            return Ok(Some(b));
         }
-        let schema = self.dict.get(name)?;
-        let bank = self.bank_for(schema)?;
-        self.cache.set(Some((bank, u16::MAX)));
-        Some(bank)
+        let schema = self
+            .dict
+            .get(name)
+            .ok_or_else(|| HipoError::UnknownSchema {
+                name: name.to_string(),
+            })?;
+        let bank = self.try_bank_for(schema)?;
+        if let Some(b) = bank {
+            self.cache.set(Some((b, u16::MAX)));
+        }
+        Ok(bank)
     }
 
     /// Decode the bank for an already-resolved schema reference. Internal:
     /// backs [`Self::bank`] and the typed-row accessors.
     pub(crate) fn bank_for(&self, schema: &'a Schema) -> Option<Bank<'a>> {
+        self.try_bank_for(schema).ok().flatten()
+    }
+
+    /// [`Self::bank_for`], reporting decode failures instead of erasing them.
+    pub(crate) fn try_bank_for(&self, schema: &'a Schema) -> Result<Option<Bank<'a>>> {
+        // A range from the record's own offset table can point past the end
+        // of the decompressed stream on a corrupt file. That is corruption,
+        // not absence, and used to read as "no such bank here".
+        fn slice(stream: &[u8], range: std::ops::Range<usize>) -> Result<&[u8]> {
+            stream.get(range).ok_or(HipoError::CorruptRecord {
+                offset: 0,
+                reason: "split codec: an event's bank range points past the decompressed stream",
+            })
+        }
+
         match self.backend {
-            Backend::Bytes(e) => {
-                let (_, data) = e.find(schema.group(), schema.item())?;
-                Bank::new(schema, data).ok()
-            }
+            Backend::Bytes(e) => match e.find(schema.group(), schema.item()) {
+                Some((_, data)) => Bank::new(schema, data).map(Some),
+                None => Ok(None),
+            },
             Backend::ByBank { record, event_idx } => {
-                let bank_idx = record.bank_index(schema.group(), schema.item())?;
+                let Some(bank_idx) = record.bank_index(schema.group(), schema.item()) else {
+                    return Ok(None);
+                };
                 if !record.has(event_idx, bank_idx) {
-                    return None;
+                    return Ok(None);
                 }
-                let stream = record.bank_stream(bank_idx).ok()?;
-                let range = record.bank_byte_range(event_idx, bank_idx);
-                // Bounds-checked: the range comes from the record's own offset
-                // table, which a corrupt file can point past the end of the
-                // stream. `None` already means "no such bank here".
-                stream
-                    .get(range)
-                    .and_then(|raw| Bank::new(schema, raw).ok())
+                let stream = record.bank_stream(bank_idx)?;
+                let raw = slice(stream, record.bank_byte_range(event_idx, bank_idx))?;
+                Bank::new(schema, raw).map(Some)
             }
             Backend::PerColumn { record, event_idx } => {
-                let bank_idx = record.bank_index(schema.group(), schema.item())?;
+                let Some(bank_idx) = record.bank_index(schema.group(), schema.item()) else {
+                    return Ok(None);
+                };
                 if !record.has(event_idx, bank_idx) {
-                    return None;
+                    return Ok(None);
                 }
                 if record.is_opaque(bank_idx) {
                     // Opaque bank: one whole-bank stream, served contiguously.
-                    let stream = record.column_stream(bank_idx, 0).ok()?;
-                    let range = record.bank_byte_range(event_idx, bank_idx);
-                    // Bounds-checked: the range comes from the record's own offset
-                    // table, which a corrupt file can point past the end of the
-                    // stream. `None` already means "no such bank here".
-                    stream
-                        .get(range)
-                        .and_then(|raw| Bank::new(schema, raw).ok())
+                    let stream = record.column_stream(bank_idx, 0)?;
+                    let raw = slice(stream, record.bank_byte_range(event_idx, bank_idx))?;
+                    Bank::new(schema, raw).map(Some)
                 } else {
-                    Some(Bank::new_per_column(schema, record, bank_idx, event_idx))
+                    Ok(Some(Bank::new_per_column(
+                        schema, record, bank_idx, event_idx,
+                    )))
                 }
             }
         }

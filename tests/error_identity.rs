@@ -327,3 +327,182 @@ fn a_zero_offset_corrupt_record_is_filled_not_nested() {
     );
     assert!(msg.contains("split.hipo"), "{msg}");
 }
+
+/// `bank()` cannot tell "this event has no such bank" from "this bank is
+/// corrupt". `try_bank()` can.
+///
+/// On the split codecs a bank's LZ4 stream inflates lazily inside the
+/// accessor, so a corrupt record makes `ev.bank("REC::Particle")` return
+/// `None` — exactly what an event with no particles returns. An analysis
+/// counting hits silently under-counts instead of failing, and the answer
+/// looks plausible.
+///
+/// The fixture **searches** for a byte whose corruption produces that
+/// specific failure rather than assuming where one is. A blanket XOR over
+/// half the record does not work: swept one byte at a time over a 192-byte
+/// by-bank payload, 59 flips break the directory (so the record does not
+/// parse at all), 128 have no observable effect, and only **5** leave the
+/// directory intact while breaking a bank stream. Guessing lands in the 128.
+#[test]
+fn try_bank_separates_a_corrupt_bank_from_an_absent_one() {
+    use oxihipo::HipoError;
+
+    const MAGIC_LE: [u8; 4] = [0x00, 0x01, 0xda, 0xc0];
+    const RECORD_HEADER_SIZE: usize = 56;
+
+    // `Lz4PerBank` only. On `Lz4PerColumn`, a non-opaque bank is constructed
+    // without inflating anything — `try_bank` returns `Ok(Some(_))` and the
+    // streams inflate later, per column, inside `Bank::col_bytes`, which is
+    // infallible by construction and degrades to an empty column. That path
+    // is *not* fixed here and is documented as such on `try_bank`; a swept
+    // single-byte corruption finds no byte that `try_bank` can report on a
+    // per-column file, which is exactly the point.
+    for (label, codec, tag) in [("Lz4PerBank", Compression::Lz4PerBank, 6u32)] {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("c.hipo");
+
+        let mut d = Dict::new();
+        d.add(Schema::from_columns(
+            "REC::Event",
+            300,
+            30,
+            [("evno".into(), DataType::Long, 1)],
+        ));
+        d.add(Schema::from_columns(
+            "REC::Particle",
+            300,
+            1,
+            [("pid".into(), DataType::Int, 1)],
+        ));
+        // Never written to any event: the genuine-absence control.
+        d.add(Schema::from_columns(
+            "REC::Absent",
+            400,
+            1,
+            [("v".into(), DataType::Int, 1)],
+        ));
+
+        let mut w = Writer::create(&f)
+            .schemas(&d)
+            .compression(codec)
+            .max_record_events(25)
+            .build()
+            .unwrap();
+        for i in 0..100i64 {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| r.set("evno", i).map(|_| ()))?;
+                    Ok(())
+                })?;
+                ev.bank("REC::Particle", |b| {
+                    b.row(|r| r.set("pid", 11i32).map(|_| ()))?;
+                    Ok(())
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+
+        let pristine = std::fs::read(&f).unwrap();
+
+        // Baseline on the intact file: the three outcomes are distinct.
+        {
+            let chain = Chain::open(&f).unwrap();
+            let ev = chain.event(0).unwrap();
+            let ctx = ev.ctx();
+            assert!(ctx.try_bank("REC::Particle").unwrap().is_some(), "{label}");
+            assert!(
+                ctx.try_bank("REC::Absent").unwrap().is_none(),
+                "{label}: a bank no event carries must be Ok(None), not an error"
+            );
+            assert!(
+                matches!(
+                    ctx.try_bank("REC::Nonexistent"),
+                    Err(HipoError::UnknownSchema { .. })
+                ),
+                "{label}: a bank the dictionary does not define should say so"
+            );
+        }
+
+        // Locate the last split-codec data record.
+        let (mut h, mut len) = (0usize, 0usize);
+        let mut i = 28usize;
+        while i + 4 <= pristine.len() {
+            if pristine[i..i + 4] == MAGIC_LE {
+                let hh = i - 28;
+                let comp = u32::from_le_bytes(pristine[hh + 36..hh + 40].try_into().unwrap());
+                if (comp >> 28) == tag {
+                    h = hh;
+                    len = u32::from_le_bytes(pristine[hh..hh + 4].try_into().unwrap()) as usize * 4;
+                }
+            }
+            i += 1;
+        }
+        assert!(len > RECORD_HEADER_SIZE, "{label}: no split record found");
+
+        // Search the payload for a flip that leaves the record parseable but
+        // breaks a bank stream — the case `bank()` cannot report.
+        let mut hit = None;
+        for off in (h + RECORD_HEADER_SIZE)..(h + len) {
+            let mut bytes = pristine.clone();
+            bytes[off] ^= 0xFF;
+            std::fs::write(&f, &bytes).unwrap();
+            let Ok(chain) = Chain::open(&f) else { continue };
+            let mut saw_err = false;
+            let mut saw_missing_event = false;
+            for i in 0..chain.event_count() {
+                match chain.event(i) {
+                    None => saw_missing_event = true,
+                    Some(ev) => {
+                        if ev.ctx().try_bank("REC::Particle").is_err() {
+                            saw_err = true;
+                        }
+                    }
+                }
+            }
+            if saw_err && !saw_missing_event {
+                hit = Some(off);
+                break;
+            }
+        }
+        let off = hit.unwrap_or_else(|| {
+            panic!("{label}: no corruption reachable through the lazy bank inflate")
+        });
+
+        // On that file, compare the two accessors event by event.
+        let mut bytes = pristine.clone();
+        bytes[off] ^= 0xFF;
+        std::fs::write(&f, &bytes).unwrap();
+
+        let chain = Chain::open(&f).unwrap();
+        let (mut opt_none, mut errs, mut ok_none) = (0u32, 0u32, 0u32);
+        for i in 0..chain.event_count() {
+            let ev = chain.event(i).expect("record still parses");
+            let ctx = ev.ctx();
+            if ctx.bank("REC::Particle").is_none() {
+                opt_none += 1;
+            }
+            match ctx.try_bank("REC::Particle") {
+                Ok(Some(_)) => {}
+                Ok(None) => ok_none += 1,
+                Err(_) => errs += 1,
+            }
+        }
+
+        assert!(
+            opt_none > 0,
+            "{label}: nothing failed, so nothing was tested"
+        );
+        // Every event `bank()` silently dropped is one `try_bank()` reports as
+        // an error rather than as an absent bank. That is the whole point.
+        assert_eq!(
+            errs, opt_none,
+            "{label}: try_bank reported {errs} errors against {opt_none} silent Nones"
+        );
+        assert_eq!(
+            ok_none, 0,
+            "{label}: corruption must never be reported as genuine absence"
+        );
+    }
+}
