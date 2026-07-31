@@ -40,7 +40,7 @@
 
 use std::sync::Arc;
 
-use crate::error::Result;
+use crate::error::{HipoError, Result};
 use crate::event::{Event, OwnedEvent};
 use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
@@ -186,6 +186,18 @@ impl EventIter {
     /// unparseable header, bad LZ4 stream). The fallible signature is what
     /// lets [`Self::next_result`] surface corruption as a recoverable
     /// `Result` instead of aborting the process.
+    /// Give a decode error its identity: the record's file offset and the
+    /// file it came from.
+    ///
+    /// Decoder errors are built deep inside a parse where neither is known —
+    /// 58 of the 73 construction sites pass `offset: 0` — so an operator
+    /// hitting a bad record in the middle of a 9.1 GB file was told "corrupt
+    /// record at offset 0x0", which points at the file header. On a
+    /// multi-file chain the *path* is the more valuable half.
+    fn locate(&self, e: HipoError, record_offset: u64) -> HipoError {
+        e.at_offset(record_offset).with_path(self.inner.path())
+    }
+
     fn advance_record(&mut self) -> Result<bool> {
         loop {
             let records = self.inner.index.records();
@@ -199,7 +211,10 @@ impl EventIter {
             // read) and skip non-matching records without streaming the
             // whole payload.
             if let Some(tags) = &self.record_tags {
-                let h = self.inner.read_record_header(span.file_offset)?;
+                let h = self
+                    .inner
+                    .read_record_header(span.file_offset)
+                    .map_err(|e| self.locate(e, span.file_offset))?;
                 if !tags.contains(&h.user_word_1) {
                     continue;
                 }
@@ -209,7 +224,8 @@ impl EventIter {
             let mut read_buf = std::mem::take(&mut self.read_buf);
             let header = self
                 .inner
-                .read_record_into(span.file_offset, &mut read_buf)?;
+                .read_record_into(span.file_offset, &mut read_buf)
+                .map_err(|e| self.locate(e, span.file_offset))?;
 
             if header.compression.is_by_bank() {
                 // ByBank: parse the directory eagerly, copying out just the
@@ -229,7 +245,8 @@ impl EventIter {
                         self.scratch = v;
                     }
                 }
-                let by_bank = ByBankRecord::parse(&read_buf)?;
+                let by_bank =
+                    ByBankRecord::parse(&read_buf).map_err(|e| self.locate(e, span.file_offset))?;
                 self.read_buf = read_buf;
                 let event_count = by_bank.event_count();
                 self.cur = CurrentRecord::ByBank {
@@ -256,7 +273,8 @@ impl EventIter {
                         self.scratch = v;
                     }
                 }
-                let per_column = PerColumnRecord::parse(&read_buf)?;
+                let per_column = PerColumnRecord::parse(&read_buf)
+                    .map_err(|e| self.locate(e, span.file_offset))?;
                 self.read_buf = read_buf;
                 let event_count = per_column.event_count();
                 self.cur = CurrentRecord::PerColumn {
@@ -271,7 +289,8 @@ impl EventIter {
             // decode the streamed record into them.
             let (mut buf, mut event_offsets) = self.take_bytes_buffers();
             let decoded =
-                decode_record_into(&read_buf, &mut buf, &mut event_offsets, Some(&self.dict))?;
+                decode_record_into(&read_buf, &mut buf, &mut event_offsets, Some(&self.dict))
+                    .map_err(|e| self.locate(e, span.file_offset))?;
             let data_start = decoded.data_start;
             self.read_buf = read_buf;
             self.cur = CurrentRecord::Bytes {

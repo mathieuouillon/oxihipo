@@ -61,6 +61,11 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   through reusable buffers. `finish(self)` consuming the builder was why
   `BankBuilder::reset` had no possible caller.
 - **`examples/bench_write`** — the write-path benchmark, which did not exist.
+- **`HipoError::at_offset`, `HipoError::AtOffset`, `HipoError::InvalidUsage`**
+  — decode errors now name the record they came from and the file they came
+  from. Writer-API misuse (`set_*` before `push_row`, an out-of-range row
+  index) reports as `InvalidUsage` rather than masquerading as a corrupt
+  record.
 - **`Dict::try_add`** — non-panicking `add`.
 - **`examples/bench_random`** — concurrent random-access throughput, the
   benchmark for the record cache.
@@ -86,6 +91,13 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
 
 ### Fixed
 
+- **Decode errors were unattributable.** 58 of 73 construction sites pass
+  `offset: 0`, so a corrupt record in the middle of a multi-gigabyte chain
+  reported `corrupt record at offset 0x0` — pointing at the file header — with
+  no indication of which file. All four record-processing entry points now
+  attach both: `file "run_b.hipo": record at offset 0x768: compression error:
+  lz4 decompress failed`. No measurable read-path cost (142.8 -> 142.7 ns/event,
+  interleaved).
 - **The write path allocated per bank and per column, on every event.**
   Measured, not estimated: 15 allocations/event for a 2-bank event, 151 for
   1x28x40, 266 for 10 banks, and **666 for a 47-bank CLAS12-shaped event** —

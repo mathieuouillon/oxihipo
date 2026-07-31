@@ -148,9 +148,8 @@ impl<'s> BankBuilder<'s> {
     }
 
     fn last_row(&self) -> Result<u32> {
-        self.rows.checked_sub(1).ok_or(HipoError::CorruptRecord {
-            offset: 0,
-            reason: "set_* called before push_row()",
+        self.rows.checked_sub(1).ok_or(HipoError::InvalidUsage {
+            what: "BankBuilder: set_* called before push_row()",
         })
     }
 
@@ -166,9 +165,8 @@ impl<'s> BankBuilder<'s> {
     #[inline]
     fn check_row(&self, row: u32) -> Result<()> {
         if row >= self.rows {
-            return Err(HipoError::CorruptRecord {
-                offset: 0,
-                reason: "BankBuilder row index out of range (call push_rows first)",
+            return Err(HipoError::InvalidUsage {
+                what: "BankBuilder: row index out of range (call push_rows first)",
             });
         }
         Ok(())
@@ -551,7 +549,9 @@ mod tests {
         let s = schema();
         let mut b = BankBuilder::new(&s);
         let err = b.set_i32("pid", 1).unwrap_err();
-        assert!(matches!(err, HipoError::CorruptRecord { .. }));
+        // Writer-API misuse, not record corruption — calling a setter before
+        // `push_row` says nothing about any file's bytes.
+        assert!(matches!(err, HipoError::InvalidUsage { .. }), "{err:?}");
     }
 
     #[test]

@@ -422,8 +422,43 @@ fn in_range(range: Option<&Range<u64>>, global: u64) -> bool {
 }
 
 /// Materialize every requested bank/column for one record.
+/// Wrapper that gives every error out of the record parse its identity: the
+/// record's file offset and the file it came from. Decoder errors are built
+/// deep inside a parse where neither is known — 58 of 73 construction sites
+/// pass `offset: 0` — so a bad record in the middle of a 9.1 GB file reported
+/// "corrupt record at offset 0x0", pointing at the file header.
+///
+/// Wrapping the whole call rather than each `?` inside it means a fallible
+/// path added later is covered without anyone remembering to.
 #[allow(clippy::too_many_arguments)]
 fn process_record_columns(
+    inner: &Arc<FileInner>,
+    ri: usize,
+    file_base: u64,
+    plan: &[BankPlan<'_>],
+    filter: Option<&Filter>,
+    filter_active: bool,
+    range: Option<&Range<u64>>,
+    record: &mut Record,
+    read_buf: &mut Vec<u8>,
+) -> Result<RecordChunk> {
+    let off = inner.index.records()[ri].file_offset;
+    process_record_columns_impl(
+        inner,
+        ri,
+        file_base,
+        plan,
+        filter,
+        filter_active,
+        range,
+        record,
+        read_buf,
+    )
+    .map_err(|e| e.at_offset(off).with_path(inner.path()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_record_columns_impl(
     inner: &Arc<FileInner>,
     ri: usize,
     file_base: u64,

@@ -196,8 +196,43 @@ impl Chain {
     }
 }
 
+/// Wrapper that gives every error out of the record parse its identity: the
+/// record's file offset and the file it came from. Decoder errors are built
+/// deep inside a parse where neither is known — 58 of 73 construction sites
+/// pass `offset: 0` — so a bad record in the middle of a 9.1 GB file reported
+/// "corrupt record at offset 0x0", pointing at the file header.
+///
+/// Wrapping the whole call rather than each `?` inside it means a fallible
+/// path added later is covered without anyone remembering to.
 #[allow(clippy::too_many_arguments)]
 fn process_record(
+    inner: &std::sync::Arc<FileInner>,
+    ri: usize,
+    file_base: u64,
+    schemas: &[(u16, u8, u32)],
+    filter: Option<&Filter>,
+    filter_active: bool,
+    range: Option<&Range<u64>>,
+    record: &mut Record,
+    read_buf: &mut Vec<u8>,
+) -> Result<Tally> {
+    let off = inner.index.records()[ri].file_offset;
+    process_record_impl(
+        inner,
+        ri,
+        file_base,
+        schemas,
+        filter,
+        filter_active,
+        range,
+        record,
+        read_buf,
+    )
+    .map_err(|e| e.at_offset(off).with_path(inner.path()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_record_impl(
     inner: &std::sync::Arc<FileInner>,
     ri: usize,
     file_base: u64,

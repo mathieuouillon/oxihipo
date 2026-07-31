@@ -111,6 +111,9 @@ pub enum HipoError {
     )]
     FilterIgnoredByColumnSweep { bank: String, column: String },
 
+    #[error("invalid usage: {what}")]
+    InvalidUsage { what: &'static str },
+
     #[error("compression error: {0}")]
     Compression(&'static str),
 
@@ -135,6 +138,19 @@ pub enum HipoError {
         #[source]
         source: Box<HipoError>,
     },
+
+    /// A decode error located to the record it came from.
+    ///
+    /// Most error variants have nowhere to put a file offset — `Compression`
+    /// is a bare `&'static str`, and it is the variant a corrupt LZ4 payload
+    /// actually produces. Wrapping is how those get located, the same way
+    /// [`Self::Path`] attaches a filename.
+    #[error("record at offset {offset:#x}: {source}")]
+    AtOffset {
+        offset: u64,
+        #[source]
+        source: Box<HipoError>,
+    },
 }
 
 impl HipoError {
@@ -144,6 +160,52 @@ impl HipoError {
         Self::Path {
             path: path.into(),
             source: Box::new(self),
+        }
+    }
+
+    /// Rebase a decode error onto the record it came from.
+    ///
+    /// Most decoder errors are constructed deep inside a record parse, where
+    /// the file offset is not known — 58 of the 73 construction sites pass
+    /// `offset: 0`. An operator looking at a bad record in the middle of a
+    /// 9.1 GB file was told "corrupt record at offset 0x0", which points at
+    /// the file header. Applied at the four record-processing entry points,
+    /// this turns that into the record's real position.
+    ///
+    /// Only a **zero** offset is filled in, so the sites that already carry a
+    /// real one are left alone. `BadMagic`'s offset is a field position
+    /// *within* the record header (`RH_MAGIC_NUMBER`, 28) rather than a file
+    /// position, so it is rebased rather than overwritten: `invalid HIPO magic
+    /// at offset 0x1c` becomes `0x10c388d1c`.
+    ///
+    /// Pair with [`Self::with_path`], which names the file. On a multi-file
+    /// chain that is the more valuable half — the offset is useless if you do
+    /// not know which file it indexes.
+    pub fn at_offset(self, record_offset: u64) -> Self {
+        match self {
+            Self::CorruptRecord { offset: 0, reason } => Self::CorruptRecord {
+                offset: record_offset,
+                reason,
+            },
+            Self::BadMagic {
+                offset,
+                found,
+                expected,
+            } if offset < crate::wire::constants::RECORD_HEADER_SIZE as u64 => Self::BadMagic {
+                offset: record_offset + offset,
+                found,
+                expected,
+            },
+            // Everything else has nowhere to put an offset — `Compression` is
+            // a bare `&'static str`, and a corrupt LZ4 payload is what most
+            // real corruption produces, so leaving these unlocated would miss
+            // the common case. Wrap instead, as `with_path` does for the
+            // filename.
+            already @ (Self::AtOffset { .. } | Self::Path { .. }) => already,
+            other => Self::AtOffset {
+                offset: record_offset,
+                source: Box::new(other),
+            },
         }
     }
 }
