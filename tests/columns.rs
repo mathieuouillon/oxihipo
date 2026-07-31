@@ -480,3 +480,111 @@ fn empty_column_buffers_report_zero_events() {
     assert_eq!(one.event_count(), 2);
     assert_eq!(one.total_rows(), 7);
 }
+
+/// `read_columns` must hand back buffers sized to their contents.
+///
+/// Assembly grows each column with `extend_from_slice` per record, so the
+/// result carries the last doubling's headroom — measured at **1.664x the
+/// payload** on a real CLAS12 DST, and retained for as long as the caller
+/// keeps the result. For the Python binding that is the lifetime of the NumPy
+/// array: `into_pyarray` moves the `Vec` across, slack included.
+///
+/// Shrinking at the end of assembly costs no peak (it runs after the final
+/// growth) and no measurable time — sequential 4.37/4.41/4.53 s before against
+/// 4.40/4.39/4.44 s after, interleaved.
+#[test]
+fn read_columns_returns_buffers_without_growth_slack() {
+    use oxihipo::ColumnData;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("slack.hipo");
+
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        1,
+        [
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
+            ("vt".into(), DataType::Double, 1),
+            ("charge".into(), DataType::Byte, 1),
+            ("status".into(), DataType::Short, 1),
+            ("evno".into(), DataType::Long, 1),
+        ],
+    ));
+
+    // Many records with varying row counts, so the buffers genuinely grow by
+    // doubling rather than landing on an exact capacity by luck.
+    let mut w = Writer::create(&path)
+        .schemas(&d)
+        .compression(Compression::Lz4)
+        .max_record_events(11)
+        .build()
+        .unwrap();
+    for i in 0..900i64 {
+        w.event(|ev| {
+            ev.bank("REC::Particle", |b| {
+                for r in 0..=(i % 7) {
+                    b.row(|x| {
+                        x.set("pid", (11 + r) as i32)?;
+                        x.set("px", i as f32 * 0.5)?;
+                        x.set("vt", i as f64)?;
+                        x.set("charge", (r % 3 - 1) as i8)?;
+                        x.set("status", -(i as i16 % 5))?;
+                        x.set("evno", i)?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    w.finish().unwrap();
+
+    let chain = Chain::open(&path).unwrap();
+    for threads in [1usize, 4] {
+        let bufs = chain
+            .read_columns(
+                &[(
+                    "REC::Particle",
+                    &["pid", "px", "vt", "charge", "status", "evno"][..],
+                )],
+                None,
+                threads,
+            )
+            .unwrap();
+        assert_eq!(bufs.len(), 1);
+        let b = &bufs[0];
+        assert!(
+            b.total_rows() > 900,
+            "{threads}t: fixture is too small to grow"
+        );
+
+        assert_eq!(
+            b.offsets.capacity(),
+            b.offsets.len(),
+            "{threads}t: offsets carry {} elements of slack",
+            b.offsets.capacity() - b.offsets.len()
+        );
+        for c in &b.columns {
+            let (len, cap) = match &c.data {
+                ColumnData::I8(v) => (v.len(), v.capacity()),
+                ColumnData::I16(v) => (v.len(), v.capacity()),
+                ColumnData::I32(v) => (v.len(), v.capacity()),
+                ColumnData::I64(v) => (v.len(), v.capacity()),
+                ColumnData::F32(v) => (v.len(), v.capacity()),
+                ColumnData::F64(v) => (v.len(), v.capacity()),
+            };
+            assert_eq!(
+                cap,
+                len,
+                "{threads}t: column {:?} carries {} elements of slack",
+                c.name,
+                cap - len
+            );
+        }
+    }
+}

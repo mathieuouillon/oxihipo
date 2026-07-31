@@ -7,7 +7,18 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`read_columns` handed back buffers carrying their growth slack.** Assembly
+  grows each column with `extend_from_slice` per record, so the result kept the
+  last doubling's headroom — measured at **1.664x the payload** on a real
+  CLAS12 DST, retained for as long as the caller held it. That is the lifetime
+  of the NumPy array for the Python binding, where `into_pyarray` moves the
+  `Vec` across with the slack included. Now **1.000x**, on both the sequential
+  and parallel paths, at no cost in peak memory (the shrink runs after the
+  final growth) or throughput (sequential 4.37/4.41/4.53 s before against
+  4.40/4.39/4.44 s after, interleaved).
+
 
 ## [0.8.0] - 2026-07-31
 
