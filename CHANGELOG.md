@@ -7,7 +7,71 @@ version is below `1.0.0`, minor releases may contain breaking changes.
 
 ## [Unreleased]
 
-Nothing yet.
+**This will be `0.8.0`, not `0.7.2`.** Removing the `Debug` bound from
+`BankRow::Handles` relaxes what an implementor must provide, but it is
+source-breaking for any *consumer* that relied on `T::Handles: Debug` in a
+generic context — so a `^0.7` dependent could break on a plain `cargo update`.
+
+### Added
+
+- **`Chain::par_fold(threads, id, fold, reduce)`** — per-worker accumulators
+  joined by a reduce, instead of every result crossing a shared atomic. How
+  much that buys depends entirely on how expensive your events are, and both
+  regimes are documented: on 4M one-row events, `for_each` going from one
+  thread to twelve measures **0.32x** — three times *slower* than serial —
+  while `par_fold` measures 7.98x. On a real 599k-event CLAS12 DST, where LZ4
+  decode of 47 banks dominates, `for_each` already scales 3.27x and the two
+  land within run-to-run noise. `examples/bench_par` reports all four numbers.
+- **`Chain::fold(init, f)`** — the sequential case with no `Send`/`Sync` bound,
+  so a `Cell` or `Rc` accumulator compiles on a path that never spawns a thread.
+- **`Chain::open_with(src, len, label)`** and **`pub trait ReadAt`** — read a
+  chain from any byte source. XRootD, S3, HTTP-range and in-memory testing
+  become third-party code; `read_exact_at` takes `&self`, so a rayon scan
+  already issues concurrent positioned reads against it.
+- **`Bank::iter(handle)`** and **`Bank::read_into(handle, &mut Vec<T>)`** —
+  allocation-free column access on byte-packed rows.
+- **`Dict::try_add`** — non-panicking `add`.
+
+### Fixed
+
+- **`OwnedEvent::size()` decompressed the whole event to measure it.** On the
+  split codecs it reassembled via `bytes()`, inflating every bank stream in the
+  record to answer a question the record directory already holds. 5.7 -> 19.0
+  Mev/s on `Lz4PerBank` (3.3x) and 5.6 -> 19.6 on `Lz4PerColumn` (3.5x).
+- **`Composite::f64` and `Composite::f32` returned 0.0 for every integer
+  field.** Both matched only `Float`/`Double`, so reading an `Int` field came
+  back 0.0 — indistinguishable from a stored zero, in an accessor whose whole
+  purpose is to erase the type.
+- **`Dict::parse_text` could abort the process.** It is public, in the prelude,
+  and takes arbitrary text; more than 65,536 schemas overflowed the `u16` id
+  space and panicked, and release builds set `panic = "abort"`, so
+  `catch_unwind` never returned. `parse_text` and the chain's dictionary merge
+  now use `Dict::try_add`.
+- **`Chain::for_each_column` silently ignored an active filter**, returning
+  every value in the file. It now returns
+  `HipoError::FilterIgnoredByColumnSweep` naming the alternative.
+  `Chain::event` and `Chain::event_count` document that they are pre-filter.
+- **The split-codec parsers reserved a file-controlled directory length before
+  bounding it**, so a crafted 24-byte section could force a
+  `Vec::with_capacity(3_000_000_008)` before `decompress`'s own amplification
+  check ran.
+- **`compress()` fabricated a `&mut [u8]` over uninitialized spare capacity.**
+  The default `lz4-c` build no longer creates the reference at all. (Hardening:
+  Miri does not flag the old shape, only an actual uninitialized *read*.)
+- Split codecs now **reject big-endian records** explicitly rather than being
+  stopped incidentally by a later `event_count` mismatch.
+
+### Changed
+
+- **`BankRow::Handles` no longer requires `Debug`**, lifting the 12-column cap
+  on `bank_row!` — std implements `Debug` for tuples only up to 12 elements,
+  and 16 of the 30 CLAS12 bank definitions are wider. `REC::Calorimeter`'s 28
+  columns now map to one struct.
+- The split-codec writer doc blocks stated `ext_format_version` 3 and 2 while
+  the code has emitted 2 and 1 since 0.7.1 — the revert updated the constants,
+  tests and changelog but missed the prose. The version numbers now live in
+  `wire::constants` and are shared by writer and reader.
+
 
 ## [0.7.1] - 2026-07-29
 

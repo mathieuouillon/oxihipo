@@ -84,6 +84,35 @@ pub const BITINFO_HEADER_TYPE_SHIFT: u32 = 28;
 // --- Compression word layout ---
 pub const COMP_TYPE_MASK: u32 = 0xF000_0000;
 pub const COMP_TYPE_SHIFT: u32 = 28;
+
+// --- split-codec extension-format versions -------------------------------
+//
+// These are a **cross-implementation contract**, not an internal version
+// counter. The `hipo-cpp` and `hipo-java` `feature/bybank-bycolumn-compression`
+// branches document and implement exactly these two numbers. 0.7.0 raised them
+// to 3 and 2 when it appended the composite `header_size` table; `hipo-java`
+// then failed to decode and `hipo-cpp` segfaulted, and 0.7.1 reverted it.
+//
+// **Do not bump them to describe a format addition.** The directory tables are
+// append-only and the readers detect the optional tail by *length*, so a reader
+// that predates a table simply never looks that far. That is what lets the
+// format grow while the byte stays fixed — and it was verified by patching only
+// the version byte back on a 0.7.0 file, after which both other
+// implementations read it perfectly.
+
+/// The `ext_format_version` byte written into every `Lz4PerBank` record.
+pub const EXT_FORMAT_VERSION_BY_BANK: u8 = 2;
+
+/// The `ext_format_version` byte written into every `Lz4PerColumn` record.
+pub const EXT_FORMAT_VERSION_PER_COLUMN: u8 = 1;
+
+/// Versions `ByBankRecord::parse` accepts. `3` is only ever seen in files
+/// written by 0.7.0; it is read, never written.
+pub const EXT_FORMAT_ACCEPT_BY_BANK: [u8; 2] = [EXT_FORMAT_VERSION_BY_BANK, 3];
+
+/// Versions `PerColumnRecord::parse` accepts. `2` is only ever seen in files
+/// written by 0.7.0; it is read, never written.
+pub const EXT_FORMAT_ACCEPT_PER_COLUMN: [u8; 2] = [EXT_FORMAT_VERSION_PER_COLUMN, 2];
 pub const COMP_TYPE_BYTE: u32 = 0x0000_000F; // after shift
 pub const COMP_LENGTH_MASK: u32 = 0x0FFF_FFFF;
 

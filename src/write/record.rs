@@ -401,22 +401,22 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
     })
 }
 
-/// By-bank **version 3** record path.
+/// By-bank record path (`Lz4PerBank`, tag 6) — on-disk `ext_format_version` **2**.
 ///
-/// Same bank streams as v1, but the directory is prefixed with an
+/// Same bank streams as the unsplit layout, but the directory is prefixed with an
 /// extension-format-version byte and LZ4-compressed (it is dominated by
 /// the redundant per-event size matrix). Compressed payload layout:
 ///
 /// ```text
 /// +-- compressed payload section -------------------+
-/// | u8  ext_format_version (= 3)                    |
+/// | u8  ext_format_version (= 2)                    |
 /// | u8  reserved[3]                                 |   pad to 4-byte align
 /// | u32 num_banks (B)                               |
 /// | u32 event_count (E)                             |
 /// | u32 directory_compressed_len                    |
 /// | u32 directory_decompressed_len                  |
-/// | LZ4(directory)                                  |   the v1 directory body
-/// | concat B × LZ4 bank streams                     |   (identical to v1)
+/// | LZ4(directory)                                  |
+/// | concat B × LZ4 bank streams                     |
 /// +-------------------------------------------------+
 ///
 /// directory (decompressed) =
@@ -426,25 +426,34 @@ fn build_by_bank_parts(events: &[&[u8]], compress_buf: &mut Vec<u8>) -> Result<B
 ///   E × u32 event_tags
 ///   E × ceil(B/8) presence
 ///   B × E × u32 event_bank_sizes
-///   B × u8  composite header_size            <- v3 only
+///   B × u8  composite header_size            <- optional, length-detected
 /// ```
 ///
-/// ## What version 3 adds
+/// ## The composite `header_size` tail
 ///
 /// A bank's structure length word packs the data size into its low 24 bits and
 /// the composite `header_size` — the length of the format string — into its top
 /// byte. Splitting a record into per-bank streams throws the structure headers
-/// away, so v2 rebuilt that byte as zero and a composite bank came back looking
-/// ordinary. The `header_size` table is what restores it.
+/// away, so without this table a composite bank came back looking ordinary.
 ///
-/// It is appended **after** the per-event size matrix rather than widening the
-/// descriptor, so every offset above is byte-for-byte what v2 had. One parser
-/// therefore reads both: v2 simply has no tail, and every `header_size`
-/// defaults to 0 — which is exactly what v2 meant.
+/// ## The version byte does not move
 ///
-/// The reader rejects any other version, so a v3 file is not silently misread
-/// by an older build. Neither version is readable by C++ hipo4, which does not
-/// know the split codecs at all.
+/// It is [`EXT_FORMAT_VERSION_BY_BANK`] and it stays 2. That number is a
+/// **cross-implementation contract**: the `hipo-cpp` and `hipo-java`
+/// `feature/bybank-bycolumn-compression` branches document and implement
+/// exactly 2. 0.7.0 raised it to 3 to announce the composite
+/// `header_size` tail; `hipo-java` then failed to decode those files and
+/// `hipo-cpp` segfaulted on them, and 0.7.1 reverted it. **Do not bump it to
+/// describe a format addition.**
+///
+/// The tail is appended after every other directory table, so a reader that
+/// predates it never looks that far, and `ByBankRecord::parse` detects it by **directory
+/// length** rather than by the version byte. That is what lets the format grow
+/// while the byte stays fixed — verified by patching only the version byte back
+/// on a 0.7.0 file, after which both other implementations read it perfectly.
+///
+/// On read, [`EXT_FORMAT_ACCEPT_BY_BANK`] also allows 3, so files written by 0.7.0
+/// remain readable. 3 is never written.
 fn build_by_bank_record_bytes(
     events: &[&[u8]],
     user_word_1: u64,
@@ -453,8 +462,6 @@ fn build_by_bank_record_bytes(
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
-    const EXT_FORMAT_VERSION: u8 = 2;
-
     let ByBankParts {
         num_banks,
         event_count,
@@ -520,7 +527,7 @@ fn build_by_bank_record_bytes(
 
     payload_buf.clear();
     payload_buf.reserve(section_len);
-    payload_buf.push(EXT_FORMAT_VERSION);
+    payload_buf.push(EXT_FORMAT_VERSION_BY_BANK);
     payload_buf.extend_from_slice(&[0u8, 0, 0]); // reserved
     payload_buf.extend_from_slice(&(num_banks as u32).to_le_bytes());
     payload_buf.extend_from_slice(&event_count.to_le_bytes());
@@ -573,7 +580,8 @@ fn build_by_bank_record_bytes(
     Ok(out)
 }
 
-/// Per-*column* record path (`Lz4PerColumn`, tag 7).
+/// Per-*column* record path (`Lz4PerColumn`, tag 7) — on-disk
+/// `ext_format_version` **1**.
 ///
 /// Within each bank, every column is stored as its own LZ4-HC stream laid
 /// out **cross-event contiguous** (all events' `px`, then all `py`, …).
@@ -587,7 +595,7 @@ fn build_by_bank_record_bytes(
 ///
 /// ```text
 /// +-- compressed payload section -------------------+
-/// | u8  ext_format_version (= 2)                    |
+/// | u8  ext_format_version (= 1)                    |
 /// | u8  reserved[3]                                 |   pad to 4-byte align
 /// | u32 num_banks (B)                               |
 /// | u32 event_count (E)                             |
@@ -604,23 +612,31 @@ fn build_by_bank_record_bytes(
 ///   E × ceil(B/8) presence
 ///   B × E × u32 event_bank_byte_sizes               (decompressed bank size)
 ///   S × { u32 compressed_size, u32 decompressed_size }
-///   B × u8  composite header_size                   <- v2 only
+///   B × u8  composite header_size                   <- optional, length-detected
 /// ```
 ///
 /// Streams appear bank-major: bank 0's columns (or its single opaque
 /// stream), then bank 1's, and so on — matching the `num_cols` order.
 ///
-/// ## What version 2 adds
 ///
-/// The `header_size` table, for the same reason as by-bank v3: a bank's
-/// structure length word carries the composite format-string length in its top
-/// byte, splitting a record discards the structure headers, and v1 rebuilt that
-/// byte as zero — so a composite bank came back looking ordinary.
+/// ## The version byte does not move
 ///
-/// It is appended **after** the per-stream size table (whose length depends on
-/// `num_cols`, hence the position) rather than widening the descriptor, so every
-/// offset above is byte-for-byte what v1 had and one parser reads both, with the
-/// tail defaulting to 0. The reader rejects any other version.
+/// It is [`EXT_FORMAT_VERSION_PER_COLUMN`] and it stays 1. That number is a
+/// **cross-implementation contract**: the `hipo-cpp` and `hipo-java`
+/// `feature/bybank-bycolumn-compression` branches document and implement
+/// exactly 1. 0.7.0 raised it to 2 to announce the composite
+/// `header_size` tail; `hipo-java` then failed to decode those files and
+/// `hipo-cpp` segfaulted on them, and 0.7.1 reverted it. **Do not bump it to
+/// describe a format addition.**
+///
+/// The tail is appended after every other directory table, so a reader that
+/// predates it never looks that far, and `PerColumnRecord::parse` detects it by **directory
+/// length** rather than by the version byte. That is what lets the format grow
+/// while the byte stays fixed — verified by patching only the version byte back
+/// on a 0.7.0 file, after which both other implementations read it perfectly.
+///
+/// On read, [`EXT_FORMAT_ACCEPT_PER_COLUMN`] also allows 2, so files written by 0.7.0
+/// remain readable. 2 is never written.
 fn build_per_column_record_bytes(
     events: &[&[u8]],
     dict: &Dict,
@@ -630,7 +646,6 @@ fn build_per_column_record_bytes(
     payload_buf: &mut Vec<u8>,
     compress_buf: &mut Vec<u8>,
 ) -> Result<Vec<u8>> {
-    const EXT_FORMAT_VERSION: u8 = 1;
     let event_count = events.len() as u32;
     let e_count = events.len();
 
@@ -813,7 +828,7 @@ fn build_per_column_record_bytes(
 
     payload_buf.clear();
     payload_buf.reserve(section_len);
-    payload_buf.push(EXT_FORMAT_VERSION);
+    payload_buf.push(EXT_FORMAT_VERSION_PER_COLUMN);
     payload_buf.extend_from_slice(&[0u8, 0, 0]); // reserved
     payload_buf.extend_from_slice(&(num_banks as u32).to_le_bytes());
     payload_buf.extend_from_slice(&event_count.to_le_bytes());

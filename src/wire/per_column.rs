@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 use crate::compress::decompress;
 use crate::error::{HipoError, Result};
 use crate::wire::bytes::{Endianness, read_u32_le};
-use crate::wire::constants::CompressionType;
+use crate::wire::constants::{CompressionType, EXT_FORMAT_ACCEPT_PER_COLUMN};
 use crate::wire::record_header::RecordHeader;
 
 /// Owns a [`PerColumnRecord`]'s compressed payload section (one `pread`'d
@@ -191,7 +191,7 @@ impl PerColumnRecord {
         // is identical, so one parser reads both: v1 simply has no tail and
         // every `header_size` defaults to 0 — which is exactly what v1 meant.
         let ext_version = section[0];
-        if ext_version != 1 && ext_version != 2 {
+        if !EXT_FORMAT_ACCEPT_PER_COLUMN.contains(&ext_version) {
             return Err(HipoError::CorruptRecord {
                 offset: 0,
                 reason: "Lz4PerColumn: unsupported extension-format version",
