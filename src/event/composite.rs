@@ -184,6 +184,12 @@ impl<'b> Composite<'b> {
         }
     }
 
+    /// `field` of `row` as an `i32`, widening Byte and Short.
+    ///
+    /// Returns 0 for a `Float`, `Double` or `Long` field: narrowing those has
+    /// no answer that is right more often than it is wrong, so the caller is
+    /// expected to pick [`Self::f64`] or [`Self::i64`] from the field's
+    /// declared type. Also 0 for a missing field or out-of-range row.
     pub fn i32(&self, field: usize, row: u32) -> i32 {
         let (Some(off), Some(ty)) = (self.offset(field, row), self.field_ty(field)) else {
             return 0;
@@ -196,6 +202,11 @@ impl<'b> Composite<'b> {
         }
     }
 
+    /// `field` of `row` as an `i64`, widening every integer field exactly.
+    ///
+    /// Returns 0 for a `Float` or `Double` field — truncating a float towards
+    /// zero silently is worse than declining, and [`Self::f64`] reads those
+    /// losslessly. Also 0 for a missing field or out-of-range row.
     pub fn i64(&self, field: usize, row: u32) -> i64 {
         let (Some(off), Some(ty)) = (self.offset(field, row), self.field_ty(field)) else {
             return 0;
@@ -209,6 +220,11 @@ impl<'b> Composite<'b> {
         }
     }
 
+    /// `field` of `row` as an `f32`, widening any numeric field type.
+    ///
+    /// Returns 0.0 for a missing field, an out-of-range row, or truncated
+    /// data — the same best-effort convention as the integer accessors above.
+    /// `Long` and `Double` sources are narrowed and may lose precision.
     pub fn f32(&self, field: usize, row: u32) -> f32 {
         let (Some(off), Some(ty)) = (self.offset(field, row), self.field_ty(field)) else {
             return 0.0;
@@ -216,10 +232,23 @@ impl<'b> Composite<'b> {
         match ty {
             DataType::Float => read_f32_le(self.data, off),
             DataType::Double => read_f64_le(self.data, off) as f32,
-            _ => 0.0,
+            // Integer fields widen, exactly as `i32` and `i64` already widen
+            // Byte and Short. Without these arms an `Int` field read through
+            // `f32` came back 0.0 — indistinguishable from a stored zero, in
+            // an accessor whose whole job is to erase the type.
+            DataType::Byte => f32::from(self.data[off] as i8),
+            DataType::Short => f32::from(read_i16_le(self.data, off)),
+            DataType::Int => read_u32_le(self.data, off) as i32 as f32,
+            DataType::Long => read_u64_le(self.data, off) as i64 as f32,
         }
     }
 
+    /// `field` of `row` as an `f64`, widening any numeric field type.
+    ///
+    /// Byte, Short, Int and Float are exact. `Long` is lossy above 2^53 — the
+    /// usual `i64`-to-`f64` caveat; use [`Self::i64`] when the field is a
+    /// `Long` and every bit matters. Returns 0.0 for a missing field, an
+    /// out-of-range row, or truncated data.
     pub fn f64(&self, field: usize, row: u32) -> f64 {
         let (Some(off), Some(ty)) = (self.offset(field, row), self.field_ty(field)) else {
             return 0.0;
@@ -227,7 +256,10 @@ impl<'b> Composite<'b> {
         match ty {
             DataType::Double => read_f64_le(self.data, off),
             DataType::Float => f64::from(read_f32_le(self.data, off)),
-            _ => 0.0,
+            DataType::Byte => f64::from(self.data[off] as i8),
+            DataType::Short => f64::from(read_i16_le(self.data, off)),
+            DataType::Int => f64::from(read_u32_le(self.data, off) as i32),
+            DataType::Long => read_u64_le(self.data, off) as i64 as f64,
         }
     }
 }
@@ -334,5 +366,60 @@ mod tests {
         assert_eq!(comp.i32(3, 0), -42);
         assert_eq!(comp.f32(4, 0), 1.75);
         assert_eq!(comp.f64(5, 0), 0.125);
+    }
+
+    /// Reading an integer field as a float must widen it, not report zero.
+    ///
+    /// `i32`/`i64` already widen within the integer family — `i64` accepts
+    /// Byte, Short, Int and Long. The float accessors never got the same
+    /// treatment and fell through to `_ => 0.0`, so `f64(field)` on an `Int`
+    /// column returned 0.0 with no way for the caller to tell that apart from
+    /// a real zero. That is the failure mode a type-erased accessor exists to
+    /// avoid.
+    #[test]
+    fn float_accessors_widen_integer_fields() {
+        // Format "bslifd" lays the fields out Byte, Short, Long, Int, Float,
+        // Double — note Long precedes Int. Writing them in declaration order
+        // rather than alphabetical order is the whole point of the fixture.
+        let mut rows = Vec::new();
+        rows.push(0xFBu8); // field 0, b: -5
+        rows.extend_from_slice(&300i16.to_le_bytes()); // field 1, s
+        rows.extend_from_slice(&123_456_789i64.to_le_bytes()); // field 2, l
+        rows.extend_from_slice(&7i32.to_le_bytes()); // field 3, i
+        rows.extend_from_slice(&1.5f32.to_le_bytes()); // field 4, f
+        rows.extend_from_slice(&(-2.25f64).to_le_bytes()); // field 5, d
+
+        let bytes = build_composite_bytes(1, 1, "bslifd", &rows);
+        let comp = Composite::from_structure(&bytes).unwrap();
+
+        // Integers, read as f64. Every one of these is exactly representable.
+        assert_eq!(comp.f64(0, 0), -5.0, "Byte");
+        assert_eq!(comp.f64(1, 0), 300.0, "Short");
+        assert_eq!(comp.f64(2, 0), 123_456_789.0, "Long");
+        assert_eq!(comp.f64(3, 0), 7.0, "Int");
+        // ...and the float fields still work.
+        assert_eq!(comp.f64(4, 0), 1.5, "Float");
+        assert_eq!(comp.f64(5, 0), -2.25, "Double");
+
+        // Same for f32.
+        assert_eq!(comp.f32(0, 0), -5.0, "Byte as f32");
+        assert_eq!(comp.f32(1, 0), 300.0, "Short as f32");
+        assert_eq!(comp.f32(2, 0), 123_456_789.0f32, "Long as f32");
+        assert_eq!(comp.f32(3, 0), 7.0, "Int as f32");
+        assert_eq!(comp.f32(4, 0), 1.5, "Float as f32");
+        assert_eq!(comp.f32(5, 0), -2.25, "Double as f32");
+
+        // The integer accessors are unchanged, including their refusal to
+        // reinterpret a float.
+        assert_eq!(comp.i64(2, 0), 123_456_789);
+        assert_eq!(comp.i32(3, 0), 7);
+        assert_eq!(comp.i32(0, 0), -5);
+        assert_eq!(comp.i64(4, 0), 0, "Float via i64 stays 0 by design");
+        assert_eq!(comp.i64(5, 0), 0, "Double via i64 stays 0 by design");
+
+        // An out-of-range field or row is still 0 on every accessor — that
+        // path is unchanged and is why these are documented as best-effort.
+        assert_eq!(comp.f64(99, 0), 0.0);
+        assert_eq!(comp.f64(0, 99), 0.0);
     }
 }

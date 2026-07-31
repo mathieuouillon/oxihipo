@@ -126,6 +126,13 @@ impl<'a> EventCtx<'a> {
         }
     }
 
+    /// Serialised size of the event in bytes — the `EventHeader` plus every
+    /// bank structure present.
+    ///
+    /// **O(1)** on contiguous bytes (the header's own length word) and
+    /// **O(banks)** on the split codecs, where the present banks' sizes are
+    /// summed out of the record directory. Nothing is decompressed on any
+    /// path, which is what makes this usable as a per-event cut.
     pub fn size(&self) -> u32 {
         match self.backend {
             Backend::Bytes(e) => e.size(),

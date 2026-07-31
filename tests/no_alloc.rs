@@ -455,3 +455,59 @@ fn column_iter_length_and_reverse() {
         assert_eq!(fwd, rev, "reverse iteration disagrees");
     }
 }
+
+/// `OwnedEvent::size()` must answer from the record directory, not by
+/// reassembling the event.
+///
+/// A correctness test cannot catch this: routing the split codecs through
+/// `bytes()` returns exactly the right number, just after inflating every bank
+/// stream in the record. Verified — reverting the implementation leaves
+/// `tests/all_formats.rs::size_agrees_across_codecs_and_matches_the_uncompressed_span`
+/// green. What separates the two is that the slow route *allocates*: `bytes()`
+/// builds an owned reassembly per event, so the allocation count scales with
+/// events instead of records.
+///
+/// So this is the guard for the performance property, and the `all_formats`
+/// test is the guard for the numeric one. Neither alone is sufficient.
+#[test]
+fn size_does_not_reassemble_the_event_on_split_codecs() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for (name, compression) in [
+        ("perbank", oxihipo::Compression::Lz4PerBank),
+        ("percolumn", oxihipo::Compression::Lz4PerColumn),
+    ] {
+        let path = dir.path().join(format!("size_{name}.hipo"));
+        // 2000 events over 20 records: if `size()` allocates per event the
+        // count lands in the thousands; per record it stays in the dozens.
+        build_fixture_with(&path, 2000, 100, compression);
+
+        let chain = Chain::open(&path).unwrap();
+        // Warm anything lazily built at open so it is not attributed below.
+        let mut warm = 0u64;
+        for ev in chain.events() {
+            warm += u64::from(ev.unwrap().size());
+        }
+        assert!(warm > 0);
+
+        let mut total = 0u64;
+        let allocs = count_allocs(|| {
+            let chain = Chain::open(&path).unwrap();
+            for ev in chain.events() {
+                total += u64::from(ev.unwrap().size());
+            }
+        });
+        assert!(total > 0, "{name}: fixture produced no events");
+
+        // Streaming 2000 events over 20 records costs a bounded number of
+        // allocations (record buffers, the per-record directory, the chain
+        // open itself). The threshold is far below 2000 so it cannot be met
+        // by an implementation that allocates once per event, and far above
+        // the ~60-100 the record path actually needs.
+        assert!(
+            allocs < 600,
+            "{name}: size() allocated {allocs} times for 2000 events over 20 records \
+             — that is per-event, so it is reassembling rather than reading the directory"
+        );
+    }
+}

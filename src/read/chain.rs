@@ -297,6 +297,14 @@ impl Chain {
     }
 
     /// Total events across every file in the chain.
+    ///
+    /// **Pre-filter.** A filter bound with [`Self::with_filter`] does not
+    /// change this number — it counts what the files hold, not what a scan
+    /// would yield. So `for i in 0..chain.event_count() { chain.event(i) }`
+    /// walks the unfiltered stream twice over: once in the bound, once in
+    /// [`Self::event`], which is also pre-filter. Use [`Self::events`] (or
+    /// [`Self::for_each`], whose [`ChainStats::events_yielded`] reports the
+    /// surviving count) when the filter has to hold.
     pub fn event_count(&self) -> u64 {
         self.file_event_offsets.last().copied().unwrap_or(0)
     }
@@ -435,6 +443,13 @@ impl Chain {
 
     /// Random-access fetch by global event index (0-based, across all
     /// files in input order). `None` if the index is out of range.
+    ///
+    /// **`idx` is a pre-filter index and the filter is not applied.** This is
+    /// a direct index into the file's event stream, so it can hand back an
+    /// event that [`Self::events`] would drop, and index `n` is not "the nth
+    /// surviving event". Same convention as
+    /// [`read_columns_at`](Self::read_columns_at). Use [`Self::events`] when
+    /// the filter must hold.
     pub fn event(&self, idx: u64) -> Option<OwnedEvent> {
         // Binary search: find the file whose first_event ≤ idx.
         let file_idx = self
@@ -544,23 +559,38 @@ impl Chain {
     /// `bank`/`column` is absent from the dictionary or `T` doesn't match
     /// the column's wire type and per-row length.
     ///
-    /// # This does **not** apply the chain filter
+    /// # Not usable on a filtered chain — returns `Err`
     ///
-    /// It walks the record index directly, so a filter set with
-    /// [`Chain::with_filter`] — and the record-tag pushdown — are both ignored:
-    /// you get every value in the file. That is deliberate, because the
-    /// per-column fast path reads whole column streams and has no per-event
-    /// predicate to apply, but it is a trap: a caller that filters and then
-    /// sweeps gets a plausible number over the wrong event set, silently.
+    /// This walks the record index directly and sweeps whole column streams,
+    /// so a filter set with [`Chain::with_filter`] — and the record-tag
+    /// pushdown — would both be ignored, handing back every value in the file.
+    /// Rather than return a plausible number computed over the wrong event
+    /// set, it refuses, with `HipoError::FilterIgnoredByColumnSweep`. Use
+    /// [`Chain::read_columns`] or [`Chain::column_values`] instead: both are
+    /// columnar and both honour the filter and the tag pushdown.
     ///
-    /// Use [`Chain::read_columns`] when a filter is in play. It is also
-    /// columnar, honours the filter and the tag pushdown, and costs little more
-    /// on the formats this method was written for.
+    /// The reason it does not simply apply the filter is economic, not
+    /// structural — an earlier version of this doc claimed the fast path "has
+    /// no per-event predicate to apply", and that is wrong. The predicate
+    /// exists and is cheap: `Filter::check_per_column` decides bank presence
+    /// and event tag from the record header and offset tables without
+    /// decompressing anything, and `read_columns` is a working proof it can be
+    /// done on every codec. But honouring it forces one slice per surviving
+    /// event instead of one cast over the whole record's column stream —
+    /// measured at 1.6-2.6x slower on `Lz4PerColumn` and 1.3-1.4x on
+    /// `Lz4PerBank`. That is `read_columns`. Deleting the only reason this
+    /// method exists is not a fix for it.
     pub fn for_each_column<T, F>(&self, bank: &str, column: &str, mut visit: F) -> Result<()>
     where
         T: crate::schema::BankColumnType,
         F: FnMut(&[T]),
     {
+        if self.filter.as_ref().is_some_and(Filter::is_active) {
+            return Err(HipoError::FilterIgnoredByColumnSweep {
+                bank: bank.to_string(),
+                column: column.to_string(),
+            });
+        }
         let schema = self.dict.require(bank)?;
         // Validates the element type *and* per-row length against the column.
         let handle = schema.handle::<T>(column)?;

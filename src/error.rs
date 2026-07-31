@@ -102,6 +102,15 @@ pub enum HipoError {
         compression: &'static str,
     },
 
+    #[error(
+        "`for_each_column({bank:?}, {column:?})` cannot be used on a filtered chain: it sweeps \
+         whole column streams straight out of the record index, so it would hand back every value \
+         in the file rather than only the surviving events' — a plausible number over the wrong \
+         event set; use `Chain::read_columns` or `Chain::column_values`, which are also columnar \
+         and do honour the filter and the record-tag pushdown"
+    )]
+    FilterIgnoredByColumnSweep { bank: String, column: String },
+
     #[error("compression error: {0}")]
     Compression(&'static str),
 

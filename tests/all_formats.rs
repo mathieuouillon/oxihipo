@@ -273,3 +273,250 @@ fn for_each_column_works_on_every_format() {
         assert!((px - ref_px).abs() < 1e-3, "{name}: px sum");
     }
 }
+
+/// `size()` must be codec-independent, and must not decompress to find out.
+///
+/// It used to route the split codecs through `bytes()`, which reassembles the
+/// whole event — inflating every bank stream in the record to answer a
+/// question the directory already holds. Measured over 20,000 events that was
+/// 5.7 Mev/s against 19.0 for the directory route on `Lz4PerBank` (3.3x) and
+/// 5.6 against 19.6 on `Lz4PerColumn` (3.5x).
+///
+/// The ground truth here is `Compression::None`, where an event is a
+/// contiguous span and `size()` is `end - start` — a number no bank-summing
+/// loop is involved in producing. Every other codec must agree with it
+/// event-for-event, which catches a summing bug that a self-consistent
+/// comparison (`size()` against `ctx().size()`) would not: those two share the
+/// implementation now.
+#[test]
+fn size_agrees_across_codecs_and_matches_the_uncompressed_span() {
+    use oxihipo::{Chain, Compression, DataType, Dict, Schema, Writer};
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Several banks, varying row counts, and one bank that is absent from
+    // some events — so the "sum the *present* banks" loop is exercised
+    // rather than a fixed total.
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Event",
+        300,
+        30,
+        [("evno".into(), DataType::Long, 1)],
+    ));
+    d.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        1,
+        [
+            ("pid".into(), DataType::Int, 1),
+            ("px".into(), DataType::Float, 1),
+            ("charge".into(), DataType::Byte, 1),
+            ("status".into(), DataType::Short, 1),
+        ],
+    ));
+    d.add(Schema::from_columns(
+        "REC::Sparse",
+        400,
+        1,
+        [("v".into(), DataType::Double, 1)],
+    ));
+
+    let write = |path: &std::path::Path, c: Compression| {
+        let mut w = Writer::create(path)
+            .schemas(&d)
+            .compression(c)
+            .max_record_events(23)
+            .build()
+            .unwrap();
+        for i in 0..200i64 {
+            w.event(|ev| {
+                ev.bank("REC::Event", |b| {
+                    b.row(|r| r.set("evno", i).map(|_| ()))?;
+                    Ok(())
+                })?;
+                ev.bank("REC::Particle", |b| {
+                    for r_i in 0..=(i % 5) {
+                        b.row(|r| {
+                            r.set("pid", (11 + r_i) as i32)?;
+                            r.set("px", i as f32)?;
+                            r.set("charge", (r_i % 3 - 1) as i8)?;
+                            r.set("status", -(i as i16 % 7))?;
+                            Ok(())
+                        })?;
+                    }
+                    Ok(())
+                })?;
+                // Present on only a third of events.
+                if i % 3 == 0 {
+                    ev.bank("REC::Sparse", |b| {
+                        b.row(|r| r.set("v", i as f64).map(|_| ()))?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+    };
+
+    let sizes = |path: &std::path::Path| -> Vec<u32> {
+        Chain::open(path)
+            .unwrap()
+            .events()
+            .map(|ev| ev.unwrap().size())
+            .collect()
+    };
+
+    let base_path = dir.path().join("none.hipo");
+    write(&base_path, Compression::None);
+    let baseline = sizes(&base_path);
+    assert_eq!(baseline.len(), 200);
+    // Sanity: the sparse bank really does move the size around, so an
+    // implementation returning a constant would not pass by accident.
+    assert!(
+        baseline
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 5,
+        "fixture is degenerate: sizes are {:?}",
+        &baseline[..8]
+    );
+
+    for (name, c) in [
+        ("lz4", Compression::Lz4),
+        ("perbank", Compression::Lz4PerBank),
+        ("percolumn", Compression::Lz4PerColumn),
+    ] {
+        let p = dir.path().join(format!("{name}.hipo"));
+        write(&p, c);
+        assert_eq!(sizes(&p), baseline, "size() disagreed for {name}");
+    }
+
+    // And the split codecs must reach that answer without decompressing:
+    // `ctx()` is O(1) and `ctx().size()` sums the directory, so the two
+    // routes must agree too.
+    let p = dir.path().join("perbank.hipo");
+    let via_ctx: Vec<u32> = Chain::open(&p)
+        .unwrap()
+        .events()
+        .map(|ev| ev.unwrap().ctx().size())
+        .collect();
+    assert_eq!(via_ctx, baseline);
+}
+
+/// `for_each_column` must refuse a filtered chain rather than sweep past it.
+///
+/// It walks the record index and casts whole column streams, so a filter would
+/// simply not be consulted — the caller would get every value in the file and
+/// no indication that the filter had been dropped. The old behaviour was
+/// documented ("it is a trap"), which is not the same as being safe.
+///
+/// The test pins all three halves of the contract: unfiltered still sweeps,
+/// filtered errors, and the recommended alternative returns the *filtered*
+/// answer — so the error message is pointing somewhere that actually works.
+#[test]
+fn for_each_column_refuses_a_filtered_chain() {
+    use oxihipo::{Chain, Compression, DataType, Dict, Filter, HipoError, Schema, Writer};
+
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut d = Dict::new();
+    d.add(Schema::from_columns(
+        "REC::Particle",
+        300,
+        1,
+        [("pid".into(), DataType::Int, 1)],
+    ));
+    d.add(Schema::from_columns(
+        "RAW::tag",
+        500,
+        1,
+        [("v".into(), DataType::Int, 1)],
+    ));
+
+    for (name, compression) in [
+        ("none", Compression::None),
+        ("lz4", Compression::Lz4),
+        ("perbank", Compression::Lz4PerBank),
+        ("percolumn", Compression::Lz4PerColumn),
+    ] {
+        let path = dir.path().join(format!("f_{name}.hipo"));
+        let mut w = Writer::create(&path)
+            .schemas(&d)
+            .compression(compression)
+            .max_record_events(17)
+            .build()
+            .unwrap();
+        for i in 0..200i32 {
+            w.event(|ev| {
+                ev.bank("REC::Particle", |b| {
+                    b.row(|r| r.set("pid", i).map(|_| ()))?;
+                    Ok(())
+                })?;
+                // Only three quarters of events carry the tag bank.
+                if i % 4 != 0 {
+                    ev.bank("RAW::tag", |b| {
+                        b.row(|r| r.set("v", i).map(|_| ()))?;
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        w.finish().unwrap();
+
+        // Unfiltered: still sweeps everything, unchanged.
+        let plain = Chain::open(&path).unwrap();
+        let mut n = 0usize;
+        let mut sum = 0i64;
+        plain
+            .for_each_column::<i32, _>("REC::Particle", "pid", |vals| {
+                n += vals.len();
+                sum += vals.iter().map(|&v| i64::from(v)).sum::<i64>();
+            })
+            .unwrap();
+        assert_eq!(n, 200, "{name}: unfiltered sweep");
+        assert_eq!(sum, (0..200i64).sum::<i64>(), "{name}: unfiltered sum");
+
+        // Filtered: refuses, and names both the bank and the column so the
+        // message is actionable.
+        let filtered = Chain::open(&path)
+            .unwrap()
+            .with_filter(Filter::require(["RAW::tag"]))
+            .unwrap();
+        let err = filtered
+            .for_each_column::<i32, _>("REC::Particle", "pid", |_| {
+                panic!("{name}: must not visit anything on a filtered chain")
+            })
+            .expect_err("a filtered chain must be refused, not swept");
+        assert!(
+            matches!(err, HipoError::FilterIgnoredByColumnSweep { .. }),
+            "{name}: wrong error variant: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("REC::Particle") && msg.contains("pid"),
+            "{name}: {msg}"
+        );
+        assert!(
+            msg.contains("read_columns"),
+            "{name}: no alternative offered: {msg}"
+        );
+
+        // And the alternative the message points at does honour the filter —
+        // 150 of 200 events, so the two answers genuinely differ.
+        let cols = filtered
+            .read_columns(&[("REC::Particle", &["pid"][..])], None, 1)
+            .unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].total_rows(),
+            150,
+            "{name}: read_columns should see only the events the filter kept"
+        );
+    }
+}
