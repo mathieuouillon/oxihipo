@@ -43,6 +43,19 @@ generic context — so a `^0.7` dependent could break on a plain `cargo update`.
   name: the hash costs ~5.8 ns per cell against ~0.4 ns for the type dispatch.
   Returns `Option`, and refuses array columns rather than silently handing back
   element 0 of a covariance matrix.
+- **`Chain::skim_banks` / `skim_banks_with`** — bank projection, the
+  `hipoutils -filter` equivalent. Keeping `REC::Particle` and `REC::Event` from
+  a 9.1 GB CLAS12 DST leaves 126 MB: **1.389% of the source, 72x smaller**,
+  with the kept values identical. `SkimSummary` reports what was kept, how many
+  structures were dropped, and any `pindex` left pointing at a dropped bank.
+- **`BankPatterns`** — glob patterns over bank names, shared by anything that
+  needs to name a set of banks. `REC::*` is a prefix, `*::Particle` spans the
+  `REC::`/`RECHB::`/`RECAI::` families, and a misspelled literal is an error
+  rather than an empty output.
+- **`StructureHeader::to_bytes`** — the inverse of `parse`. Needed to copy a
+  structure between events without hardcoding the 8-byte layout; on the split
+  codecs a header and its payload are never contiguous, so there is nothing to
+  copy verbatim.
 - **`Dict::try_add`** — non-panicking `add`.
 - **`examples/bench_random`** — concurrent random-access throughput, the
   benchmark for the record cache.

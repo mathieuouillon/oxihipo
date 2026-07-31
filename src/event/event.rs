@@ -42,6 +42,34 @@ impl StructureHeader {
             header_size: ((length >> STRUCT_FORMAT_SHIFT) & STRUCT_FORMAT_BYTE) as u8,
         })
     }
+
+    /// The inverse of [`Self::parse`] — the 8 bytes this header serialises to.
+    ///
+    /// Needed to copy a structure out of one event and into another without
+    /// hardcoding the layout: [`OwnedEvent::structures`](crate::OwnedEvent::structures) yields
+    /// `(StructureHeader, &[u8])`, and on the split codecs the header and its
+    /// payload are never contiguous in memory, so there is nothing to copy
+    /// verbatim. Write these 8 bytes, then the data.
+    ///
+    /// `data_size` is masked to 24 bits and `header_size` packed into the top
+    /// byte, matching `parse`. A `data_size` at or beyond 2^24 cannot be
+    /// represented and is truncated — the writer rejects such banks up front
+    /// with [`HipoError::BankTooLarge`](crate::HipoError::BankTooLarge), so a
+    /// header that came from `parse` can always round-trip.
+    pub const fn to_bytes(&self) -> [u8; BANK_STRUCTURE_SIZE] {
+        let length = (self.data_size & STRUCT_SIZE_MASK)
+            | (((self.header_size as u32) & STRUCT_FORMAT_BYTE) << STRUCT_FORMAT_SHIFT);
+        [
+            self.group as u8,
+            (self.group >> 8) as u8,
+            self.item,
+            self.ty,
+            length as u8,
+            (length >> 8) as u8,
+            (length >> 16) as u8,
+            (length >> 24) as u8,
+        ]
+    }
 }
 
 /// Borrowed view over a HIPO event buffer.

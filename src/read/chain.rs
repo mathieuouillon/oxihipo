@@ -28,11 +28,13 @@ use crate::read::filter::Filter;
 use crate::read::inner::FileInner;
 use crate::read::iter::EventIter;
 use crate::read::source::IntoSources;
-use crate::schema::Dict;
+use crate::schema::{BankPatterns, Dict};
 use crate::tag::TagRegistry;
 use crate::wire::by_bank::ByBankRecord;
 use crate::wire::bytes::write_u32_le;
-use crate::wire::constants::{CompressionType, EH_TAG, RECORD_HEADER_SIZE};
+use crate::wire::constants::{
+    CompressionType, EH_SIZE, EH_TAG, EVENT_HEADER_SIZE, RECORD_HEADER_SIZE,
+};
 use crate::wire::per_column::PerColumnRecord;
 use crate::wire::record::{Record, decode_record_into};
 use crate::wire::record_header::RecordHeader;
@@ -127,6 +129,39 @@ impl Default for Chain {
             record_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
+}
+
+/// Knobs for [`Chain::skim_banks_with`].
+#[derive(Debug, Clone, Copy)]
+pub struct SkimOptions {
+    /// Write only the kept banks' schemas into the output dictionary rather
+    /// than copying the input's whole dictionary. Default `true`: a 274-schema
+    /// dictionary attached to a two-bank file is misleading about what the
+    /// file contains, and `bank_occupancy` would report banks that are not
+    /// there.
+    pub prune_dict: bool,
+}
+
+impl Default for SkimOptions {
+    fn default() -> Self {
+        Self { prune_dict: true }
+    }
+}
+
+/// What [`Chain::skim_banks`] wrote, and what it had to drop to do it.
+#[derive(Debug, Clone)]
+pub struct SkimSummary {
+    /// Events, records and bytes written — as [`Chain::skim`] returns.
+    pub write: WriteSummary,
+    /// Bank names the patterns resolved to, in dictionary order.
+    pub kept: Vec<String>,
+    /// Structures dropped across every event. Zero means the patterns matched
+    /// everything the events actually contained.
+    pub dropped_structures: u64,
+    /// `(referrer, referent)` pairs where a kept bank carries a `pindex` into
+    /// a bank that was dropped. Such a join now yields an empty iterator with
+    /// no error, so this is the only way to learn it happened.
+    pub dangling_refs: Vec<(String, String)>,
 }
 
 impl Chain {
@@ -793,6 +828,151 @@ impl Chain {
             progress(written);
         }
         w.finish()
+    }
+
+    /// Copy the (filtered) chain to `dst` keeping **only the banks that match
+    /// `patterns`** — bank projection, the `hipoutils -filter` equivalent.
+    ///
+    /// [`Self::skim`] copies whole events; this rebuilds each event from the
+    /// structures you asked for. On a real CLAS12 DST that is the difference
+    /// between carrying 45 banks per event and carrying two: keeping
+    /// `REC::Particle` and `REC::Event` leaves **1.4% of the bytes**, a 72x
+    /// reduction, and the result scans correspondingly faster.
+    ///
+    /// Patterns are globs over the whole bank name — see [`BankPatterns`].
+    /// `REC::*` is a prefix, `*::Particle` spans `REC::`/`RECHB::`/`RECAI::`,
+    /// and a misspelled literal name is an error rather than an empty output.
+    ///
+    /// ```no_run
+    /// use oxihipo::{Chain, Compression};
+    ///
+    /// # fn main() -> oxihipo::Result<()> {
+    /// let summary = Chain::open("run.hipo")?
+    ///     .skim_banks("small.hipo", Compression::Lz4PerColumn, &["REC::Particle", "REC::Event"])?;
+    /// println!("{} events, {} bytes", summary.write.events, summary.write.bytes);
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Cross-bank references
+    ///
+    /// CLAS12 detector banks point at `REC::Particle` rows through a `pindex`
+    /// column. That index is a **within-event row number**, not a global id, and
+    /// projection never reorders, renumbers or partially drops rows inside a
+    /// bank it keeps — so a reference from a kept bank to another kept bank
+    /// stays valid with no rewriting.
+    ///
+    /// What does break is keeping a referrer while dropping its referent:
+    /// `rows_for_pindex` then yields an **empty iterator, with no error**.
+    /// [`SkimSummary::dangling_refs`] reports every such pair it saw, so this
+    /// is visible rather than silent. It is not fixed automatically — quietly
+    /// pulling `REC::Particle` into an output that asked for
+    /// `REC::Calorimeter` would make the size of the result depend on
+    /// invisible rules.
+    pub fn skim_banks(
+        &self,
+        dst: impl AsRef<Path>,
+        compression: Compression,
+        patterns: &[&str],
+    ) -> Result<SkimSummary> {
+        let pats = BankPatterns::from_slice(patterns)?;
+        self.skim_banks_with(dst, compression, &pats, SkimOptions::default(), |_| {})
+    }
+
+    /// [`Self::skim_banks`] with a pre-compiled pattern set, explicit
+    /// [`SkimOptions`], and a progress callback.
+    pub fn skim_banks_with(
+        &self,
+        dst: impl AsRef<Path>,
+        compression: Compression,
+        patterns: &BankPatterns,
+        opts: SkimOptions,
+        mut progress: impl FnMut(u64),
+    ) -> Result<SkimSummary> {
+        // Resolve against the dictionary first: this is what turns a typo into
+        // an error instead of a 0-byte output.
+        let kept_schemas = patterns.resolve(self.schemas())?;
+        let kept_ids: std::collections::HashSet<(u16, u8)> =
+            kept_schemas.iter().map(|s| (s.group(), s.item())).collect();
+        let kept: Vec<String> = kept_schemas.iter().map(|s| s.name().to_string()).collect();
+
+        let out_dict = if opts.prune_dict {
+            let mut d = Dict::new();
+            for s in &kept_schemas {
+                d.try_add((*s).clone())?;
+            }
+            d
+        } else {
+            self.schemas().clone()
+        };
+
+        let mut w = Writer::create(dst)
+            .schemas(&out_dict)
+            .tag_registry(self.tag_registry())
+            .compression(compression)
+            .build()?;
+
+        // Dangling references are a static property of the kept set, not of
+        // any event: a `pindex` in `FAMILY::X` indexes the *same family's*
+        // `FAMILY::Particle` bank. Resolve it once here rather than guessing
+        // per structure — an earlier version tested "dropped bank whose name
+        // ends in ::Particle", which reported `REC::Calorimeter` as dangling
+        // into `RECHB::Particle` even when `REC::Particle` was kept.
+        let dangling_refs: Vec<(String, String)> = kept_schemas
+            .iter()
+            .filter(|k| k.entries().iter().any(|e| e.name == "pindex"))
+            .filter_map(|k| {
+                let family = k.name().split("::").next()?;
+                let referent = format!("{family}::Particle");
+                // Only a *dropped* referent dangles; an absent one was never
+                // in the file to begin with.
+                let s = self.schemas().get(&referent)?;
+                (!kept_ids.contains(&(s.group(), s.item())))
+                    .then(|| (k.name().to_string(), referent))
+            })
+            .collect();
+
+        let mut dropped_structures = 0u64;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut written = 0u64;
+
+        for ev in self.events() {
+            let ev = ev?;
+            buf.clear();
+            // Copy the event header verbatim: it carries EH_TAG and the
+            // reserved word, and rebuilding it would silently drop both.
+            // EH_SIZE is patched below once the kept structures are known.
+            let head = ev.bytes();
+            if head.len() < EVENT_HEADER_SIZE {
+                continue;
+            }
+            buf.extend_from_slice(&head[..EVENT_HEADER_SIZE]);
+
+            for (h, data) in ev.structures() {
+                if kept_ids.contains(&(h.group, h.item)) {
+                    buf.extend_from_slice(&h.to_bytes());
+                    buf.extend_from_slice(data);
+                } else {
+                    dropped_structures += 1;
+                }
+            }
+
+            let total = u32::try_from(buf.len()).map_err(|_| HipoError::BankTooLarge {
+                schema: "projected event".into(),
+                size: buf.len(),
+                max: u32::MAX as usize,
+            })?;
+            buf[EH_SIZE..EH_SIZE + 4].copy_from_slice(&total.to_le_bytes());
+            w.append_raw(&buf)?;
+            written += 1;
+            progress(written);
+        }
+
+        Ok(SkimSummary {
+            write: w.finish()?,
+            kept,
+            dropped_structures,
+            dangling_refs,
+        })
     }
 
     /// Copy the (filtered) chain to `dst` like [`Self::skim`], but **retag**

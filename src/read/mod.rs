@@ -11,7 +11,7 @@ mod iter;
 mod occupancy;
 mod source;
 
-pub use chain::{Chain, ChainEventIter, ChainStats};
+pub use chain::{Chain, ChainEventIter, ChainStats, SkimOptions, SkimSummary};
 pub use columns::{ChainRecordSpan, ColumnBuffers, ColumnData, MaterializedColumn};
 pub use filter::Filter;
 pub use inner::ReadAt;

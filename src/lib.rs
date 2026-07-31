@@ -45,9 +45,10 @@ pub use crate::error::{HipoError, Result};
 pub use crate::event::{Bank, BankRow, Composite, Event, EventCtx, OwnedEvent};
 pub use crate::read::{
     BankOccupancy, Chain, ChainEventIter, ChainRecordSpan, ChainStats, ColumnBuffers, ColumnData,
-    EventIter, Filter, IntoSources, MaterializedColumn, Occupancy, ReadAt,
+    EventIter, Filter, IntoSources, MaterializedColumn, Occupancy, ReadAt, SkimOptions,
+    SkimSummary,
 };
-pub use crate::schema::{ColumnHandle, DataType, Dict, Schema, SchemaEntry};
+pub use crate::schema::{BankPatterns, ColumnHandle, DataType, Dict, Schema, SchemaEntry};
 pub use crate::tag::{TagRegistry, TagSet};
 pub use crate::write::{BankWriter, Compression, RowWriter, WriteSummary, Writer};
 // `Chain::file_header` returns a `&FileHeader` whose `endianness` field is an

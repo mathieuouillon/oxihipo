@@ -39,6 +39,7 @@ stored baseline; these do not.
 | `bench_event_tags` | the per-event tag read paths |
 | `bench_par` | `for_each` (shared atomic) vs `par_fold` (per-worker accumulator), each sequential and parallel |
 | `bench_random` | concurrent random-access `Chain::event` throughput across thread counts — the record-cache benchmark |
+| `project` | bank projection — writes a file keeping only the banks matching a pattern |
 | `show` | prints a file's dictionary, one schema and one bank through the `Display` impls |
 | `gen_synthetic` | writes a file of very cheap events, so `bench_par` measures API overhead rather than decode cost |
 
