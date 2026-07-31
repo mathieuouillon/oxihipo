@@ -33,6 +33,12 @@ version is below `1.0.0`, minor releases may contain breaking changes.
   `hipo-java`; the other nine are oxihipo extensions those readers reject as
   an unknown tag. The split-record *directory* stays LZ4 for every layout so
   tags 6 and 7 remain byte-compatible.
+- **Python: `compression=` takes the pair too** — `"<codec>+<layout>"`, e.g.
+  `"zstd+percolumn"` or `"zstd6+perbank"`. A bare codec means `perchunk`, and
+  the six older names still work and still mean the same thing
+  (`"lz4percolumn"` is `lz4hc+percolumn`, not `lz4+percolumn` — the split
+  codecs were always high-compression). An unknown name lists what is valid;
+  a zstd level outside 1-6 is an error rather than a silent clamp.
 
 ### Fixed
 
